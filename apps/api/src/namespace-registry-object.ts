@@ -21,19 +21,11 @@ import {
 } from "./repository-index.ts";
 
 /**
- * Every namespace in the installation, and the index of every repository, live
- * in this one Durable Object.
- *
- * Namespaces are a small, globally-unique index — allocating a slug has to be
- * a single serialized decision, and listing them has to see all of them — so
- * one SQLite-backed object holds the whole registry rather than one object per
- * namespace. Repository names are allocated the same way, and the index row
- * holds the pointer — a Durable Object id — to the `RepositoryObject` that
- * actually stores the repository. Repository *contents* stay out of here.
- *
- * The class is deliberately just an RPC shell: the queries live in
- * {@link NamespaceRegistry} and {@link RepositoryIndex}, over a drizzle
- * database this constructor happens to build from `ctx.storage`.
+ * Every namespace in the installation, and the index of every repository, in
+ * one Durable Object: allocating a slug or a repository name has to be a single
+ * serialized decision, and listing namespaces has to see all of them.
+ * Repository *contents* stay out of here — the index row only points at the
+ * `RepositoryObject` that holds them.
  */
 export class NamespaceRegistryObject extends DurableObject {
   readonly #db: DrizzleSqliteDODatabase;
@@ -47,10 +39,9 @@ export class NamespaceRegistryObject extends DurableObject {
     this.#registry = new NamespaceRegistry(this.#db);
     this.#repositories = new RepositoryIndex(this.#db);
 
-    // Migrations are applied by the object itself — there is no separate
-    // migration runner and no network-connected database to push to. Blocking
-    // concurrency here means no request can reach a half-migrated schema, even
-    // on the first request after an eviction.
+    // Each object migrates its own storage — there is no network-connected
+    // database to push to. Blocking means no request can reach a half-migrated
+    // schema, on first start or after an eviction.
     ctx.blockConcurrencyWhile(async () => {
       migrate(this.#db, migrations);
     });

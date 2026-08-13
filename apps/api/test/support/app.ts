@@ -15,13 +15,10 @@ import {
 
 /**
  * The `REPOSITORIES` binding, standing in for the Durable Object namespace.
- *
- * Each id gets a real {@link RepositoryStore} over its own in-memory storage
- * migrated from `drizzle/repository`, so the object side of a create is
- * exercised for real; only the RPC hop and Durable Object placement are
- * skipped. Which ids were minted and destroyed is recorded so tests can assert
- * that a rejected create leaves no object behind and a delete takes one with
- * it.
+ * Each id gets a real {@link RepositoryStore} over its own in-memory storage;
+ * only the RPC hop and Durable Object placement are skipped. Minted and
+ * destroyed ids are recorded so tests can assert that a rejected create leaves
+ * no object behind and a delete takes one with it.
  */
 export class FakeRepositoryObjects implements RepositoryObjects {
   readonly #storages = new Map<string, TestRepositoryStorage>();
@@ -58,7 +55,7 @@ export class FakeRepositoryObjects implements RepositoryObjects {
     return this.#destroyed;
   }
 
-  /** The ids that currently hold storage — an object that was created and not destroyed. */
+  /** The ids that still hold storage: created and not destroyed. */
   get liveIds(): readonly string[] {
     return [...this.#storages.keys()];
   }
@@ -92,10 +89,6 @@ export interface TestApp {
   readonly close: () => void;
 }
 
-/**
- * The whole API over one in-memory registry database and a set of in-memory
- * repository objects — the real routes, the real queries, the real migrations.
- */
 export const createTestApp = (): TestApp => {
   const registryDatabase = createTestDatabase();
   const registry = new NamespaceRegistry(registryDatabase.db);

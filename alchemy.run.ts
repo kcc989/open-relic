@@ -26,13 +26,6 @@ export const ApiWorker = Cloudflare.Worker("Api", {
   },
 });
 
-/**
- * The Worker's runtime bindings, derived from the stack declaration above.
- *
- * The API app types its Hono instance with this, so a binding can never drift
- * from the infrastructure that provisions it — adding an R2 bucket or a KV
- * namespace to `env` is immediately visible on `context.env` in the routes.
- */
 export type ApiEnv = Cloudflare.InferEnv<typeof ApiWorker>;
 
 export default Alchemy.Stack(

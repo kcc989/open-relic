@@ -1,7 +1,3 @@
-/**
- * The shared shape of a rejected parse: the caller turns `detail` into a `400`
- * problem document naming its own operation.
- */
 export type Rejected = { readonly ok: false; readonly detail: string };
 
 export type ParsedObject =
@@ -17,10 +13,7 @@ export const parseJsonObject = (payload: unknown): ParsedObject =>
     ? { ok: false, detail: "The request body must be a JSON object." }
     : { ok: true, value: payload as Record<string, unknown> };
 
-/**
- * An absent, null, or blank field parses to `null` — the API stores "no
- * description" one way rather than distinguishing it from an empty string.
- */
+/** Absent, null, and blank all parse to `null` — one spelling of "unset". */
 export const parseOptionalText = (
   value: unknown,
   field: string,

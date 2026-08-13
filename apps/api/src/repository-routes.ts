@@ -26,7 +26,6 @@ import {
   type Rejected,
 } from "./request-body.ts";
 
-/** Everything a create needs except the object id, which the route mints. */
 type NewRepository = Omit<CreateRepositoryCommand, "durableObjectId">;
 
 type ParsedCreate = { readonly ok: true; readonly command: NewRepository } | Rejected;
@@ -86,12 +85,6 @@ const repositoryLocation = (repository: Repository): string =>
 const noSuchRepository = (namespaceSlug: string, name: string): string =>
   `No repository named "${namespaceSlug}/${name}" exists.`;
 
-/**
- * Registers the repository endpoints from the contract manifest.
- *
- * Every route resolves a name through the index first; the repository object is
- * only reached for the operations that change what it stores.
- */
 export const registerRepositoryRoutes = (
   app: Hono<{ Bindings: ApiEnv }>,
   resolveIndex: (env: ApiEnv) => RepositoryIndexClient,
@@ -147,9 +140,7 @@ export const registerRepositoryRoutes = (
       );
     }
 
-    // The name is claimed; now give the object its Git state. Initialization is
-    // idempotent, so a retry after a failed round trip converges rather than
-    // resetting a repository that already answered for itself.
+    // The name is claimed; now give the object its Git state.
     await objects.get(durableObjectId).initialize({
       defaultBranch: outcome.repository.defaultBranch,
       createdAt: outcome.repository.createdAt,

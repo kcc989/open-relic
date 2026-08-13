@@ -14,20 +14,10 @@ export interface TestDatabase {
   readonly close: () => void;
 }
 
-/**
- * A repository object's storage: its SQL database and its KV side.
- *
- * They are one storage in a Durable Object, so the two are handed out together
- * and torn down together here as well.
- */
 export interface TestRepositoryStorage extends TestDatabase {
   readonly kv: SyncKv;
 }
 
-/**
- * A Map standing in for `ctx.storage.kv` — the synchronous KV API, which is a
- * plain string-keyed map with no semantics beyond `get`, `put`, and `delete`.
- */
 export const createTestKv = (): SyncKv => {
   const entries = new Map<string, string>();
 
@@ -43,17 +33,13 @@ export const createTestKv = (): SyncKv => {
 };
 
 /**
- * An in-memory drizzle database migrated from the same `drizzle/` folder the
- * matching Durable Object applies at startup.
- *
- * `bun:sqlite` and a Durable Object's storage are both synchronous SQLite, and
- * drizzle presents them through the same query builder, so the query classes
- * and the generated schema are exercised for real here — the only thing the
- * tests skip is the RPC hop.
+ * An in-memory database migrated from the same `drizzle/` folder the matching
+ * Durable Object applies at startup, so the queries and the generated schema
+ * are exercised for real — the only thing the tests skip is the RPC hop.
  *
  * Foreign keys are enabled explicitly because Durable Object SQLite enforces
- * them and `bun:sqlite` does not by default; without the pragma the tests
- * would be looser than production.
+ * them and `bun:sqlite` does not; without the pragma the tests would be looser
+ * than production.
  */
 const createDatabase = (
   durableObject: "registry" | "repository",

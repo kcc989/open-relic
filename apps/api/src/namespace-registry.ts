@@ -15,32 +15,22 @@ export interface CreateNamespaceCommand {
 }
 
 /**
- * A taken slug is a normal outcome, not an exception. Returning it as data
- * keeps the failure typed across the Durable Object RPC boundary, where a
- * thrown error would arrive as an opaque string.
+ * A taken slug is data, not an exception: a thrown error would arrive across
+ * the Durable Object RPC boundary as an opaque string.
  */
 export type CreateNamespaceOutcome =
   | { readonly created: true; readonly namespace: Namespace }
   | { readonly created: false; readonly reason: "slug-taken" };
 
 /**
- * Deleting a namespace takes its repositories with it. The object ids of the
- * repositories that were dropped come back so the caller can destroy their
- * storage; the index row and the object it points at are removed by different
- * layers, and only the caller holds the `REPOSITORIES` binding.
+ * The dropped repositories' object ids come back so the caller can destroy
+ * their storage — only it holds the `REPOSITORIES` binding.
  */
 export interface DeleteNamespaceOutcome {
   readonly deleted: boolean;
   readonly repositoryObjectIds: readonly string[];
 }
 
-/**
- * The registry as a caller sees it: the Durable Object's RPC surface.
- *
- * A `DurableObjectStub<NamespaceRegistryObject>` satisfies this, and so does a
- * bare {@link NamespaceRegistry} over a local drizzle database, which is how
- * the routes are tested without a Workers runtime.
- */
 export interface NamespaceRegistryClient {
   readonly createNamespace: (
     command: CreateNamespaceCommand,
@@ -58,11 +48,9 @@ const toNamespace = (row: NamespaceRow): Namespace => ({
 });
 
 /**
- * The namespace registry's behavior, over any drizzle SQLite database.
- *
  * {@link NamespaceRegistryObject} is a thin Durable Object shell around this
- * class, which is what lets the tests drive the real implementation — the same
- * queries against the same generated migrations — without a Workers runtime.
+ * class, which is what lets the tests run the real queries against the real
+ * migrations without a Workers runtime.
  */
 export class NamespaceRegistry {
   readonly #db: SyncSqliteDatabase;
@@ -72,8 +60,8 @@ export class NamespaceRegistry {
   }
 
   /**
-   * `ON CONFLICT DO NOTHING ... RETURNING` makes claiming a slug one
-   * statement, so two concurrent creates cannot both observe it as free.
+   * `ON CONFLICT DO NOTHING ... RETURNING` claims a slug in one statement, so
+   * two concurrent creates cannot both observe it as free.
    */
   async createNamespace(
     command: CreateNamespaceCommand,
@@ -115,10 +103,8 @@ export class NamespaceRegistry {
   }
 
   /**
-   * Removes a namespace and every repository indexed under it, in one
-   * transaction so a caller can never observe repositories orphaned from their
-   * namespace. Repositories go first: the index row is the child of the
-   * namespace row.
+   * One transaction, so repositories are never observable orphaned from their
+   * namespace. Repositories go first: the index row is the child.
    */
   async deleteNamespace(slug: string): Promise<DeleteNamespaceOutcome> {
     return this.#db.transaction((tx): DeleteNamespaceOutcome => {

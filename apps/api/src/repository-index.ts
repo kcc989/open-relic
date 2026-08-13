@@ -21,9 +21,8 @@ export interface CreateRepositoryCommand {
 }
 
 /**
- * Neither a missing namespace nor a taken name is exceptional, so both are
- * returned as data — a thrown error would arrive at the Worker as an opaque
- * string across the Durable Object RPC boundary.
+ * Both are data, not exceptions: a thrown error would arrive at the Worker as
+ * an opaque string across the Durable Object RPC boundary.
  */
 export type CreateRepositoryOutcome =
   | { readonly created: true; readonly repository: Repository }
@@ -32,18 +31,11 @@ export type CreateRepositoryOutcome =
       readonly reason: "name-taken" | "namespace-missing";
     };
 
-/**
- * A repository's entry in the index, with the pointer the API hides.
- */
 export interface RepositoryPointer {
   readonly repository: Repository;
   readonly durableObjectId: string;
 }
 
-/**
- * The index as a caller sees it: part of the registry Durable Object's RPC
- * surface, alongside {@link NamespaceRegistryClient}.
- */
 export interface RepositoryIndexClient {
   readonly createRepository: (
     command: CreateRepositoryCommand,
@@ -70,12 +62,10 @@ const toRepository = (row: RepositoryRow): Repository => ({
 });
 
 /**
- * The repository index's behavior, over any drizzle SQLite database.
- *
- * It shares a database with {@link NamespaceRegistry} — one registry object
- * holds both — so a repository can be checked against its namespace and
- * inserted in one transaction, and listing a namespace is one query rather
- * than a fan-out of RPCs to every repository object.
+ * Shares a database with `NamespaceRegistry` — one registry object holds both —
+ * so a repository can be checked against its namespace and inserted in one
+ * transaction, and listing a namespace is one query rather than a fan-out of
+ * RPCs to every repository object.
  */
 export class RepositoryIndex {
   readonly #db: SyncSqliteDatabase;
@@ -85,9 +75,8 @@ export class RepositoryIndex {
   }
 
   /**
-   * Claims a name inside a namespace. The namespace check and the insert share
-   * a transaction because they are two statements: without it a namespace
-   * deleted in between would leave a repository pointing at nothing.
+   * The namespace check and the insert share a transaction: without it a
+   * namespace deleted in between would leave a repository pointing at nothing.
    *
    * The driver is synchronous, so the statements are executed with `.all()`
    * rather than awaited — a transaction that yielded would commit before its
@@ -128,10 +117,7 @@ export class RepositoryIndex {
     });
   }
 
-  /**
-   * Returns `null` when the namespace itself does not exist, which the API
-   * answers differently from a namespace that simply owns no repositories.
-   */
+  /** `null` is a missing namespace; `[]` is one that owns no repositories. */
   async listRepositories(
     namespaceSlug: string,
   ): Promise<readonly Repository[] | null> {
@@ -176,9 +162,8 @@ export class RepositoryIndex {
   }
 
   /**
-   * Drops the index entry and hands back the object id it pointed at, so the
-   * caller can destroy the repository object's storage. Returns `null` when
-   * there was no such repository.
+   * Hands back the object id the dropped entry pointed at, so the caller can
+   * destroy its storage. `null` when there was no such repository.
    */
   async deleteRepository(
     namespaceSlug: string,
