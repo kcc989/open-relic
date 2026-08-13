@@ -1,0 +1,14 @@
+{
+  "name": "@open-relic/api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@open-relic/contracts": "workspace:*",
+    "effect": "4.0.0-rc.108",
+    "hono": "4.13.1"
+  }
+}
