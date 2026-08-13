@@ -42,8 +42,8 @@ behavior that has not been built at all rather than behavior built differently:
 |              | Open Relic today                      | Artifacts                                                 |
 | ------------ | ------------------------------------- | --------------------------------------------------------- |
 | Namespaces   | created and deleted explicitly        | created implicitly with the first repo; list and get only |
-| Contents     | routes registered, answer `501`       | serve refs, log, objects, and files                       |
-| Fork, import | routes registered, answer `501`       | copy and mirror repositories                              |
+| Contents     | routes registered, answer `501`       | serve log, objects, and files                             |
+| Fork, import | routes registered, answer `501`       | copy repositories and import one remote branch            |
 | `source`     | always `null` — nothing writes it yet | set by import                                             |
 
 These closed with the reshaping of the REST surface and repo-scoped token
@@ -53,11 +53,12 @@ documents, the contents path spellings, token creation on the namespace, `202`
 with `{id}` on repository delete, the `id`/`read_only` repository fields, and
 real token issue, list, revoke, expiry, scope, and Git credential checks.
 
-`refs` and `archive/*` are ours, not theirs. Extensions are allowed — an
-installation may serve more than Artifacts does — but never at the cost of a
-documented behavior, and never on a path Artifacts has spoken for. Explicit
-namespace create and delete are the other extension, and they sit on methods
-Artifacts does not define for those paths.
+`refs` and `archive/*` are ours, not theirs, and will be removed rather than
+maintained as a second content API. Ref discovery remains on Git upload-pack,
+and clients create archives after fetching or mounting a working tree.
+Extensions are allowed — an installation may serve more than Artifacts does —
+but never at the cost of documented behavior. Explicit namespace create and
+delete remain extensions on methods Artifacts does not define for those paths.
 
 ## The base path
 
@@ -85,6 +86,10 @@ to choose; only the `/git/:namespace/:repo.git` path shape has to match, and it
 already does. An installation builds it from the host the request arrived on, so
 it advertises whatever host the client actually reached it at.
 
-Artifacts' documented limits are the ones worth designing against: 10 GB per
-repository, 1 TB per account, 2,000 requests per 10 seconds per namespace for the
-control plane and per artifact for Git.
+Artifacts documents 10 GB per repository, 1 TB per account, and request-rate
+limits. Those capacity policies are not part of the wire shape. The initial Open
+Relic release deliberately uses a fixed 4 GB logical repository quota so one
+repository, its retained deltas, and its metadata fit in one 10 GB SQLite-backed
+Durable Object. It does not reproduce Artifacts' request-rate limits. Raising
+the repository quota requires a later storage-layout decision rather than a
+configuration switch that the current layout cannot honor.
