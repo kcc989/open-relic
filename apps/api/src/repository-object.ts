@@ -1,9 +1,6 @@
 import { ERROR_CODES } from "@open-relic/contracts";
 import { DurableObject } from "cloudflare:workers";
-import {
-  drizzle,
-  type DrizzleSqliteDODatabase,
-} from "drizzle-orm/durable-sqlite";
+import { drizzle, type DrizzleSqliteDODatabase } from "drizzle-orm/durable-sqlite";
 import { migrate } from "drizzle-orm/durable-sqlite/migrator";
 
 import migrations from "../drizzle/repository/migrations.js";
@@ -57,9 +54,7 @@ export class RepositoryObject extends DurableObject {
    * the Worker buffering it, and the outcome comes back as bytes plus the two
    * facts the registry needs.
    */
-  receivePack(
-    body: ReadableStream<Uint8Array>,
-  ): Promise<ReceivePackOutcome> {
+  receivePack(body: ReadableStream<Uint8Array>): Promise<ReceivePackOutcome> {
     return this.#store.receivePack(body);
   }
 

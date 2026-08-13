@@ -46,12 +46,7 @@ export const TREE_MODE = "40000";
 /** A submodule. The commit it names lives in another repository, not ours. */
 export const GITLINK_MODE = "160000";
 
-const modeIs = (
-  bytes: Uint8Array,
-  from: number,
-  to: number,
-  mode: string,
-): boolean => {
+const modeIs = (bytes: Uint8Array, from: number, to: number, mode: string): boolean => {
   if (to - from !== mode.length) {
     return false;
   }
@@ -126,10 +121,7 @@ const commitHeader = (bytes: Uint8Array): CommitHeader => {
 const commitLinks = (bytes: Uint8Array): readonly ObjectLink[] => {
   const { tree, parents } = commitHeader(bytes);
 
-  return [
-    { oid: tree, type: "tree" },
-    ...parents.map((oid) => ({ oid, type: "commit" as const })),
-  ];
+  return [{ oid: tree, type: "tree" }, ...parents.map((oid) => ({ oid, type: "commit" as const }))];
 };
 
 const tagLinks = (bytes: Uint8Array): readonly ObjectLink[] => {
@@ -193,10 +185,7 @@ const treeLinks = (bytes: Uint8Array): readonly ObjectLink[] => {
  * The objects this one names that we insist on holding. Not everything it
  * references — see the note at the top of this file about blobs.
  */
-export const linksToVerify = (
-  type: ObjectType,
-  bytes: Uint8Array,
-): readonly ObjectLink[] => {
+export const linksToVerify = (type: ObjectType, bytes: Uint8Array): readonly ObjectLink[] => {
   switch (type) {
     case "commit":
       return commitLinks(bytes);
@@ -209,8 +198,7 @@ export const linksToVerify = (
   }
 };
 
-export const commitParents = (bytes: Uint8Array): readonly string[] =>
-  commitHeader(bytes).parents;
+export const commitParents = (bytes: Uint8Array): readonly string[] => commitHeader(bytes).parents;
 
 export interface WalkOptions {
   /**

@@ -10,6 +10,8 @@
     "alchemy.run.ts",
     "drizzle.config.ts",
     "drizzle.repository.config.ts",
+    "oxfmt.config.ts",
+    "oxlint.config.ts",
     "apps/*/src/**/*.ts",
     "apps/*/test/**/*.ts",
     "apps/*/types/**/*.d.ts",

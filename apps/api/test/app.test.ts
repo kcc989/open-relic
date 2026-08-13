@@ -14,7 +14,7 @@ const app = createApp();
 describe("health", () => {
   test("reports that the worker is running", async () => {
     const response = await app.request("http://local.test/healthz");
-    const body = (await response.json()) as Record<string, unknown>;
+    const body = await response.json();
 
     expect(response.status).toBe(200);
     expect(body).toEqual({

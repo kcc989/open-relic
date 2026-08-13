@@ -16,8 +16,7 @@ export const PKT_LINE_LENGTH_BYTES = 4;
  */
 export const PKT_LINE_MAX_BYTES = 65520;
 
-export const PKT_LINE_MAX_PAYLOAD_BYTES =
-  PKT_LINE_MAX_BYTES - PKT_LINE_LENGTH_BYTES;
+export const PKT_LINE_MAX_PAYLOAD_BYTES = PKT_LINE_MAX_BYTES - PKT_LINE_LENGTH_BYTES;
 
 export const FLUSH_PKT_TEXT = "0000";
 
@@ -29,7 +28,7 @@ export const FLUSH_PKT_TEXT = "0000";
 export const flushPkt = (): Uint8Array => encoder.encode(FLUSH_PKT_TEXT);
 
 export const pktLine = (payload: Uint8Array | string): Uint8Array => {
-  const bytes = typeof payload === "string" ? encoder.encode(payload) : payload;
+  const bytes = payload instanceof Uint8Array ? payload : encoder.encode(payload);
 
   if (bytes.length > PKT_LINE_MAX_PAYLOAD_BYTES) {
     throw new RangeError(
@@ -49,9 +48,7 @@ export const pktLine = (payload: Uint8Array | string): Uint8Array => {
  * Pulls one line at a time from `lines`, so a response is never assembled in
  * memory and a generator upstream can encode as it reads.
  */
-export const pktLineStream = (
-  lines: Iterable<Uint8Array>,
-): ReadableStream<Uint8Array> => {
+export const pktLineStream = (lines: Iterable<Uint8Array>): ReadableStream<Uint8Array> => {
   const iterator = lines[Symbol.iterator]();
 
   return new ReadableStream<Uint8Array>({
@@ -110,9 +107,7 @@ export class PktLineReader {
 
   async next(): Promise<PktLine> {
     if (this.#handedOver) {
-      throw new PktLineError(
-        "The rest of this stream has already been handed over.",
-      );
+      throw new PktLineError("The rest of this stream has already been handed over.");
     }
 
     if (!(await this.#fill(PKT_LINE_LENGTH_BYTES))) {
@@ -132,9 +127,7 @@ export class PktLineReader {
     // `0001` and `0002` are protocol v2's delimiters and `0003` is nothing at
     // all. Push is v1 only, so none of them belong on this stream.
     if (length < PKT_LINE_LENGTH_BYTES) {
-      throw new PktLineError(
-        `A pkt-line length of ${length} has no meaning in this protocol.`,
-      );
+      throw new PktLineError(`A pkt-line length of ${length} has no meaning in this protocol.`);
     }
 
     if (length > PKT_LINE_MAX_BYTES) {
@@ -201,9 +194,7 @@ export class PktLineReader {
   }
 
   #declaredLength(): number {
-    const text = decoder.decode(
-      this.#buffer.subarray(0, PKT_LINE_LENGTH_BYTES),
-    );
+    const text = decoder.decode(this.#buffer.subarray(0, PKT_LINE_LENGTH_BYTES));
 
     if (!LENGTH_PATTERN.test(text)) {
       throw new PktLineError(`"${text}" is not a pkt-line length.`);

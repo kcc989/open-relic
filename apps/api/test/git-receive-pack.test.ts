@@ -14,9 +14,10 @@ const REPO = "http://local.test/git/acme/demo.git";
 const PUSH = `${REPO}/git-receive-pack`;
 const ADVERTISE = `${REPO}/info/refs?service=git-receive-pack`;
 
+// SAFETY: these tests only read ALLOW_ANONYMOUS_WRITE from the Worker env.
 const ANONYMOUS_WRITE_ALLOWED = {
   [ANONYMOUS_WRITE_VARIABLE]: "true",
-} as unknown as ApiEnv;
+} as ApiEnv;
 
 const README = blob("Anvil firmware\n");
 const ROOT = tree([treeEntry("README.md", README)]);
@@ -37,7 +38,11 @@ afterEach(() => {
 
 const post = (
   body: BodyInit | null,
-  options: { readonly url?: string; readonly env?: ApiEnv; readonly headers?: Record<string, string> } = {},
+  options: {
+    readonly url?: string;
+    readonly env?: ApiEnv;
+    readonly headers?: Record<string, string>;
+  } = {},
 ) =>
   harness.app.request(
     new Request(options.url ?? PUSH, {
@@ -63,22 +68,11 @@ describe("POST /git/:namespace/:repo.git/git-receive-pack", () => {
     const response = await createMain();
 
     expect(response.status).toBe(200);
-    expect(response.headers.get("content-type")).toBe(
-      "application/x-git-receive-pack-result",
-    );
-    expect(response.headers.get("cache-control")).toBe(
-      "no-cache, max-age=0, must-revalidate",
-    );
-    expect((await reportOf(response)).lines).toEqual([
-      "unpack ok",
-      `ok ${MAIN}`,
-    ]);
+    expect(response.headers.get("content-type")).toBe("application/x-git-receive-pack-result");
+    expect(response.headers.get("cache-control")).toBe("no-cache, max-age=0, must-revalidate");
+    expect((await reportOf(response)).lines).toEqual(["unpack ok", `ok ${MAIN}`]);
 
-    const advertisement = await harness.app.request(
-      ADVERTISE,
-      undefined,
-      ANONYMOUS_WRITE_ALLOWED,
-    );
+    const advertisement = await harness.app.request(ADVERTISE, undefined, ANONYMOUS_WRITE_ALLOWED);
     expect(await advertisement.text()).toContain(`${FIRST.oid} ${MAIN}\0`);
   });
 
@@ -108,9 +102,7 @@ describe("POST /git/:namespace/:repo.git/git-receive-pack", () => {
   });
 
   test("leaves the index alone when nothing was accepted", async () => {
-    await post(
-      pushBody({ commands: [{ oldOid: FIRST.oid, name: MAIN }] }),
-    );
+    await post(pushBody({ commands: [{ oldOid: FIRST.oid, name: MAIN }] }));
 
     const body = await envelope<{ last_push_at: string | null }>(
       await harness.app.request(`${NAMESPACES}/acme/repos/demo`),
@@ -122,9 +114,7 @@ describe("POST /git/:namespace/:repo.git/git-receive-pack", () => {
   test("rejects a delete per-ref rather than at the HTTP layer", async () => {
     // A push that Git can talk about is answered in Git's protocol; the
     // envelope is for requests that never reached a repository.
-    const response = await post(
-      pushBody({ commands: [{ oldOid: FIRST.oid, name: MAIN }] }),
-    );
+    const response = await post(pushBody({ commands: [{ oldOid: FIRST.oid, name: MAIN }] }));
 
     expect(response.status).toBe(200);
     expect((await reportOf(response)).lines).toEqual([
@@ -169,6 +159,7 @@ describe("POST /git/:namespace/:repo.git/git-receive-pack", () => {
 });
 
 describe("without the anonymous-write configuration", () => {
+  // SAFETY: an installation deployed without the variable is exactly this shape.
   const unconfigured = {} as ApiEnv;
 
   test("refuses the push", async () => {
@@ -202,11 +193,7 @@ describe("without the anonymous-write configuration", () => {
       { env: unconfigured },
     );
 
-    const advertisement = await harness.app.request(
-      ADVERTISE,
-      undefined,
-      ANONYMOUS_WRITE_ALLOWED,
-    );
+    const advertisement = await harness.app.request(ADVERTISE, undefined, ANONYMOUS_WRITE_ALLOWED);
     expect(await advertisement.text()).toContain("capabilities^{}");
   });
 });

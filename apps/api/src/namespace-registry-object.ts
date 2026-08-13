@@ -1,9 +1,6 @@
 import type { NamespaceInfo } from "@open-relic/contracts";
 import { DurableObject } from "cloudflare:workers";
-import {
-  drizzle,
-  type DrizzleSqliteDODatabase,
-} from "drizzle-orm/durable-sqlite";
+import { drizzle, type DrizzleSqliteDODatabase } from "drizzle-orm/durable-sqlite";
 import { migrate } from "drizzle-orm/durable-sqlite/migrator";
 
 import migrations from "../drizzle/registry/migrations.js";
@@ -53,9 +50,7 @@ export class NamespaceRegistryObject extends DurableObject {
     });
   }
 
-  createNamespace(
-    command: CreateNamespaceCommand,
-  ): Promise<CreateNamespaceOutcome> {
+  createNamespace(command: CreateNamespaceCommand): Promise<CreateNamespaceOutcome> {
     return this.#registry.createNamespace(command);
   }
 
@@ -71,9 +66,7 @@ export class NamespaceRegistryObject extends DurableObject {
     return this.#registry.deleteNamespace(slug);
   }
 
-  createRepository(
-    command: CreateRepositoryCommand,
-  ): Promise<CreateRepositoryOutcome> {
+  createRepository(command: CreateRepositoryCommand): Promise<CreateRepositoryOutcome> {
     return this.#repositories.createRepository(command);
   }
 
@@ -84,25 +77,15 @@ export class NamespaceRegistryObject extends DurableObject {
     return this.#repositories.listRepositories(namespaceSlug, query);
   }
 
-  getRepository(
-    namespaceSlug: string,
-    name: string,
-  ): Promise<RepositoryPointer | null> {
+  getRepository(namespaceSlug: string, name: string): Promise<RepositoryPointer | null> {
     return this.#repositories.getRepository(namespaceSlug, name);
   }
 
-  deleteRepository(
-    namespaceSlug: string,
-    name: string,
-  ): Promise<DeletedRepository | null> {
+  deleteRepository(namespaceSlug: string, name: string): Promise<DeletedRepository | null> {
     return this.#repositories.deleteRepository(namespaceSlug, name);
   }
 
-  recordPush(
-    namespaceSlug: string,
-    name: string,
-    record: PushRecord,
-  ): Promise<void> {
+  recordPush(namespaceSlug: string, name: string, record: PushRecord): Promise<void> {
     return this.#repositories.recordPush(namespaceSlug, name, record);
   }
 }

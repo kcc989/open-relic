@@ -13,8 +13,7 @@ import { ZERO_OID } from "../object.ts";
 import { flushPkt, pktLine, type PktLineReader } from "./pkt-line.ts";
 
 /** What a client reads the outcome of a push back as. */
-export const RECEIVE_PACK_RESULT_CONTENT_TYPE =
-  "application/x-git-receive-pack-result" as const;
+export const RECEIVE_PACK_RESULT_CONTENT_TYPE = "application/x-git-receive-pack-result" as const;
 
 export const REPORT_STATUS_CAPABILITY = "report-status";
 export const SIDE_BAND_64K_CAPABILITY = "side-band-64k";
@@ -47,11 +46,9 @@ export interface ReceivePackRequest {
   readonly capabilities: readonly string[];
 }
 
-export const isCreate = (command: ReceivePackCommand): boolean =>
-  command.oldOid === ZERO_OID;
+export const isCreate = (command: ReceivePackCommand): boolean => command.oldOid === ZERO_OID;
 
-export const isDelete = (command: ReceivePackCommand): boolean =>
-  command.newOid === ZERO_OID;
+export const isDelete = (command: ReceivePackCommand): boolean => command.newOid === ZERO_OID;
 
 /**
  * A push we could not read far enough into to blame a ref for. It carries
@@ -70,10 +67,16 @@ export class ReceivePackError extends Error {
 
 const COMMAND_PATTERN = /^([0-9a-f]{40}) ([0-9a-f]{40}) (.+)$/;
 
+/** `capabilities` is `null` on every line but the first, which is the only one that carries them. */
+interface ParsedCommandLine {
+  readonly command: ReceivePackCommand;
+  readonly capabilities: readonly string[] | null;
+}
+
 const parseCommandLine = (
   payload: Uint8Array,
   negotiated: readonly string[],
-): { command: ReceivePackCommand; capabilities: readonly string[] | null } => {
+): ParsedCommandLine => {
   const text = decoder.decode(payload).replace(/\n$/, "");
   const separator = text.indexOf("\0");
   const head = separator === -1 ? text : text.slice(0, separator);
@@ -87,10 +90,7 @@ const parseCommandLine = (
 
   const match = COMMAND_PATTERN.exec(head);
   if (match === null) {
-    throw new ReceivePackError(
-      `"${head}" is not a ref update command.`,
-      negotiated,
-    );
+    throw new ReceivePackError(`"${head}" is not a ref update command.`, negotiated);
   }
 
   return {
@@ -103,9 +103,7 @@ const parseCommandLine = (
  * Reads the command list and stops at its flush packet, leaving the reader
  * sitting on the pack that follows.
  */
-export const readReceivePackRequest = async (
-  lines: PktLineReader,
-): Promise<ReceivePackRequest> => {
+export const readReceivePackRequest = async (lines: PktLineReader): Promise<ReceivePackRequest> => {
   const commands: ReceivePackCommand[] = [];
   let capabilities: readonly string[] = [];
 
@@ -170,8 +168,17 @@ export interface ReceivePackReport {
  * newline in any of that would let a client forge status lines in the report it
  * is about to read, so the encoder is where they stop.
  */
-const oneLine = (text: string): string =>
-  text.replace(/[\u0000-\u001f\u007f]/g, " ").trim();
+const isControl = (code: number): boolean => code < 0x20 || code === 0x7f;
+
+const oneLine = (text: string): string => {
+  let flattened = "";
+
+  for (const character of text) {
+    flattened += isControl(character.charCodeAt(0)) ? " " : character;
+  }
+
+  return flattened.trim();
+};
 
 const bandLine = (band: number, payload: Uint8Array): Uint8Array =>
   pktLine(concat(Uint8Array.of(band), payload));
@@ -188,10 +195,7 @@ function* reportLines(report: ReceivePackReport): Generator<Uint8Array> {
   yield flushPkt();
 }
 
-function* resultLines(
-  report: ReceivePackReport,
-  sideband: boolean,
-): Generator<Uint8Array> {
+function* resultLines(report: ReceivePackReport, sideband: boolean): Generator<Uint8Array> {
   if (!sideband) {
     yield* reportLines(report);
     return;
@@ -225,9 +229,7 @@ export const receivePackResult = (
     return new Uint8Array(0);
   }
 
-  return concat(
-    ...resultLines(report, capabilities.includes(SIDE_BAND_64K_CAPABILITY)),
-  );
+  return concat(...resultLines(report, capabilities.includes(SIDE_BAND_64K_CAPABILITY)));
 };
 
 // ---------------------------------------------------------------------------

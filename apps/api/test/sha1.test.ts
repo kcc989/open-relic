@@ -7,16 +7,17 @@ const utf8 = (text: string): Uint8Array => new TextEncoder().encode(text);
 const subtleHex = async (bytes: Uint8Array): Promise<string> =>
   toHex(
     new Uint8Array(
-      await crypto.subtle.digest("SHA-1", bytes.slice() as unknown as BufferSource),
+      // SAFETY: a Uint8Array is a BufferSource; the lib type excludes SharedArrayBuffer.
+      await crypto.subtle.digest("SHA-1", bytes as BufferSource),
     ),
   );
 
 test("hashes the FIPS 180-4 sample vectors", () => {
   expect(sha1Hex(utf8(""))).toBe("da39a3ee5e6b4b0d3255bfef95601890afd80709");
   expect(sha1Hex(utf8("abc"))).toBe("a9993e364706816aba3e25717850c26c9cd0d89d");
-  expect(
-    sha1Hex(utf8("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")),
-  ).toBe("84983e441c3bd26ebaae4aa1f95129e5e54670f1");
+  expect(sha1Hex(utf8("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"))).toBe(
+    "84983e441c3bd26ebaae4aa1f95129e5e54670f1",
+  );
 });
 
 test("hashes a million repeated characters", () => {

@@ -24,8 +24,7 @@ const object = (type: ObjectType, bytes: Uint8Array): GitObject => ({
   bytes,
 });
 
-export const blob = (contents: string): GitObject =>
-  object("blob", encoder.encode(contents));
+export const blob = (contents: string): GitObject => object("blob", encoder.encode(contents));
 
 export const FILE_MODE = "100644";
 
@@ -52,10 +51,7 @@ export const tree = (entries: readonly TreeEntry[]): GitObject =>
       ...[...entries]
         .sort((left, right) => (left.name < right.name ? -1 : 1))
         .map((entry) =>
-          concat(
-            encoder.encode(`${entry.mode} ${entry.name}\0`),
-            fromHex(entry.oid),
-          ),
+          concat(encoder.encode(`${entry.mode} ${entry.name}\0`), fromHex(entry.oid)),
         ),
     ),
   );
@@ -81,10 +77,7 @@ export const commit = (options: {
     ),
   );
 
-export const tag = (options: {
-  readonly target: GitObject;
-  readonly name: string;
-}): GitObject =>
+export const tag = (options: { readonly target: GitObject; readonly name: string }): GitObject =>
   object(
     "tag",
     encoder.encode(

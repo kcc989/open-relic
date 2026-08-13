@@ -4,9 +4,7 @@ import { deflateSync } from "node:zlib";
 import { InflateError, Inflater } from "../src/inflate.ts";
 
 const deflate = (bytes: Uint8Array, level?: number): Uint8Array =>
-  new Uint8Array(
-    level === undefined ? deflateSync(bytes) : deflateSync(bytes, { level }),
-  );
+  new Uint8Array(level === undefined ? deflateSync(bytes) : deflateSync(bytes, { level }));
 
 const concat = (...parts: readonly Uint8Array[]): Uint8Array => {
   const total = parts.reduce((sum, part) => sum + part.length, 0);
@@ -20,11 +18,7 @@ const concat = (...parts: readonly Uint8Array[]): Uint8Array => {
 };
 
 /** Feeds the compressed bytes in fixed-size slices, the way a stream would. */
-const inflate = (
-  compressed: Uint8Array,
-  size: number,
-  chunkSize: number,
-): Inflater => {
+const inflate = (compressed: Uint8Array, size: number, chunkSize: number): Inflater => {
   const inflater = new Inflater(size);
 
   for (let at = 0; at < compressed.length && !inflater.done; at += chunkSize) {
@@ -104,7 +98,10 @@ test("a stream that stops early is truncated, not corrupt", () => {
   try {
     thrown();
   } catch (error) {
-    expect((error as InflateError).code).toBe("truncated");
+    expect(error).toBeInstanceOf(InflateError);
+    if (error instanceof InflateError) {
+      expect(error.code).toBe("truncated");
+    }
   }
 });
 
@@ -120,9 +117,7 @@ test("a stream that does not inflate to the promised size is rejected", () => {
   const bytes = sample(1_000, 17);
   const compressed = deflate(bytes);
 
-  expect(() => inflate(compressed, bytes.length + 1, 4_096)).toThrow(
-    /1000 bytes where 1001/,
-  );
+  expect(() => inflate(compressed, bytes.length + 1, 4_096)).toThrow(/1000 bytes where 1001/);
   expect(() => inflate(compressed, bytes.length - 1, 4_096)).toThrow(/overruns/);
 });
 

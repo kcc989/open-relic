@@ -1,4 +1,3 @@
-import { validateBranchName } from "@open-relic/contracts";
 import { asc, eq } from "drizzle-orm";
 
 import {
@@ -9,15 +8,8 @@ import {
 } from "./connectivity.ts";
 import type { SyncSqliteDatabase } from "./db/database.ts";
 import type { SyncKv } from "./db/kv.ts";
-import {
-  REPOSITORY_STATE_ID,
-  refs,
-  repositoryState,
-} from "./db/repository-schema.ts";
-import {
-  receivePackAdvertisementStream,
-  type AdvertisedRef,
-} from "./git/advertisement.ts";
+import { REPOSITORY_STATE_ID, refs, repositoryState } from "./db/repository-schema.ts";
+import { receivePackAdvertisementStream, type AdvertisedRef } from "./git/advertisement.ts";
 import { PktLineError, PktLineReader } from "./git/pkt-line.ts";
 import {
   REJECTIONS,
@@ -43,7 +35,6 @@ import {
   symbolicHead,
 } from "./head.ts";
 import { ObjectStore } from "./object-store.ts";
-import { ZERO_OID } from "./object.ts";
 import { PackError, readPack, type PackBase } from "./pack.ts";
 
 /** The Git side of a `git init --bare`; the registry owns naming. */
@@ -80,9 +71,7 @@ export interface RepositoryObjectClient {
   readonly initialize: (init: RepositoryInit) => Promise<RepositorySnapshot>;
   readonly describe: () => Promise<RepositorySnapshot | null>;
   readonly advertiseReceivePack: () => Promise<ReadableStream<Uint8Array>>;
-  readonly receivePack: (
-    body: ReadableStream<Uint8Array>,
-  ) => Promise<ReceivePackOutcome>;
+  readonly receivePack: (body: ReadableStream<Uint8Array>) => Promise<ReceivePackOutcome>;
   readonly destroy: () => Promise<void>;
 }
 
@@ -181,9 +170,7 @@ export class RepositoryStore {
    * reachable, so objects a failed push left behind are a storage cost rather
    * than a correctness problem — sweeping them is separate work.
    */
-  async receivePack(
-    body: ReadableStream<Uint8Array>,
-  ): Promise<ReceivePackOutcome> {
+  async receivePack(body: ReadableStream<Uint8Array>): Promise<ReceivePackOutcome> {
     const lines = new PktLineReader(body);
 
     let commands: readonly ReceivePackCommand[];
@@ -267,9 +254,7 @@ export class RepositoryStore {
       report: receivePackResult(
         {
           unpack: UNPACK_OK,
-          refs: commands.map(
-            (command, at) => rejections.get(at) ?? accepted(command.name),
-          ),
+          refs: commands.map((command, at) => rejections.get(at) ?? accepted(command.name)),
           messages,
         },
         capabilities,
@@ -346,11 +331,7 @@ export class RepositoryStore {
       return null;
     }
 
-    const verdict = await findAncestor(
-      command.newOid,
-      command.oldOid,
-      this.#objects,
-    );
+    const verdict = await findAncestor(command.newOid, command.oldOid, this.#objects);
 
     switch (verdict) {
       case "ancestor":
@@ -394,9 +375,7 @@ export class RepositoryStore {
     }
 
     const branch = only.slice(BRANCH_REF_PREFIX.length);
-    return formatHead(symbolicHead(branch)) === this.#kv.get(HEAD_KEY)
-      ? null
-      : branch;
+    return formatHead(symbolicHead(branch)) === this.#kv.get(HEAD_KEY) ? null : branch;
   }
 
   /**

@@ -11,9 +11,7 @@ import { ZERO_OID } from "../src/object.ts";
 const decoder = new TextDecoder();
 
 const advertise = (refs: readonly AdvertisedRef[]): string =>
-  [...receivePackAdvertisement(refs)]
-    .map((line) => decoder.decode(line))
-    .join("");
+  [...receivePackAdvertisement(refs)].map((line) => decoder.decode(line)).join("");
 
 const MAIN = "1a2b3c4d5e6f708192a3b4c5d6e7f80912345678";
 const TAG = "abcdef0123456789abcdef0123456789abcdef01";
@@ -55,9 +53,7 @@ describe("the receive-pack advertisement", () => {
       { name: "refs/tags/v1", oid: TAG },
     ]);
 
-    expect(body).toContain(
-      `${MAIN} refs/heads/main\0${RECEIVE_PACK_CAPABILITIES.join(" ")}\n`,
-    );
+    expect(body).toContain(`${MAIN} refs/heads/main\0${RECEIVE_PACK_CAPABILITIES.join(" ")}\n`);
     expect(body).toContain(`${TAG} refs/tags/v1\n`);
     expect(body).not.toContain("capabilities^{}");
     // One NUL in the whole advertisement: the capabilities separator.
@@ -65,16 +61,12 @@ describe("the receive-pack advertisement", () => {
   });
 
   test("ends with a flush", () => {
-    expect(advertise([{ name: "refs/heads/main", oid: MAIN }])).toEndWith(
-      "0000",
-    );
+    expect(advertise([{ name: "refs/heads/main", oid: MAIN }])).toEndWith("0000");
   });
 
   test("streams the same bytes it generates", async () => {
     const refs = [{ name: "refs/heads/main", oid: MAIN }];
 
-    expect(await new Response(receivePackAdvertisementStream(refs)).text()).toBe(
-      advertise(refs),
-    );
+    expect(await new Response(receivePackAdvertisementStream(refs)).text()).toBe(advertise(refs));
   });
 });

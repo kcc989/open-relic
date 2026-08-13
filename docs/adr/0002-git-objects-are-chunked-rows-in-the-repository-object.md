@@ -6,9 +6,9 @@ Git object bytes live in the repository's own Durable Object: metadata in a
 Drizzle SQL table, raw bytes in the synchronous KV API (`ctx.storage.kv`) under
 `o:<sha>:<n>`, split into 1.5 MiB chunks because Durable Object storage caps a
 key and value together at 2 MB. Cloudflare's own Artifacts does exactly this —
-*"Files are stored in the underlying Durable Object's SQLite database. Durable
+_"Files are stored in the underlying Durable Object's SQLite database. Durable
 Object storage has a 2MB max row size, so large Git objects are chunked and
-stored across multiple rows"* — and compatibility ([ADR-0001](./0001-wire-compatible-with-cloudflare-artifacts.md))
+stored across multiple rows"_ — and compatibility ([ADR-0001](./0001-wire-compatible-with-cloudflare-artifacts.md))
 makes their shape the one to follow.
 
 ## Considered options
@@ -36,7 +36,7 @@ double the writes to avoid garbage that a sweep can collect later.
 **Deltas are persisted alongside the resolved object**, with their base hash,
 even though nothing reads them until fetch lands. Artifacts does the same, and
 for the same reason: the delta passes through our hands exactly once, during the
-parse. Discarding it means a migration *and* re-deriving data from packs we no
+parse. Discarding it means a migration _and_ re-deriving data from packs we no
 longer keep.
 
 Objects are stored inflated rather than in the zlib form they arrived in. Reads

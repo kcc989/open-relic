@@ -10,7 +10,11 @@
  * The payload is opaque on purpose — it is base64url so it survives a query
  * string, and clients are expected to echo it back rather than read it.
  */
+import { Result, Schema } from "effect";
+
 export type CursorKey = Record<string, string>;
+
+const CursorKeySchema = Schema.Record(Schema.String, Schema.String);
 
 const toBase64Url = (text: string): string =>
   btoa(text).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
@@ -20,8 +24,7 @@ const fromBase64Url = (text: string): string => {
   return atob(padded + "=".repeat((4 - (padded.length % 4)) % 4));
 };
 
-export const encodeCursor = (key: CursorKey): string =>
-  toBase64Url(JSON.stringify(key));
+export const encodeCursor = (key: CursorKey): string => toBase64Url(JSON.stringify(key));
 
 /**
  * `null` for anything that is not a cursor this service minted. Callers turn
@@ -30,21 +33,12 @@ export const encodeCursor = (key: CursorKey): string =>
  * indistinguishable from the list actually having ended.
  */
 export const decodeCursor = (cursor: string): CursorKey | null => {
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(fromBase64Url(cursor));
+    const decoded = Schema.decodeUnknownResult(CursorKeySchema)(JSON.parse(fromBase64Url(cursor)));
+    return Result.isFailure(decoded) ? null : decoded.success;
   } catch {
     return null;
   }
-
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return null;
-  }
-  if (Object.values(parsed).some((value) => typeof value !== "string")) {
-    return null;
-  }
-
-  return parsed as CursorKey;
 };
 
 /** `%`, `_`, and the escape character itself are literals in a search term. */

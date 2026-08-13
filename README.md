@@ -104,12 +104,12 @@ Artifacts creates a namespace implicitly with its first repository and documents
 only list and get. Explicit create and delete are ours; they sit on methods
 Artifacts has not spoken for on those paths.
 
-| Endpoint | Behavior |
-| --- | --- |
-| `POST /namespaces` | `201` with a `Location` header, `409` if the slug is taken, `400` if the body is invalid |
-| `GET /namespaces?limit=&cursor=` | `200`, ordered by slug, with `result_info` |
-| `GET /namespaces/:namespace` | `200` or `404` |
-| `DELETE /namespaces/:namespace` | `200` with `{ "slug": … }` or `404`; takes the namespace's repositories with it |
+| Endpoint                         | Behavior                                                                                 |
+| -------------------------------- | ---------------------------------------------------------------------------------------- |
+| `POST /namespaces`               | `201` with a `Location` header, `409` if the slug is taken, `400` if the body is invalid |
+| `GET /namespaces?limit=&cursor=` | `200`, ordered by slug, with `result_info`                                               |
+| `GET /namespaces/:namespace`     | `200` or `404`                                                                           |
+| `DELETE /namespaces/:namespace`  | `200` with `{ "slug": … }` or `404`; takes the namespace's repositories with it          |
 
 The delete answers `200`, not the `202` a repository delete answers, because it
 really has finished: the index rows and the objects behind them are gone by the
@@ -156,12 +156,12 @@ schema change to be expressible. See
 `repositories.default_branch` stays what it already was — a denormalized copy
 that keeps listing a namespace one query.
 
-| Endpoint | Behavior |
-| --- | --- |
-| `POST /namespaces/:namespace/repos` | `200` with `{id, name, description, default_branch, remote, token}`, `404` if the namespace is unknown, `409` if the name is taken, `400` if the body is invalid |
-| `GET /namespaces/:namespace/repos?limit=&cursor=&search=&sort=&direction=` | `200` with `result_info`, `404` if the namespace is unknown |
-| `GET /namespaces/:namespace/repos/:repo` | `200` or `404` |
-| `DELETE /namespaces/:namespace/repos/:repo` | `202` with `{ "id": … }` or `404`; discards the repository object's storage |
+| Endpoint                                                                   | Behavior                                                                                                                                                         |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /namespaces/:namespace/repos`                                        | `200` with `{id, name, description, default_branch, remote, token}`, `404` if the namespace is unknown, `409` if the name is taken, `400` if the body is invalid |
+| `GET /namespaces/:namespace/repos?limit=&cursor=&search=&sort=&direction=` | `200` with `result_info`, `404` if the namespace is unknown                                                                                                      |
+| `GET /namespaces/:namespace/repos/:repo`                                   | `200` or `404`                                                                                                                                                   |
+| `DELETE /namespaces/:namespace/repos/:repo`                                | `202` with `{ "id": … }` or `404`; discards the repository object's storage                                                                                      |
 
 A create answers with a deliberately narrower shape than a list or get: the
 identity, the remote to clone from, and the one token it will not show again.
@@ -220,14 +220,14 @@ that failed to answer. Refs are advertised in byte order by full name, with the
 capabilities hung off the first line. `HEAD` is not advertised and annotated
 tags are not peeled — both belong to the upload-pack advertisement.
 
-| Capability | Why |
-| --- | --- |
-| `report-status` | Per-ref accept or reject, which is how a push reports anything at all |
-| `side-band-64k` | Progress and errors alongside the response |
-| `ofs-delta` | Offset deltas in the pack |
-| `no-thin` | Never send a delta whose base is not in the pack |
-| `object-format=sha1` | The only hash we store |
-| `agent=open-relic/<version>` | Identifies the server in a client's trace |
+| Capability                   | Why                                                                   |
+| ---------------------------- | --------------------------------------------------------------------- |
+| `report-status`              | Per-ref accept or reject, which is how a push reports anything at all |
+| `side-band-64k`              | Progress and errors alongside the response                            |
+| `ofs-delta`                  | Offset deltas in the pack                                             |
+| `no-thin`                    | Never send a delta whose base is not in the pack                      |
+| `object-format=sha1`         | The only hash we store                                                |
+| `agent=open-relic/<version>` | Identifies the server in a client's trace                             |
 
 `delete-refs`, `atomic`, `push-options`, and `report-status-v2` are deliberately
 absent: an unadvertised capability is how a client learns not to use one, and
@@ -309,20 +309,20 @@ a correctness problem; sweeping them is separate work.
 nor any way to force. A client that sends one anyway is told so rather than
 quietly ignored.
 
-| `ng` reason | When |
-| --- | --- |
-| `deleting a ref is not supported` | The new value is the zero id |
-| `non-fast-forward` | The old tip is not behind the new one |
-| `missing necessary objects` | The connectivity walk found a gap |
-| `the ref has moved since it was advertised` | The old value is not what we hold |
-| `funny refname` | Not under `refs/`, or not a name Git would create |
-| `n/a (unpacker error)` | The pack could not be read; `unpack` says why |
+| `ng` reason                                 | When                                              |
+| ------------------------------------------- | ------------------------------------------------- |
+| `deleting a ref is not supported`           | The new value is the zero id                      |
+| `non-fast-forward`                          | The old tip is not behind the new one             |
+| `missing necessary objects`                 | The connectivity walk found a gap                 |
+| `the ref has moved since it was advertised` | The old value is not what we hold                 |
+| `funny refname`                             | Not under `refs/`, or not a name Git would create |
+| `n/a (unpacker error)`                      | The pack could not be read; `unpack` says why     |
 
 HEAD retargets in exactly one case: the repository held no refs at all and the
 push created exactly one branch. That is `git init && git push -u origin master`
 against a repository created with a different default, where a HEAD naming a
 branch nobody will push is a repository no clone can check out. Any other push
-leaves it alone — which branch a repository is *for* is not a push's to decide
+leaves it alone — which branch a repository is _for_ is not a push's to decide
 once there is anything to decide between. The registry's `default_branch` and
 `last_push_at` are stamped afterwards, outside the transaction: they are copies
 for the REST surface, and a stamp that fails leaves them stale rather than
@@ -330,7 +330,7 @@ leaving a ref half-moved.
 
 The Worker's CPU ceiling is five minutes, which is what a first push of a real
 repository needs and what the fast-forward walk is budgeted against — proving a
-push is *not* a fast-forward means reading every commit the new tip reaches, so
+push is _not_ a fast-forward means reading every commit the new tip reaches, so
 it gives up after `FAST_FORWARD_COMMIT_BUDGET` commits and says so on the
 progress band rather than being killed mid-request.
 
@@ -361,17 +361,17 @@ directly — a pack four times longer is read with no more in flight. A rewrite
 that buffered the pack would pass every other test and lose the reason the store
 looks like this.
 
-| Module | What it is |
-| --- | --- |
-| `src/pack.ts` | The pack reader: entry headers, `ofs-delta` and `ref-delta` resolution, the trailing checksum |
-| `src/object-store.ts` | Objects as chunked rows, and the sink the pack is read into |
-| `src/connectivity.ts` | What a commit, tree, or tag names, and the walks that answer "is it all here" and "is this a fast-forward" |
-| `src/inflate.ts` | A resumable zlib decompressor |
-| `src/sha1.ts` | Incremental SHA-1 |
-| `src/delta.ts` | Git's copy/insert delta encoding |
-| `src/git/pkt-line.ts` | Git's framing, written and read — and the hand-off from the commands to the pack behind them |
-| `src/git/receive-pack.ts` | The push conversation: commands in, `report-status` out, and what this server accepts |
-| `src/repository-store.ts` | The order all of it happens in, and the transaction at the end |
+| Module                    | What it is                                                                                                 |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `src/pack.ts`             | The pack reader: entry headers, `ofs-delta` and `ref-delta` resolution, the trailing checksum              |
+| `src/object-store.ts`     | Objects as chunked rows, and the sink the pack is read into                                                |
+| `src/connectivity.ts`     | What a commit, tree, or tag names, and the walks that answer "is it all here" and "is this a fast-forward" |
+| `src/inflate.ts`          | A resumable zlib decompressor                                                                              |
+| `src/sha1.ts`             | Incremental SHA-1                                                                                          |
+| `src/delta.ts`            | Git's copy/insert delta encoding                                                                           |
+| `src/git/pkt-line.ts`     | Git's framing, written and read — and the hand-off from the commands to the pack behind them               |
+| `src/git/receive-pack.ts` | The push conversation: commands in, `report-status` out, and what this server accepts                      |
+| `src/repository-store.ts` | The order all of it happens in, and the transaction at the end                                             |
 
 `DecompressionStream("deflate")` cannot do this job: a pack is a concatenation
 of zlib streams with no length prefix, so the next object can only be found by
@@ -397,9 +397,9 @@ Failures are a `PackError` with a code, and the code is a Git fact rather than
 an HTTP one — the object owns Git and the Worker owns the envelope, so push maps
 these onto Artifacts' documented codes when it lands:
 
-| `PackError.code` | Artifacts code |
-| --- | --- |
-| `object-too-large` | `memoryLimit` (10402) |
+| `PackError.code`                                                                                                   | Artifacts code         |
+| ------------------------------------------------------------------------------------------------------------------ | ---------------------- |
+| `object-too-large`                                                                                                 | `memoryLimit` (10402)  |
 | `not-a-pack`, `unsupported-version`, `truncated`, `checksum-mismatch`, `trailing-bytes`, `missing-base`, `corrupt` | `invalidInput` (10100) |
 
 That `memoryLimit` exists in Artifacts' own list is the corroboration for the
@@ -416,10 +416,10 @@ here, so it runs against both delta encodings.
 Drizzle is the ORM. Each Durable Object class has its own storage, so each has
 its own schema, its own drizzle-kit config, and its own migrations folder:
 
-| Object | Schema | Migrations |
-| --- | --- | --- |
-| `NamespaceRegistryObject` | `apps/api/src/db/registry-schema.ts` | `apps/api/drizzle/registry/` |
-| `RepositoryObject` | `apps/api/src/db/repository-schema.ts` | `apps/api/drizzle/repository/` |
+| Object                    | Schema                                 | Migrations                     |
+| ------------------------- | -------------------------------------- | ------------------------------ |
+| `NamespaceRegistryObject` | `apps/api/src/db/registry-schema.ts`   | `apps/api/drizzle/registry/`   |
+| `RepositoryObject`        | `apps/api/src/db/repository-schema.ts` | `apps/api/drizzle/repository/` |
 
 ```sh
 bun run db:generate    # drizzle-kit generate, once per config

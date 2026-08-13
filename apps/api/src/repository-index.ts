@@ -1,14 +1,11 @@
-import type {
-  RepoInfo,
-  RepoSortField,
-  SortDirection,
-} from "@open-relic/contracts";
+import type { RepoInfo, RepoSortField, SortDirection } from "@open-relic/contracts";
 import { and, asc, desc, eq, sql, type SQL } from "drizzle-orm";
 
 import type { SyncSqliteDatabase } from "./db/database.ts";
 import {
   namespaces,
   repositories,
+  type NewRepositoryRow,
   type RepositoryRow,
 } from "./db/registry-schema.ts";
 import { escapeLikePattern } from "./pagination.ts";
@@ -84,9 +81,7 @@ export interface PushRecord {
 }
 
 export interface RepositoryIndexClient {
-  readonly createRepository: (
-    command: CreateRepositoryCommand,
-  ) => Promise<CreateRepositoryOutcome>;
+  readonly createRepository: (command: CreateRepositoryCommand) => Promise<CreateRepositoryOutcome>;
   readonly listRepositories: (
     namespaceSlug: string,
     query: ListRepositoriesQuery,
@@ -99,11 +94,7 @@ export interface RepositoryIndexClient {
     namespaceSlug: string,
     name: string,
   ) => Promise<DeletedRepository | null>;
-  readonly recordPush: (
-    namespaceSlug: string,
-    name: string,
-    record: PushRecord,
-  ) => Promise<void>;
+  readonly recordPush: (namespaceSlug: string, name: string, record: PushRecord) => Promise<void>;
 }
 
 const toRepository = (row: RepositoryRow): RepoInfo => ({
@@ -118,8 +109,7 @@ const toRepository = (row: RepositoryRow): RepoInfo => ({
   read_only: row.readOnly,
 });
 
-const newRepositoryId = (): string =>
-  `repo_${crypto.randomUUID().replaceAll("-", "")}`;
+const newRepositoryId = (): string => `repo_${crypto.randomUUID().replaceAll("-", "")}`;
 
 /**
  * `last_push_at` is the one nullable sort key, and NULL breaks the tuple
@@ -175,9 +165,7 @@ export class RepositoryIndex {
    * rather than awaited — a transaction that yielded would commit before its
    * body finished.
    */
-  async createRepository(
-    command: CreateRepositoryCommand,
-  ): Promise<CreateRepositoryOutcome> {
+  async createRepository(command: CreateRepositoryCommand): Promise<CreateRepositoryOutcome> {
     return this.#db.transaction((tx): CreateRepositoryOutcome => {
       const namespace = tx
         .select({ slug: namespaces.slug })
@@ -245,9 +233,7 @@ export class RepositoryIndex {
 
     if (query.search !== null) {
       const pattern = `%${escapeLikePattern(query.search)}%`;
-      filters.push(
-        sql`${repositories.name} LIKE ${pattern} ESCAPE '\\'`,
-      );
+      filters.push(sql`${repositories.name} LIKE ${pattern} ESCAPE '\\'`);
     }
 
     if (query.cursor !== null) {
@@ -284,19 +270,11 @@ export class RepositoryIndex {
     };
   }
 
-  async getRepository(
-    namespaceSlug: string,
-    name: string,
-  ): Promise<RepositoryPointer | null> {
+  async getRepository(namespaceSlug: string, name: string): Promise<RepositoryPointer | null> {
     const rows = await this.#db
       .select()
       .from(repositories)
-      .where(
-        and(
-          eq(repositories.namespaceSlug, namespaceSlug),
-          eq(repositories.name, name),
-        ),
-      )
+      .where(and(eq(repositories.namespaceSlug, namespaceSlug), eq(repositories.name, name)))
       .limit(1);
 
     const row = rows[0];
@@ -310,18 +288,10 @@ export class RepositoryIndex {
    * destroy its storage, and the public id the response answers with. `null`
    * when there was no such repository.
    */
-  async deleteRepository(
-    namespaceSlug: string,
-    name: string,
-  ): Promise<DeletedRepository | null> {
+  async deleteRepository(namespaceSlug: string, name: string): Promise<DeletedRepository | null> {
     const deleted = await this.#db
       .delete(repositories)
-      .where(
-        and(
-          eq(repositories.namespaceSlug, namespaceSlug),
-          eq(repositories.name, name),
-        ),
-      )
+      .where(and(eq(repositories.namespaceSlug, namespaceSlug), eq(repositories.name, name)))
       .returning({
         id: repositories.id,
         durableObjectId: repositories.durableObjectId,
@@ -338,24 +308,18 @@ export class RepositoryIndex {
    * surface's benefit. A stamp that fails leaves `last_push_at` stale rather
    * than leaving a ref half-moved.
    */
-  async recordPush(
-    namespaceSlug: string,
-    name: string,
-    record: PushRecord,
-  ): Promise<void> {
+  async recordPush(namespaceSlug: string, name: string, record: PushRecord): Promise<void> {
+    // Built in statements rather than spread conditionally: `default_branch`
+    // is left alone on all but the one push that retargets HEAD, and an
+    // omission is easier to read as an omission than as an empty object.
+    const stamp: Partial<NewRepositoryRow> = { lastPushAt: record.pushedAt };
+    if (record.defaultBranch !== null) {
+      stamp.defaultBranch = record.defaultBranch;
+    }
+
     await this.#db
       .update(repositories)
-      .set({
-        lastPushAt: record.pushedAt,
-        ...(record.defaultBranch === null
-          ? {}
-          : { defaultBranch: record.defaultBranch }),
-      })
-      .where(
-        and(
-          eq(repositories.namespaceSlug, namespaceSlug),
-          eq(repositories.name, name),
-        ),
-      );
+      .set(stamp)
+      .where(and(eq(repositories.namespaceSlug, namespaceSlug), eq(repositories.name, name)));
   }
 }

@@ -29,9 +29,7 @@ const holding = (...objects: readonly GitObject[]): ObjectSource => {
   return {
     read: async (oid): Promise<PackBase | null> => {
       const found = held.get(oid);
-      return found === undefined
-        ? null
-        : { type: found.type, bytes: found.bytes };
+      return found === undefined ? null : { type: found.type, bytes: found.bytes };
     },
   };
 };
@@ -65,9 +63,7 @@ describe("what an object names", () => {
   test("a tree names its subtrees and not its blobs", () => {
     // Blobs are the expensive half — most of the objects and nearly all of the
     // bytes — and a pack that parsed completely already implies them.
-    expect(linksToVerify("tree", ROOT.bytes)).toEqual([
-      { oid: DOCS.oid, type: "tree" },
-    ]);
+    expect(linksToVerify("tree", ROOT.bytes)).toEqual([{ oid: DOCS.oid, type: "tree" }]);
   });
 
   test("a tree does not name a submodule's commit, which lives elsewhere", () => {
@@ -76,24 +72,20 @@ describe("what an object names", () => {
       treeEntry("docs", DOCS),
     ]);
 
-    expect(linksToVerify("tree", withSubmodule.bytes)).toEqual([
-      { oid: DOCS.oid, type: "tree" },
-    ]);
+    expect(linksToVerify("tree", withSubmodule.bytes)).toEqual([{ oid: DOCS.oid, type: "tree" }]);
   });
 
   test("a tag names what it points at, with the type it declares", () => {
-    expect(linksToVerify("tag", tag({ target: SECOND, name: "v1" }).bytes)).toEqual(
-      [{ oid: SECOND.oid, type: "commit" }],
-    );
+    expect(linksToVerify("tag", tag({ target: SECOND, name: "v1" }).bytes)).toEqual([
+      { oid: SECOND.oid, type: "commit" },
+    ]);
   });
 
   test("a blob names nothing", () => {
     expect(linksToVerify("blob", README.bytes)).toEqual([]);
   });
 
-  const unreadable: ReadonlyArray<
-    readonly [string, "commit" | "tag", string]
-  > = [
+  const unreadable: ReadonlyArray<readonly [string, "commit" | "tag", string]> = [
     ["a commit with no tree", "commit", "author nobody\n\nno tree here\n"],
     ["a commit whose tree is not an object id", "commit", "tree nope\n\n"],
     ["a tag naming no object", "tag", "type commit\n\n"],
@@ -106,17 +98,12 @@ describe("what an object names", () => {
 
   for (const [label, type, contents] of unreadable) {
     test(`refuses to guess at ${label}`, () => {
-      expect(() => linksToVerify(type, encoder.encode(contents))).toThrow(
-        ObjectParseError,
-      );
+      expect(() => linksToVerify(type, encoder.encode(contents))).toThrow(ObjectParseError);
     });
   }
 
   test("refuses a tree entry that ends mid-object-id", () => {
-    const truncated = concat(
-      encoder.encode("100644 README.md\0"),
-      new Uint8Array(7),
-    );
+    const truncated = concat(encoder.encode("100644 README.md\0"), new Uint8Array(7));
 
     expect(() => linksToVerify("tree", truncated)).toThrow(ObjectParseError);
   });
@@ -150,12 +137,8 @@ describe("the connectivity walk", () => {
   test("walks through an annotated tag to what it tags", async () => {
     const annotated = tag({ target: FIRST, name: "v1" });
 
-    expect(await walk(annotated.oid, holding(annotated, FIRST, ROOT))).toBe(
-      DOCS.oid,
-    );
-    expect(
-      await walk(annotated.oid, holding(annotated, FIRST, ROOT, DOCS)),
-    ).toBeNull();
+    expect(await walk(annotated.oid, holding(annotated, FIRST, ROOT))).toBe(DOCS.oid);
+    expect(await walk(annotated.oid, holding(annotated, FIRST, ROOT, DOCS))).toBeNull();
   });
 
   test("an object we cannot parse is as good as missing", async () => {
@@ -230,11 +213,7 @@ describe("the fast-forward check", () => {
     const merge = commit({ tree: ROOT, parents: [sideways, SECOND] });
 
     expect(
-      await findAncestor(
-        merge.oid,
-        FIRST.oid,
-        holding(merge, sideways, SECOND, FIRST, ROOT, DOCS),
-      ),
+      await findAncestor(merge.oid, FIRST.oid, holding(merge, sideways, SECOND, FIRST, ROOT, DOCS)),
     ).toBe("ancestor");
   });
 
@@ -255,8 +234,6 @@ describe("the fast-forward check", () => {
   test("gives up rather than reading a history without end", async () => {
     // Proving *no* means reading everything the new tip reaches; the ceiling is
     // what makes that a rejection we can explain instead of a Worker we lose.
-    expect(await findAncestor(SECOND.oid, "d".repeat(40), history, 1)).toBe(
-      "budget-exhausted",
-    );
+    expect(await findAncestor(SECOND.oid, "d".repeat(40), history, 1)).toBe("budget-exhausted");
   });
 });

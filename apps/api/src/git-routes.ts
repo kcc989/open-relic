@@ -14,10 +14,7 @@ import {
 } from "./git/advertisement.ts";
 import type { AuthorizeGitRequest } from "./git/authorization.ts";
 import { RECEIVE_PACK_RESULT_CONTENT_TYPE } from "./git/receive-pack.ts";
-import type {
-  RepositoryIndexClient,
-  RepositoryPointer,
-} from "./repository-index.ts";
+import type { RepositoryIndexClient, RepositoryPointer } from "./repository-index.ts";
 
 /** Just enough of Hono's context for the preamble both Git routes share. */
 type GitRouteContext = {
@@ -47,12 +44,7 @@ export interface GitRouteDependencies {
 
 export const registerGitRoutes = (
   app: Hono<{ Bindings: ApiEnv }>,
-  {
-    repositoryIndex,
-    repositoryObjects,
-    authorize,
-    notImplemented,
-  }: GitRouteDependencies,
+  { repositoryIndex, repositoryObjects, authorize, notImplemented }: GitRouteDependencies,
 ): void => {
   /**
    * What every Git request does before it can do anything else: refuse the
@@ -62,9 +54,7 @@ export const registerGitRoutes = (
    * an unauthorized client can learn (ADR-0004), and the lookup is what keeps
    * an unknown name from waking a repository object.
    */
-  const resolve = async (
-    context: GitRouteContext,
-  ): Promise<RepositoryPointer | Response> => {
+  const resolve = async (context: GitRouteContext): Promise<RepositoryPointer | Response> => {
     const namespace = context.req.param("namespace");
     const name = repositoryNameFromPath(context.req.param("repo"));
 
@@ -79,14 +69,9 @@ export const registerGitRoutes = (
       return forbidden(decision.detail);
     }
 
-    const found = await repositoryIndex(context.env).getRepository(
-      namespace,
-      name,
-    );
+    const found = await repositoryIndex(context.env).getRepository(namespace, name);
 
-    return (
-      found ?? notFound(`No repository named "${namespace}/${name}" exists.`)
-    );
+    return found ?? notFound(`No repository named "${namespace}/${name}" exists.`);
   };
 
   // Both advertisements share a path and are told apart by the service Git
@@ -140,9 +125,7 @@ export const registerGitRoutes = (
 
     const body = context.req.raw.body;
     if (body === null) {
-      return invalidInput(
-        "A push must carry its ref update commands as a body.",
-      );
+      return invalidInput("A push must carry its ref update commands as a body.");
     }
 
     // Everything Git-shaped happens inside the object: it is what the push

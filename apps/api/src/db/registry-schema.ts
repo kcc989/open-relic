@@ -1,10 +1,4 @@
-import {
-  integer,
-  primaryKey,
-  sqliteTable,
-  text,
-  uniqueIndex,
-} from "drizzle-orm/sqlite-core";
+import { integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 /**
  * The slug is the primary key, which is what makes claiming one a single
@@ -52,9 +46,7 @@ export const repositories = sqliteTable(
     description: text("description"),
     defaultBranch: text("default_branch").notNull(),
     /** Refused by the Git surface on push; the REST surface only reports it. */
-    readOnly: integer("read_only", { mode: "boolean" })
-      .notNull()
-      .default(false),
+    readOnly: integer("read_only", { mode: "boolean" }).notNull().default(false),
     /** The remote an import copied from; `null` for a repository created here. */
     source: text("source"),
     createdAt: text("created_at")

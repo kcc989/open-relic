@@ -44,21 +44,19 @@ const CODE_LENGTH_ORDER = [
 
 /** Match lengths for literal/length symbols 257–285, and their extra bits. */
 const LENGTH_BASE = [
-  3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67,
-  83, 99, 115, 131, 163, 195, 227, 258,
+  3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131,
+  163, 195, 227, 258,
 ] as const;
 const LENGTH_EXTRA = [
-  0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5,
-  5, 5, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
 ] as const;
 
 const DISTANCE_BASE = [
-  1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769,
-  1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
+  1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049,
+  3073, 4097, 6145, 8193, 12289, 16385, 24577,
 ] as const;
 const DISTANCE_EXTRA = [
-  0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11,
-  11, 12, 12, 13, 13,
+  0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13,
 ] as const;
 
 /**
@@ -131,13 +129,7 @@ const adler32 = (bytes: Uint8Array): number => {
 
 type Step = "continue" | "wait" | "done";
 
-type State =
-  | "zlib-header"
-  | "block-header"
-  | "stored"
-  | "compressed"
-  | "checksum"
-  | "done";
+type State = "zlib-header" | "block-header" | "stored" | "compressed" | "checksum" | "done";
 
 export class Inflater {
   readonly #output: Uint8Array;
@@ -424,8 +416,7 @@ export class Inflater {
     if (distanceCode >= DISTANCE_BASE.length) {
       throw new InflateError("corrupt", "Invalid distance symbol.");
     }
-    const distance =
-      DISTANCE_BASE[distanceCode]! + this.#bits(DISTANCE_EXTRA[distanceCode]!);
+    const distance = DISTANCE_BASE[distanceCode]! + this.#bits(DISTANCE_EXTRA[distanceCode]!);
 
     if (distance > this.#outputAt) {
       throw new InflateError("corrupt", "A match reaches before the output.");
@@ -449,11 +440,7 @@ export class Inflater {
   #readChecksum(): Step {
     this.#align();
     const stored =
-      ((this.#bits(8) << 24) |
-        (this.#bits(8) << 16) |
-        (this.#bits(8) << 8) |
-        this.#bits(8)) >>>
-      0;
+      ((this.#bits(8) << 24) | (this.#bits(8) << 16) | (this.#bits(8) << 8) | this.#bits(8)) >>> 0;
 
     if (stored !== adler32(this.#output.subarray(0, this.#outputAt))) {
       throw new InflateError("corrupt", "The zlib checksum does not match.");

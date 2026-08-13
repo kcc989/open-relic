@@ -83,12 +83,19 @@ const TRAILER_BYTES = 20;
 const OID_BYTES = 20;
 const SUPPORTED_VERSIONS = new Set([2, 3]);
 
-/** Pack entry type numbers; 5 is reserved and 6/7 are the two delta forms. */
-const ENTRY_TYPES: Readonly<Record<number, ObjectType>> = {
-  1: "commit",
-  2: "tree",
-  3: "blob",
-  4: "tag",
+const objectTypeForKind = (kind: number): ObjectType | undefined => {
+  switch (kind) {
+    case 1:
+      return "commit";
+    case 2:
+      return "tree";
+    case 3:
+      return "blob";
+    case 4:
+      return "tag";
+    default:
+      return undefined;
+  }
 };
 const OFS_DELTA = 6;
 const REF_DELTA = 7;
@@ -281,10 +288,7 @@ const readBackOffset = async (stream: PackStream): Promise<number> => {
   return offset;
 };
 
-const inflateEntry = async (
-  stream: PackStream,
-  size: number,
-): Promise<Uint8Array> => {
+const inflateEntry = async (stream: PackStream, size: number): Promise<Uint8Array> => {
   const inflater = new Inflater(size);
 
   try {
@@ -322,10 +326,7 @@ export const readPack = async (
 
   const version = view.getUint32(4);
   if (!SUPPORTED_VERSIONS.has(version)) {
-    throw new PackError(
-      "unsupported-version",
-      `Pack version ${version} is not supported.`,
-    );
+    throw new PackError("unsupported-version", `Pack version ${version} is not supported.`);
   }
 
   const objectCount = view.getUint32(8);
@@ -359,7 +360,7 @@ export const readPack = async (
       continue;
     }
 
-    const type = ENTRY_TYPES[kind];
+    const type = objectTypeForKind(kind);
     if (type === undefined) {
       throw new PackError("corrupt", `Pack entry type ${kind} is not a thing.`);
     }

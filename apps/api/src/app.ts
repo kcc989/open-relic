@@ -16,19 +16,12 @@ import {
 } from "./bindings.ts";
 import { notFound, notImplemented } from "./envelope.ts";
 import { registerGitRoutes } from "./git-routes.ts";
-import {
-  allowAnonymousWrite,
-  type AuthorizeGitRequest,
-} from "./git/authorization.ts";
+import { allowAnonymousWrite, type AuthorizeGitRequest } from "./git/authorization.ts";
 import type { NamespaceRegistryClient } from "./namespace-registry.ts";
 import { registerNamespaceRoutes } from "./namespace-routes.ts";
 import type { RepositoryIndexClient } from "./repository-index.ts";
 import { registerRepositoryRoutes } from "./repository-routes.ts";
-import {
-  EndpointNotImplemented,
-  GitServiceStub,
-  type GitService,
-} from "./stub-service.ts";
+import { EndpointNotImplemented, GitServiceStub, type GitService } from "./stub-service.ts";
 
 export interface AppDependencies {
   readonly gitService?: GitService;
@@ -47,9 +40,7 @@ export const createApp = ({
 }: AppDependencies = {}) => {
   const app = new Hono<{ Bindings: ApiEnv }>();
 
-  app.get("/healthz", (context) =>
-    context.json({ service: "open-relic", status: "ok" }),
-  );
+  app.get("/healthz", (context) => context.json({ service: "open-relic", status: "ok" }));
 
   registerNamespaceRoutes(app, namespaceRegistry, repositoryObjects);
   registerRepositoryRoutes(app, repositoryIndex, repositoryObjects);

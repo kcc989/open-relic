@@ -29,16 +29,11 @@ const read = (body: Uint8Array) => {
 describe("the ref update commands a client sends", () => {
   test("reads a create, with the capabilities off the first line", async () => {
     const { request } = read(
-      commandLines([{ newOid: MAIN, name: "refs/heads/main" }], [
-        "report-status",
-        "side-band-64k",
-      ]),
+      commandLines([{ newOid: MAIN, name: "refs/heads/main" }], ["report-status", "side-band-64k"]),
     );
 
     expect(await request).toEqual({
-      commands: [
-        { oldOid: ZERO_OID, newOid: MAIN, name: "refs/heads/main" },
-      ],
+      commands: [{ oldOid: ZERO_OID, newOid: MAIN, name: "refs/heads/main" }],
       capabilities: ["report-status", "side-band-64k"],
     });
   });
@@ -66,9 +61,7 @@ describe("the ref update commands a client sends", () => {
   });
 
   test("reads a delete, which spells its new value as the zero id", async () => {
-    const { request } = read(
-      commandLines([{ oldOid: MAIN, name: "refs/heads/gone" }], []),
-    );
+    const { request } = read(commandLines([{ oldOid: MAIN, name: "refs/heads/gone" }], []));
 
     expect((await request).commands[0]).toEqual({
       oldOid: MAIN,
@@ -95,18 +88,13 @@ describe("the ref update commands a client sends", () => {
   });
 
   test("a body that ends before its flush is a truncated push", async () => {
-    const withoutFlush = commandLines(
-      [{ newOid: MAIN, name: "refs/heads/main" }],
-      [],
-    ).slice(0, -4);
+    const withoutFlush = commandLines([{ newOid: MAIN, name: "refs/heads/main" }], []).slice(0, -4);
 
     expect(read(withoutFlush).request).rejects.toThrow(ReceivePackError);
   });
 
   test("a line that is not a command is rejected rather than skipped", async () => {
-    const { request } = read(
-      encoder.encode("0013not a command at\n0000"),
-    );
+    const { request } = read(encoder.encode("0013not a command at\n0000"));
 
     expect(request).rejects.toThrow(ReceivePackError);
   });
@@ -115,10 +103,7 @@ describe("the ref update commands a client sends", () => {
 describe("report-status", () => {
   const report: ReceivePackReport = {
     unpack: "ok",
-    refs: [
-      accepted("refs/heads/main"),
-      rejected("refs/heads/old", "non-fast-forward"),
-    ],
+    refs: [accepted("refs/heads/main"), rejected("refs/heads/old", "non-fast-forward")],
     messages: ["something worth saying"],
   };
 
@@ -142,17 +127,10 @@ describe("report-status", () => {
   });
 
   test("multiplexes onto band 1 when the client asked for side-band-64k", () => {
-    const body = receivePackResult(report, [
-      "report-status",
-      "side-band-64k",
-    ]);
+    const body = receivePackResult(report, ["report-status", "side-band-64k"]);
 
     expect(readReport(body)).toEqual({
-      lines: [
-        "unpack ok",
-        "ok refs/heads/main",
-        "ng refs/heads/old non-fast-forward",
-      ],
+      lines: ["unpack ok", "ok refs/heads/main", "ng refs/heads/old non-fast-forward"],
       progress: ["something worth saying"],
     });
   });
@@ -199,9 +177,7 @@ describe("report-status", () => {
       ["report-status"],
     );
 
-    expect(decoder.decode(body)).toContain(
-      "unpack The pack's trailing checksum does not match.\n",
-    );
+    expect(decoder.decode(body)).toContain("unpack The pack's trailing checksum does not match.\n");
   });
 });
 
@@ -226,9 +202,7 @@ describe("what this server accepts", () => {
   });
 
   test("lets an update from what we hold through", () => {
-    expect(
-      screen([{ oldOid: MAIN, newOid: NEXT, name: "refs/heads/main" }]),
-    ).toEqual([null]);
+    expect(screen([{ oldOid: MAIN, newOid: NEXT, name: "refs/heads/main" }])).toEqual([null]);
   });
 
   const refused: ReadonlyArray<
@@ -254,11 +228,7 @@ describe("what this server accepts", () => {
       { oldOid: NEXT, newOid: MAIN, name: "refs/heads/main" },
       REJECTIONS.stale,
     ],
-    [
-      "a name outside refs/",
-      { newOid: NEXT, name: "main" },
-      REJECTIONS.funnyRefname,
-    ],
+    ["a name outside refs/", { newOid: NEXT, name: "main" }, REJECTIONS.funnyRefname],
   ];
 
   for (const [label, command, reason] of refused) {
@@ -278,8 +248,6 @@ describe("what this server accepts", () => {
 
   test("lets a ref that is already where the push wants it through", () => {
     // Git's own receive-pack answers a no-op with `ok`.
-    expect(
-      screen([{ oldOid: MAIN, newOid: MAIN, name: "refs/heads/main" }]),
-    ).toEqual([null]);
+    expect(screen([{ oldOid: MAIN, newOid: MAIN, name: "refs/heads/main" }])).toEqual([null]);
   });
 });

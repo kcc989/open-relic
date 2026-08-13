@@ -50,9 +50,7 @@ const command = (
 });
 
 /** Artifacts' documented defaults, which is what a bare list means. */
-const query = (
-  overrides: Partial<ListRepositoriesQuery> = {},
-): ListRepositoriesQuery => ({
+const query = (overrides: Partial<ListRepositoriesQuery> = {}): ListRepositoriesQuery => ({
   limit: 50,
   cursor: null,
   search: null,
@@ -114,9 +112,7 @@ describe("createRepository", () => {
   test("mints an opaque id that is not the object id", async () => {
     const store = await withNamespace();
 
-    const outcome = await store.repositories.createRepository(
-      command("acme", "demo", "object-42"),
-    );
+    const outcome = await store.repositories.createRepository(command("acme", "demo", "object-42"));
 
     expect(outcome.created).toBe(true);
     if (!outcome.created) {
@@ -145,18 +141,18 @@ describe("createRepository", () => {
       readOnly: true,
     });
 
-    expect(
-      (await store.repositories.getRepository("acme", "demo"))?.repository
-        .read_only,
-    ).toBe(true);
+    expect((await store.repositories.getRepository("acme", "demo"))?.repository.read_only).toBe(
+      true,
+    );
   });
 
   test("refuses a namespace that does not exist", async () => {
     const store = registry();
 
-    expect(
-      await store.repositories.createRepository(command("nope", "demo")),
-    ).toEqual({ created: false, reason: "namespace-missing" });
+    expect(await store.repositories.createRepository(command("nope", "demo"))).toEqual({
+      created: false,
+      reason: "namespace-missing",
+    });
   });
 
   test("refuses a name already taken in the namespace", async () => {
@@ -170,10 +166,9 @@ describe("createRepository", () => {
     expect(second).toEqual({ created: false, reason: "name-taken" });
     // The first repository keeps its object; the rejected create's id is
     // never stored, so nothing points at it.
-    expect(
-      (await store.repositories.getRepository("acme", "demo"))
-        ?.durableObjectId,
-    ).toBe("object-acme-demo");
+    expect((await store.repositories.getRepository("acme", "demo"))?.durableObjectId).toBe(
+      "object-acme-demo",
+    );
   });
 
   test("allows the same name in two namespaces", async () => {
@@ -184,14 +179,10 @@ describe("createRepository", () => {
       description: null,
     });
 
-    expect(
-      (await store.repositories.createRepository(command("acme", "demo")))
-        .created,
-    ).toBe(true);
-    expect(
-      (await store.repositories.createRepository(command("other", "demo")))
-        .created,
-    ).toBe(true);
+    expect((await store.repositories.createRepository(command("acme", "demo"))).created).toBe(true);
+    expect((await store.repositories.createRepository(command("other", "demo"))).created).toBe(
+      true,
+    );
   });
 });
 
@@ -208,34 +199,31 @@ describe("reads", () => {
     }
     await store.repositories.createRepository(command("other", "elsewhere"));
 
-    expect(
-      (await byName(store, "acme", { sort: "name", direction: "asc" })) ?? [],
-    ).toEqual(["demo", "middle", "zeta"]);
+    expect((await byName(store, "acme", { sort: "name", direction: "asc" })) ?? []).toEqual([
+      "demo",
+      "middle",
+      "zeta",
+    ]);
   });
 
   test("distinguishes an empty namespace from a missing one", async () => {
     const store = await withNamespace();
 
-    expect(
-      await store.repositories.listRepositories("acme", query()),
-    ).toEqual({ repositories: [], next: null });
-    expect(
-      await store.repositories.listRepositories("nope", query()),
-    ).toBeNull();
+    expect(await store.repositories.listRepositories("acme", query())).toEqual({
+      repositories: [],
+      next: null,
+    });
+    expect(await store.repositories.listRepositories("nope", query())).toBeNull();
   });
 
   test("resolves a name to the object that holds the repository", async () => {
     const store = await withNamespace();
-    await store.repositories.createRepository(
-      command("acme", "demo", "object-42"),
-    );
+    await store.repositories.createRepository(command("acme", "demo", "object-42"));
 
-    expect(await store.repositories.getRepository("acme", "demo")).toMatchObject(
-      {
-        durableObjectId: "object-42",
-        repository: { name: "demo" },
-      },
-    );
+    expect(await store.repositories.getRepository("acme", "demo")).toMatchObject({
+      durableObjectId: "object-42",
+      repository: { name: "demo" },
+    });
   });
 
   test("returns null for an unknown repository", async () => {
@@ -254,9 +242,7 @@ describe("sorting", () => {
     return store;
   };
 
-  const cases: ReadonlyArray<
-    readonly [RepoSortField, SortDirection, readonly string[]]
-  > = [
+  const cases: ReadonlyArray<readonly [RepoSortField, SortDirection, readonly string[]]> = [
     ["name", "asc", ["alpha", "beta", "gamma"]],
     ["name", "desc", ["gamma", "beta", "alpha"]],
   ];
@@ -265,9 +251,7 @@ describe("sorting", () => {
     test(`orders by ${sort} ${direction}`, async () => {
       const store = await seeded();
 
-      expect(await byName(store, "acme", { sort, direction })).toEqual([
-        ...expected,
-      ]);
+      expect(await byName(store, "acme", { sort, direction })).toEqual([...expected]);
     });
   }
 
@@ -362,10 +346,7 @@ describe("paging", () => {
   test("does not hand back a position on an exactly-full last page", async () => {
     const store = await seeded("alpha", "beta");
 
-    const page = await store.repositories.listRepositories(
-      "acme",
-      query({ limit: 2 }),
-    );
+    const page = await store.repositories.listRepositories("acme", query({ limit: 2 }));
 
     expect(page?.next).toBeNull();
   });
@@ -388,10 +369,7 @@ describe("paging", () => {
       }),
     );
 
-    expect(first?.repositories.map((repo) => repo.name)).toEqual([
-      "api-a",
-      "api-b",
-    ]);
+    expect(first?.repositories.map((repo) => repo.name)).toEqual(["api-a", "api-b"]);
     expect(second?.repositories.map((repo) => repo.name)).toEqual(["api-c"]);
   });
 });
@@ -399,9 +377,7 @@ describe("paging", () => {
 describe("deleteRepository", () => {
   test("hands back the ids it dropped", async () => {
     const store = await withNamespace();
-    const created = await store.repositories.createRepository(
-      command("acme", "demo", "object-42"),
-    );
+    const created = await store.repositories.createRepository(command("acme", "demo", "object-42"));
 
     const deleted = await store.repositories.deleteRepository("acme", "demo");
 
@@ -425,9 +401,7 @@ describe("recording a push", () => {
   };
 
   const demo = (store: ReturnType<typeof registry>) =>
-    store.repositories
-      .getRepository("acme", "demo")
-      .then((found) => found?.repository);
+    store.repositories.getRepository("acme", "demo").then((found) => found?.repository);
 
   test("stamps last_push_at, which was null until something was pushed", async () => {
     const store = await pushed();
@@ -478,23 +452,14 @@ describe("recording a push", () => {
 describe("deleting a namespace", () => {
   test("takes its repositories with it and names their objects", async () => {
     const store = await withNamespace();
-    await store.repositories.createRepository(
-      command("acme", "demo", "object-1"),
-    );
-    await store.repositories.createRepository(
-      command("acme", "other", "object-2"),
-    );
+    await store.repositories.createRepository(command("acme", "demo", "object-1"));
+    await store.repositories.createRepository(command("acme", "other", "object-2"));
 
     const outcome = await store.namespaces.deleteNamespace("acme");
 
     expect(outcome.deleted).toBe(true);
-    expect([...outcome.repositoryObjectIds].sort()).toEqual([
-      "object-1",
-      "object-2",
-    ]);
-    expect(
-      await store.repositories.listRepositories("acme", query()),
-    ).toBeNull();
+    expect([...outcome.repositoryObjectIds].sort()).toEqual(["object-1", "object-2"]);
+    expect(await store.repositories.listRepositories("acme", query())).toBeNull();
   });
 
   test("leaves another namespace's repositories alone", async () => {

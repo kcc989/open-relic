@@ -2,11 +2,7 @@ import { eq } from "drizzle-orm";
 
 import type { SyncSqliteDatabase } from "./db/database.ts";
 import type { SyncKv } from "./db/kv.ts";
-import {
-  objectDeltas,
-  objects,
-  type ObjectRow,
-} from "./db/repository-schema.ts";
+import { objectDeltas, objects, type ObjectRow } from "./db/repository-schema.ts";
 import type { PackBase, PackDelta, PackObject, PackSink } from "./pack.ts";
 
 /**
@@ -98,11 +94,7 @@ export class ObjectStore implements PackSink {
   }
 
   async describe(oid: string): Promise<ObjectRow | null> {
-    const rows = await this.#db
-      .select()
-      .from(objects)
-      .where(eq(objects.oid, oid))
-      .limit(1);
+    const rows = await this.#db.select().from(objects).where(eq(objects.oid, oid)).limit(1);
 
     return rows[0] ?? null;
   }
@@ -133,19 +125,11 @@ export class ObjectStore implements PackSink {
   #writeChunks(prefix: string, oid: string, bytes: Uint8Array): void {
     for (let index = 0; index * CHUNK_BYTES < bytes.length; index += 1) {
       const at = index * CHUNK_BYTES;
-      this.#kv.put<Uint8Array>(
-        chunkKey(prefix, oid, index),
-        bytes.slice(at, at + CHUNK_BYTES),
-      );
+      this.#kv.put<Uint8Array>(chunkKey(prefix, oid, index), bytes.slice(at, at + CHUNK_BYTES));
     }
   }
 
-  #readChunks(
-    prefix: string,
-    oid: string,
-    size: number,
-    count: number,
-  ): Uint8Array {
+  #readChunks(prefix: string, oid: string, size: number, count: number): Uint8Array {
     const bytes = new Uint8Array(size);
     let at = 0;
 
@@ -162,9 +146,7 @@ export class ObjectStore implements PackSink {
     }
 
     if (at !== size) {
-      throw new ObjectStoreError(
-        `Object ${oid} holds ${at} bytes where its row declares ${size}.`,
-      );
+      throw new ObjectStoreError(`Object ${oid} holds ${at} bytes where its row declares ${size}.`);
     }
 
     return bytes;

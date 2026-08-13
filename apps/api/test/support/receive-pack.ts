@@ -34,18 +34,14 @@ export const commandLines = (
     ...commands.map((command, at) => {
       const line = `${command.oldOid ?? ZERO_OID} ${command.newOid ?? ZERO_OID} ${command.name}`;
       return pktLine(
-        at === 0 && capabilities.length > 0
-          ? `${line}\0${capabilities.join(" ")}\n`
-          : `${line}\n`,
+        at === 0 && capabilities.length > 0 ? `${line}\0${capabilities.join(" ")}\n` : `${line}\n`,
       );
     }),
     flushPkt(),
   );
 
 /** A pack carrying exactly these objects, each whole rather than delta'd. */
-export const packOf = (
-  objects: readonly GitObject[],
-): Uint8Array<ArrayBuffer> =>
+export const packOf = (objects: readonly GitObject[]): Uint8Array<ArrayBuffer> =>
   buildPack(
     objects.map((object) => ({
       kind: "object" as const,
@@ -62,9 +58,7 @@ export const pushBody = (options: {
   readonly pack?: Uint8Array<ArrayBuffer>;
 }): Uint8Array<ArrayBuffer> => {
   const capabilities = options.capabilities ?? CLIENT_CAPABILITIES;
-  const pack =
-    options.pack ??
-    (options.objects === undefined ? null : packOf(options.objects));
+  const pack = options.pack ?? (options.objects === undefined ? null : packOf(options.objects));
 
   return pack === null
     ? commandLines(options.commands, capabilities)
@@ -78,8 +72,7 @@ export interface Report {
   readonly progress: readonly string[];
 }
 
-const asText = (bytes: Uint8Array): string =>
-  decoder.decode(bytes).replace(/\n$/, "");
+const asText = (bytes: Uint8Array): string => decoder.decode(bytes).replace(/\n$/, "");
 
 export const readReport = (body: Uint8Array): Report => {
   const outer = [...pktLines(body)];
@@ -110,10 +103,7 @@ function* pktLines(bytes: Uint8Array): Generator<Uint8Array> {
   let at = 0;
 
   while (at + 4 <= bytes.length) {
-    const length = Number.parseInt(
-      decoder.decode(bytes.subarray(at, at + 4)),
-      16,
-    );
+    const length = Number.parseInt(decoder.decode(bytes.subarray(at, at + 4)), 16);
 
     if (length === 0) {
       at += 4;

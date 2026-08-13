@@ -6,45 +6,35 @@ import {
   NAMESPACE_DISPLAY_NAME_MAX_LENGTH,
   describeNamespaceSlugViolation,
   validateNamespaceSlug,
-  type CreateNamespaceRequest,
   type DeleteNamespaceResult,
   type NamespaceInfo,
 } from "@open-relic/contracts";
+import { Schema } from "effect";
 import type { Hono } from "hono";
 
 import type { ApiEnv } from "../../../alchemy.run.ts";
 import type { RepositoryObjects } from "./bindings.ts";
 import { alreadyExists, invalidInput, notFound, ok, okList } from "./envelope.ts";
-import type {
-  CreateNamespaceCommand,
-  NamespaceRegistryClient,
-} from "./namespace-registry.ts";
+import type { CreateNamespaceCommand, NamespaceRegistryClient } from "./namespace-registry.ts";
 import { encodeCursor } from "./pagination.ts";
 import { parseCursorKey, parseLimit } from "./query.ts";
-import {
-  parseJsonObject,
-  parseOptionalText,
-  type Rejected,
-} from "./request-body.ts";
+import { decodeJson, parseOptionalText, type Json, type Rejected } from "./request-body.ts";
 
-type ParsedCreate =
-  | { readonly ok: true; readonly command: CreateNamespaceCommand }
-  | Rejected;
+type ParsedCreate = { readonly ok: true; readonly command: CreateNamespaceCommand } | Rejected;
 
-const parseCreateBody = (payload: unknown): ParsedCreate => {
-  const object = parseJsonObject(payload);
+const CreateNamespaceJson = Schema.Struct({
+  slug: Schema.String,
+  display_name: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  description: Schema.optionalKey(Schema.NullOr(Schema.String)),
+});
+
+const parseCreateBody = (payload: Json): ParsedCreate => {
+  const object = decodeJson(CreateNamespaceJson, payload);
   if (!object.ok) {
     return object;
   }
 
-  const body = object.value as Partial<
-    Record<keyof CreateNamespaceRequest, unknown>
-  >;
-  if (typeof body.slug !== "string") {
-    return { ok: false, detail: `"slug" must be a string.`, pointer: "/slug" };
-  }
-
-  const violation = validateNamespaceSlug(body.slug);
+  const violation = validateNamespaceSlug(object.value.slug);
   if (violation !== null) {
     return {
       ok: false,
@@ -54,7 +44,7 @@ const parseCreateBody = (payload: unknown): ParsedCreate => {
   }
 
   const displayName = parseOptionalText(
-    body.display_name,
+    object.value.display_name,
     "display_name",
     NAMESPACE_DISPLAY_NAME_MAX_LENGTH,
   );
@@ -63,7 +53,7 @@ const parseCreateBody = (payload: unknown): ParsedCreate => {
   }
 
   const description = parseOptionalText(
-    body.description,
+    object.value.description,
     "description",
     NAMESPACE_DESCRIPTION_MAX_LENGTH,
   );
@@ -74,8 +64,8 @@ const parseCreateBody = (payload: unknown): ParsedCreate => {
   return {
     ok: true,
     command: {
-      slug: body.slug,
-      displayName: displayName.value ?? body.slug,
+      slug: object.value.slug,
+      displayName: displayName.value ?? object.value.slug,
       description: description.value,
     },
   };
@@ -96,9 +86,10 @@ export const registerNamespaceRoutes = (
    * spoken for on this path.
    */
   app.post(NAMESPACES_PATH, async (context) => {
-    let payload: unknown;
+    let payload: Json;
     try {
-      payload = await context.req.json();
+      // SAFETY: req.json() is the JSON value at this HTTP boundary; Schema rejects the rest.
+      payload = (await context.req.json()) as Json;
     } catch {
       return invalidInput("The request body must be valid JSON.");
     }
@@ -108,14 +99,10 @@ export const registerNamespaceRoutes = (
       return invalidInput(parsed.detail, parsed.pointer);
     }
 
-    const outcome = await resolveRegistry(context.env).createNamespace(
-      parsed.command,
-    );
+    const outcome = await resolveRegistry(context.env).createNamespace(parsed.command);
 
     if (!outcome.created) {
-      return alreadyExists(
-        `The namespace "${parsed.command.slug}" already exists.`,
-      );
+      return alreadyExists(`The namespace "${parsed.command.slug}" already exists.`);
     }
 
     return ok(outcome.namespace, {
@@ -125,11 +112,7 @@ export const registerNamespaceRoutes = (
   });
 
   app.get(NAMESPACES_PATH, async (context) => {
-    const limit = parseLimit(
-      context.req.query("limit"),
-      LIST_DEFAULT_LIMIT,
-      LIST_MAX_LIMIT,
-    );
+    const limit = parseLimit(context.req.query("limit"), LIST_DEFAULT_LIMIT, LIST_MAX_LIMIT);
     if (!limit.ok) {
       return invalidInput(limit.detail);
     }
@@ -184,9 +167,7 @@ export const registerNamespaceRoutes = (
     // can reach.
     if (outcome.repositoryObjectIds.length > 0) {
       const objects = resolveObjects(context.env);
-      await Promise.all(
-        outcome.repositoryObjectIds.map((id) => objects.get(id).destroy()),
-      );
+      await Promise.all(outcome.repositoryObjectIds.map((id) => objects.get(id).destroy()));
     }
 
     return ok({ slug } satisfies DeleteNamespaceResult);

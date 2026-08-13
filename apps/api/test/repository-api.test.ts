@@ -9,7 +9,8 @@ import {
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { createTestApp, type TestApp } from "./support/app.ts";
-import { envelope, errorCode, result } from "./support/envelope.ts";
+import { envelope, errorCode, pageCursor, result } from "./support/envelope.ts";
+import type { Json } from "../src/request-body.ts";
 
 const NAMESPACES = `http://local.test${NAMESPACES_PATH}`;
 const REPOS = `${NAMESPACES}/acme/repos`;
@@ -32,7 +33,7 @@ afterEach(() => {
   harness.close();
 });
 
-const create = (body: unknown, namespace = "acme") =>
+const create = (body: Json, namespace = "acme") =>
   harness.app.request(
     new Request(`${NAMESPACES}/${namespace}/repos`, {
       method: "POST",
@@ -42,9 +43,7 @@ const create = (body: unknown, namespace = "acme") =>
   );
 
 const names = async (response: Response) =>
-  (await result<RepoWithRemote[]>(response)).map((repository) =>
-    repository.name,
-  );
+  (await result<RepoWithRemote[]>(response)).map((repository) => repository.name);
 
 describe("POST /namespaces/:namespace/repos", () => {
   test("answers with the identity, the remote, and one token", async () => {
@@ -102,9 +101,7 @@ describe("POST /namespaces/:namespace/repos", () => {
     const stored = await harness.objects.describe(durableObjectId!);
     expect(stored?.defaultBranch).toBe("trunk");
     // The object and its index entry agree on one creation time.
-    const listed = await result<RepoWithRemote>(
-      await harness.app.request(`${REPOS}/demo`),
-    );
+    const listed = await result<RepoWithRemote>(await harness.app.request(`${REPOS}/demo`));
     expect(stored?.createdAt).toBe(listed.created_at);
   });
 
@@ -122,17 +119,14 @@ describe("POST /namespaces/:namespace/repos", () => {
     });
 
     expect(response.status).toBe(200);
-    expect((await result<CreateRepoResult>(response)).default_branch).toBe(
-      "release/2.0.x",
-    );
+    expect((await result<CreateRepoResult>(response)).default_branch).toBe("release/2.0.x");
   });
 
   test("stores a read-only repository as read-only", async () => {
     await create({ name: "demo", read_only: true });
 
     expect(
-      (await result<RepoWithRemote>(await harness.app.request(`${REPOS}/demo`)))
-        .read_only,
+      (await result<RepoWithRemote>(await harness.app.request(`${REPOS}/demo`))).read_only,
     ).toBe(true);
   });
 
@@ -161,7 +155,7 @@ describe("POST /namespaces/:namespace/repos", () => {
     expect(harness.objects.liveIds).toEqual([harness.objects.mintedIds[0]!]);
   });
 
-  const invalidNames: ReadonlyArray<readonly [string, unknown]> = [
+  const invalidNames: ReadonlyArray<readonly [string, Json]> = [
     ["a missing name", {}],
     ["a non-string name", { name: 42 }],
     ["an empty name", { name: "" }],
@@ -182,37 +176,22 @@ describe("POST /namespaces/:namespace/repos", () => {
     });
   }
 
-  const invalidBodies: ReadonlyArray<readonly [string, unknown]> = [
+  const invalidBodies: ReadonlyArray<readonly [string, Json]> = [
     ["a non-string description", { name: "demo", description: 42 }],
     ["an over-long description", { name: "demo", description: "x".repeat(501) }],
     ["a non-boolean read_only", { name: "demo", read_only: "yes" }],
     ["a non-string default branch", { name: "demo", default_branch: 42 }],
     ["an empty default branch", { name: "demo", default_branch: "" }],
     ["a default branch with ..", { name: "demo", default_branch: "a..b" }],
-    [
-      "a default branch ending in .lock",
-      { name: "demo", default_branch: "x.lock" },
-    ],
-    [
-      "a default branch with a space",
-      { name: "demo", default_branch: "my branch" },
-    ],
+    ["a default branch ending in .lock", { name: "demo", default_branch: "x.lock" }],
+    ["a default branch with a space", { name: "demo", default_branch: "my branch" }],
     // Git applies these rules per slash-separated component, not to the whole
     // name, so a valid-looking prefix does not rescue an invalid component.
-    [
-      "a dot-prefixed branch component",
-      { name: "demo", default_branch: "foo/.bar" },
-    ],
+    ["a dot-prefixed branch component", { name: "demo", default_branch: "foo/.bar" }],
     ["a .lock branch component", { name: "demo", default_branch: "a.lock/b" }],
-    [
-      "a bare-dot branch component",
-      { name: "demo", default_branch: "foo/./bar" },
-    ],
+    ["a bare-dot branch component", { name: "demo", default_branch: "foo/./bar" }],
     ["an empty branch component", { name: "demo", default_branch: "foo//bar" }],
-    [
-      "a default branch with a trailing slash",
-      { name: "demo", default_branch: "foo/" },
-    ],
+    ["a default branch with a trailing slash", { name: "demo", default_branch: "foo/" }],
     ["a JSON array", []],
   ];
 
@@ -251,9 +230,7 @@ describe("GET /namespaces/:namespace/repos", () => {
   test("carries every documented field, including the remote", async () => {
     await create({ name: "demo", description: "A demo repository" });
 
-    const [repository] = await result<RepoWithRemote[]>(
-      await harness.app.request(REPOS),
-    );
+    const [repository] = await result<RepoWithRemote[]>(await harness.app.request(REPOS));
 
     expect(Object.keys(repository!).sort()).toEqual([
       "created_at",
@@ -280,20 +257,17 @@ describe("GET /namespaces/:namespace/repos", () => {
     await create({ name: "zeta" });
     await create({ name: "demo" });
 
-    expect(
-      await names(
-        await harness.app.request(`${REPOS}?sort=name&direction=asc`),
-      ),
-    ).toEqual(["demo", "zeta"]);
+    expect(await names(await harness.app.request(`${REPOS}?sort=name&direction=asc`))).toEqual([
+      "demo",
+      "zeta",
+    ]);
   });
 
   test("filters by search", async () => {
     await create({ name: "api-server" });
     await create({ name: "web" });
 
-    expect(await names(await harness.app.request(`${REPOS}?search=api`))).toEqual(
-      ["api-server"],
-    );
+    expect(await names(await harness.app.request(`${REPOS}?search=api`))).toEqual(["api-server"]);
   });
 
   test("pages with limit and cursor", async () => {
@@ -301,19 +275,14 @@ describe("GET /namespaces/:namespace/repos", () => {
       await create({ name });
     }
 
-    const first = await harness.app.request(
-      `${REPOS}?limit=2&sort=name&direction=asc`,
-    );
+    const first = await harness.app.request(`${REPOS}?limit=2&sort=name&direction=asc`);
     const firstBody = await envelope<RepoWithRemote[]>(first);
-    const cursor = (firstBody.result_info as { cursor: string }).cursor;
+    const cursor = pageCursor(firstBody.result_info);
     const second = await harness.app.request(
       `${REPOS}?limit=2&sort=name&direction=asc&cursor=${encodeURIComponent(cursor)}`,
     );
 
-    expect(firstBody.result?.map((repository) => repository.name)).toEqual([
-      "alpha",
-      "beta",
-    ]);
+    expect(firstBody.result?.map((repository) => repository.name)).toEqual(["alpha", "beta"]);
     expect(firstBody.result_info).toMatchObject({ per_page: 2, count: 2 });
     expect(await names(second)).toEqual(["delta"]);
   });
@@ -328,7 +297,7 @@ describe("GET /namespaces/:namespace/repos", () => {
       const body = await envelope<RepoWithRemote[]>(
         await harness.app.request(`${REPOS}?limit=2&${query}`),
       );
-      return (body.result_info as { cursor: string }).cursor;
+      return pageCursor(body.result_info);
     };
 
     test("replaying it under the same query walks forward", async () => {
@@ -348,7 +317,11 @@ describe("GET /namespaces/:namespace/repos", () => {
     const mismatches: ReadonlyArray<readonly [string, string, string]> = [
       ["a different sort", "", "sort=name&direction=asc"],
       ["a different direction", "sort=name&direction=asc", "sort=name&direction=desc"],
-      ["a search that was not applied", "sort=name&direction=asc", "sort=name&direction=asc&search=alpha"],
+      [
+        "a search that was not applied",
+        "sort=name&direction=asc",
+        "sort=name&direction=asc&search=alpha",
+      ],
       ["a dropped search", "sort=name&direction=asc&search=a", "sort=name&direction=asc"],
     ];
 
@@ -438,9 +411,7 @@ describe("DELETE /namespaces/:namespace/repos/:repo", () => {
     const created = await result<CreateRepoResult>(await create({ name: "demo" }));
     const [durableObjectId] = harness.objects.mintedIds;
 
-    const response = await harness.app.request(
-      new Request(`${REPOS}/demo`, { method: "DELETE" }),
-    );
+    const response = await harness.app.request(new Request(`${REPOS}/demo`, { method: "DELETE" }));
 
     expect(response.status).toBe(202);
     expect(await result<{ id: string }>(response)).toEqual({ id: created.id });
@@ -449,9 +420,7 @@ describe("DELETE /namespaces/:namespace/repos/:repo", () => {
   });
 
   test("404s for an unknown repository and destroys nothing", async () => {
-    const response = await harness.app.request(
-      new Request(`${REPOS}/nope`, { method: "DELETE" }),
-    );
+    const response = await harness.app.request(new Request(`${REPOS}/nope`, { method: "DELETE" }));
 
     expect(response.status).toBe(404);
     expect(await errorCode(response)).toBe(ERROR_CODES.notFound);

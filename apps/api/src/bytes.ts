@@ -5,12 +5,8 @@
  * as bytes arrive and have no list to join, which is a different problem with a
  * different answer.
  */
-export const concat = (
-  ...parts: readonly Uint8Array[]
-): Uint8Array<ArrayBuffer> => {
-  const joined = new Uint8Array(
-    parts.reduce((total, part) => total + part.length, 0),
-  );
+export const concat = (...parts: readonly Uint8Array[]): Uint8Array<ArrayBuffer> => {
+  const joined = new Uint8Array(parts.reduce((total, part) => total + part.length, 0));
 
   let at = 0;
   for (const part of parts) {

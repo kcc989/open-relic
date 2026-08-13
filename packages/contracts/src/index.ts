@@ -206,10 +206,7 @@ export const GIT_HTTP_ENDPOINTS = [
   },
 ] as const satisfies readonly EndpointContract[];
 
-export const HTTP_ENDPOINTS = [
-  ...REST_ENDPOINTS,
-  ...GIT_HTTP_ENDPOINTS,
-] as const;
+export const HTTP_ENDPOINTS = [...REST_ENDPOINTS, ...GIT_HTTP_ENDPOINTS] as const;
 
 export type EndpointId = (typeof HTTP_ENDPOINTS)[number]["id"];
 
@@ -233,10 +230,8 @@ export const IMPLEMENTED_ENDPOINT_IDS = [
 
 export type ImplementedEndpointId = (typeof IMPLEMENTED_ENDPOINT_IDS)[number];
 
-export const isImplementedEndpoint = (
-  id: EndpointId,
-): id is ImplementedEndpointId =>
-  (IMPLEMENTED_ENDPOINT_IDS as readonly EndpointId[]).includes(id);
+export const isImplementedEndpoint = (id: EndpointId): id is ImplementedEndpointId =>
+  IMPLEMENTED_ENDPOINT_IDS.some((implemented) => implemented === id);
 
 /** The Git remote handed back on create; only the path shape has to match. */
 export const gitRemotePath = (namespaceSlug: string, name: string): string =>
@@ -355,15 +350,9 @@ export const RESERVED_NAMESPACE_SLUGS: readonly string[] = [
   "well-known",
 ];
 
-export type NamespaceSlugViolation =
-  | "empty"
-  | "malformed"
-  | "reserved"
-  | "too-long";
+export type NamespaceSlugViolation = "empty" | "malformed" | "reserved" | "too-long";
 
-export const validateNamespaceSlug = (
-  slug: string,
-): NamespaceSlugViolation | null => {
+export const validateNamespaceSlug = (slug: string): NamespaceSlugViolation | null => {
   if (slug.length === 0) {
     return "empty";
   }
@@ -379,9 +368,7 @@ export const validateNamespaceSlug = (
   return null;
 };
 
-export const describeNamespaceSlugViolation = (
-  violation: NamespaceSlugViolation,
-): string => {
+export const describeNamespaceSlugViolation = (violation: NamespaceSlugViolation): string => {
   switch (violation) {
     case "empty":
       return "A namespace slug is required.";
@@ -446,12 +433,7 @@ export const BRANCH_NAME_MAX_LENGTH = 255;
 
 export const DEFAULT_BRANCH = "main";
 
-export const REPO_SORT_FIELDS = [
-  "created_at",
-  "updated_at",
-  "last_push_at",
-  "name",
-] as const;
+export const REPO_SORT_FIELDS = ["created_at", "updated_at", "last_push_at", "name"] as const;
 
 export type RepoSortField = (typeof REPO_SORT_FIELDS)[number];
 
@@ -469,15 +451,9 @@ export const REPO_LIST_DEFAULT_DIRECTION: SortDirection = "desc";
  */
 export const REPOSITORY_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/;
 
-export type RepositoryNameViolation =
-  | "empty"
-  | "git-suffix"
-  | "malformed"
-  | "too-long";
+export type RepositoryNameViolation = "empty" | "git-suffix" | "malformed" | "too-long";
 
-export const validateRepositoryName = (
-  name: string,
-): RepositoryNameViolation | null => {
+export const validateRepositoryName = (name: string): RepositoryNameViolation | null => {
   if (name.length === 0) {
     return "empty";
   }
@@ -495,9 +471,7 @@ export const validateRepositoryName = (
   return null;
 };
 
-export const describeRepositoryNameViolation = (
-  violation: RepositoryNameViolation,
-): string => {
+export const describeRepositoryNameViolation = (violation: RepositoryNameViolation): string => {
   switch (violation) {
     case "empty":
       return "A repository name is required.";
@@ -537,11 +511,7 @@ export const validateBranchName = (name: string): BranchNameViolation | null => 
   // name, so `foo/.bar` and `a.lock/b` are refs it will not create. An empty
   // component covers `foo//bar` and a trailing slash.
   for (const component of name.split("/")) {
-    if (
-      component.length === 0 ||
-      component.startsWith(".") ||
-      component.endsWith(".lock")
-    ) {
+    if (component.length === 0 || component.startsWith(".") || component.endsWith(".lock")) {
       return "malformed";
     }
   }
@@ -549,9 +519,7 @@ export const validateBranchName = (name: string): BranchNameViolation | null => 
   return null;
 };
 
-export const describeBranchNameViolation = (
-  violation: BranchNameViolation,
-): string => {
+export const describeBranchNameViolation = (violation: BranchNameViolation): string => {
   switch (violation) {
     case "empty":
       return "A branch name is required.";
@@ -595,8 +563,5 @@ export const ARTIFACT_TOKEN_PATTERN = /^art_v1_[0-9a-f]{40}\?expires=\d+$/;
  * The expiry travels in the token rather than beside it, so a client that only
  * ever holds the string can still tell when it has to ask for another.
  */
-export const formatArtifactToken = (
-  secret: string,
-  expiresAt: Date,
-): string =>
+export const formatArtifactToken = (secret: string, expiresAt: Date): string =>
   `${ARTIFACT_TOKEN_PREFIX}${secret}?expires=${Math.floor(expiresAt.getTime() / 1000)}`;

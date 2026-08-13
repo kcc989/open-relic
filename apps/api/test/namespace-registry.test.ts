@@ -51,9 +51,7 @@ describe("createNamespace", () => {
     const store = registry();
     expect((await store.createNamespace(command("acme"))).created).toBe(true);
 
-    const second = await store.createNamespace(
-      command("acme", "a different one"),
-    );
+    const second = await store.createNamespace(command("acme", "a different one"));
 
     expect(second).toEqual({ created: false, reason: "slug-taken" });
     expect((await store.listNamespaces(page())).namespaces).toHaveLength(1);
@@ -122,12 +120,8 @@ describe("paging", () => {
     await store.createNamespace(command("acme"));
     const second = await store.listNamespaces(page(10, first.next));
 
-    expect(first.namespaces.map((namespace) => namespace.slug)).toEqual([
-      "beta",
-    ]);
-    expect(second.namespaces.map((namespace) => namespace.slug)).toEqual([
-      "delta",
-    ]);
+    expect(first.namespaces.map((namespace) => namespace.slug)).toEqual(["beta"]);
+    expect(second.namespaces.map((namespace) => namespace.slug)).toEqual(["delta"]);
   });
 });
 

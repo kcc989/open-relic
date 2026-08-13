@@ -40,7 +40,7 @@ refusal, not a default: an installation deployed without ever hearing of the
 variable is closed rather than open to the world, and a typo in the value fails
 the same way.
 
-The refusal comes *before* the registry lookup, so whether a repository exists
+The refusal comes _before_ the registry lookup, so whether a repository exists
 is not something an unauthorized client can learn.
 
 Repo-scoped tokens replace the implementation and remove the variable. The seam

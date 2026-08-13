@@ -2,30 +2,11 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { HEAD_KEY } from "../src/head.ts";
 import { ZERO_OID } from "../src/object.ts";
-import {
-  REJECTIONS,
-  RepositoryStore,
-  type ReceivePackOutcome,
-} from "../src/repository-store.ts";
-import {
-  createTestRepositoryStorage,
-  type TestRepositoryStorage,
-} from "./support/database.ts";
-import {
-  blob,
-  commit,
-  tag,
-  tree,
-  treeEntry,
-  type GitObject,
-} from "./support/git-objects.ts";
+import { REJECTIONS, RepositoryStore, type ReceivePackOutcome } from "../src/repository-store.ts";
+import { createTestRepositoryStorage, type TestRepositoryStorage } from "./support/database.ts";
+import { blob, commit, tag, tree, treeEntry, type GitObject } from "./support/git-objects.ts";
 import { streamOf } from "./support/pack.ts";
-import {
-  packOf,
-  pushBody,
-  readReport,
-  type PushCommand,
-} from "./support/receive-pack.ts";
+import { packOf, pushBody, readReport, type PushCommand } from "./support/receive-pack.ts";
 
 /**
  * A push, end to end, against the real schema and the real pack reader — the
@@ -72,8 +53,7 @@ const push = (options: {
   readonly objects?: readonly GitObject[];
   readonly capabilities?: readonly string[];
   readonly pack?: Uint8Array<ArrayBuffer>;
-}): Promise<ReceivePackOutcome> =>
-  store.receivePack(streamOf(pushBody(options)));
+}): Promise<ReceivePackOutcome> => store.receivePack(streamOf(pushBody(options)));
 
 const report = (outcome: ReceivePackOutcome) => readReport(outcome.report);
 
@@ -210,10 +190,7 @@ describe("a second push", () => {
       objects: [],
     });
 
-    expect(report(outcome).lines).toEqual([
-      "unpack ok",
-      `ng ${MAIN} ${REJECTIONS.nonFastForward}`,
-    ]);
+    expect(report(outcome).lines).toEqual(["unpack ok", `ng ${MAIN} ${REJECTIONS.nonFastForward}`]);
     expect(outcome.accepted).toBe(false);
     expect(await advertised()).toContain(`${SECOND.oid} ${MAIN}\0`);
   });
@@ -224,10 +201,7 @@ describe("a second push", () => {
       objects: [ELSEWHERE],
     });
 
-    expect(report(outcome).lines).toEqual([
-      "unpack ok",
-      `ng ${MAIN} ${REJECTIONS.nonFastForward}`,
-    ]);
+    expect(report(outcome).lines).toEqual(["unpack ok", `ng ${MAIN} ${REJECTIONS.nonFastForward}`]);
     expect(await advertised()).toContain(`${FIRST.oid} ${MAIN}\0`);
   });
 
@@ -238,10 +212,7 @@ describe("a second push", () => {
       commands: [{ oldOid: FIRST.oid, newOid: ZERO_OID, name: MAIN }],
     });
 
-    expect(report(outcome).lines).toEqual([
-      "unpack ok",
-      `ng ${MAIN} ${REJECTIONS.delete}`,
-    ]);
+    expect(report(outcome).lines).toEqual(["unpack ok", `ng ${MAIN} ${REJECTIONS.delete}`]);
     expect(await advertised()).toContain(`${FIRST.oid} ${MAIN}\0`);
   });
 
@@ -251,10 +222,7 @@ describe("a second push", () => {
       objects: SECOND_OBJECTS,
     });
 
-    expect(report(outcome).lines).toEqual([
-      "unpack ok",
-      `ng ${MAIN} ${REJECTIONS.stale}`,
-    ]);
+    expect(report(outcome).lines).toEqual(["unpack ok", `ng ${MAIN} ${REJECTIONS.stale}`]);
   });
 
   test("accepts a command that moves a ref to where it already is", async () => {
@@ -275,10 +243,7 @@ describe("a second push", () => {
       objects: SECOND_OBJECTS,
     });
 
-    expect(report(outcome).lines).toEqual([
-      "unpack ok",
-      `ng ${MAIN} ${REJECTIONS.exists}`,
-    ]);
+    expect(report(outcome).lines).toEqual(["unpack ok", `ng ${MAIN} ${REJECTIONS.exists}`]);
   });
 });
 
@@ -290,10 +255,7 @@ describe("a push whose objects are not all there", () => {
       objects: [FIRST, README],
     });
 
-    expect(report(outcome).lines).toEqual([
-      "unpack ok",
-      `ng ${MAIN} ${REJECTIONS.missingObjects}`,
-    ]);
+    expect(report(outcome).lines).toEqual(["unpack ok", `ng ${MAIN} ${REJECTIONS.missingObjects}`]);
     expect(report(outcome).progress.join("")).toContain(ROOT.oid);
     expect(await advertised()).toContain("capabilities^{}");
   });
@@ -315,10 +277,7 @@ describe("a push whose objects are not all there", () => {
       objects: FIRST_OBJECTS,
     });
 
-    expect(report(outcome).lines).toEqual([
-      "unpack ok",
-      `ng ${MAIN} ${REJECTIONS.missingObjects}`,
-    ]);
+    expect(report(outcome).lines).toEqual(["unpack ok", `ng ${MAIN} ${REJECTIONS.missingObjects}`]);
   });
 });
 
@@ -389,10 +348,7 @@ describe("the shape of a ref a push may name", () => {
         objects: FIRST_OBJECTS,
       });
 
-      expect(report(outcome).lines).toEqual([
-        "unpack ok",
-        `ng ${name} ${REJECTIONS.funnyRefname}`,
-      ]);
+      expect(report(outcome).lines).toEqual(["unpack ok", `ng ${name} ${REJECTIONS.funnyRefname}`]);
     });
   }
 

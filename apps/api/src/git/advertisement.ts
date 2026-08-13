@@ -59,9 +59,7 @@ const refLine = (ref: AdvertisedRef, capabilities?: readonly string[]): Uint8Arr
  * Nor are annotated tags peeled. That too is upload-pack's; a pushing client
  * has no use for the tagged object's id.
  */
-export function* receivePackAdvertisement(
-  refs: readonly AdvertisedRef[],
-): Generator<Uint8Array> {
+export function* receivePackAdvertisement(refs: readonly AdvertisedRef[]): Generator<Uint8Array> {
   // The service header is the Smart HTTP handshake: it is what tells the client
   // this is a smart server rather than a directory of files.
   yield pktLine(`# service=${RECEIVE_PACK_SERVICE}\n`);
@@ -70,10 +68,7 @@ export function* receivePackAdvertisement(
   const [first, ...rest] = refs;
 
   if (first === undefined) {
-    yield refLine(
-      { name: NO_REFS_REF_NAME, oid: ZERO_OID },
-      RECEIVE_PACK_CAPABILITIES,
-    );
+    yield refLine({ name: NO_REFS_REF_NAME, oid: ZERO_OID }, RECEIVE_PACK_CAPABILITIES);
   } else {
     yield refLine(first, RECEIVE_PACK_CAPABILITIES);
     for (const ref of rest) {

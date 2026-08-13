@@ -10,9 +10,7 @@
 const BLOCK_BYTES = 64;
 
 /** The five 32-bit words SHA-1 starts from, per FIPS 180-4. */
-const INITIAL_STATE = [
-  0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0,
-] as const;
+const INITIAL_STATE = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0] as const;
 
 const HEX = "0123456789abcdef";
 
@@ -99,10 +97,7 @@ export class Sha1 {
     for (let i = 0; i < 16; i += 1) {
       const at = offset + i * 4;
       w[i] =
-        ((bytes[at]! << 24) |
-          (bytes[at + 1]! << 16) |
-          (bytes[at + 2]! << 8) |
-          bytes[at + 3]!) >>>
+        ((bytes[at]! << 24) | (bytes[at + 1]! << 16) | (bytes[at + 2]! << 8) | bytes[at + 3]!) >>>
         0;
     }
 
@@ -151,8 +146,7 @@ export class Sha1 {
   }
 }
 
-export const sha1Hex = (bytes: Uint8Array): string =>
-  new Sha1().update(bytes).hex();
+export const sha1Hex = (bytes: Uint8Array): string => new Sha1().update(bytes).hex();
 
 export const toHex = (bytes: Uint8Array): string => {
   let hex = "";

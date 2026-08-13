@@ -1,4 +1,8 @@
-import { NAMESPACES_PATH } from "@open-relic/contracts";
+import {
+  NAMESPACES_PATH,
+  type CreateNamespaceRequest,
+  type CreateRepoRequest,
+} from "@open-relic/contracts";
 
 import type { RepositoryObjects } from "../../src/bindings.ts";
 import { createApp } from "../../src/app.ts";
@@ -70,10 +74,7 @@ export class FakeRepositoryObjects implements RepositoryObjects {
   }
 
   /** Stands in for the push that will write them once receive-pack lands. */
-  seedRefs(
-    durableObjectId: string,
-    entries: Readonly<Record<string, string>>,
-  ): Promise<void> {
+  seedRefs(durableObjectId: string, entries: Readonly<Record<string, string>>): Promise<void> {
     return seedRefs(this.#storageFor(durableObjectId).db, entries);
   }
 
@@ -109,11 +110,11 @@ export interface TestApp {
  * service itself created.
  */
 export const createGitTestApp = async (
-  repository: Record<string, unknown> = {},
+  repository: Partial<CreateRepoRequest> = {},
 ): Promise<TestApp> => {
   const harness = createTestApp();
 
-  const post = (path: string, body: Record<string, unknown>) =>
+  const post = (path: string, body: CreateNamespaceRequest | CreateRepoRequest) =>
     harness.app.request(
       new Request(`http://local.test${path}`, {
         method: "POST",
