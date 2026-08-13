@@ -1,3 +1,9 @@
+import {
+  NAMESPACES_PATH,
+  type CreateNamespaceRequest,
+  type CreateRepoRequest,
+} from "@open-relic/contracts";
+
 import type { RepositoryObjects } from "../../src/bindings.ts";
 import { createApp } from "../../src/app.ts";
 import { NamespaceRegistry } from "../../src/namespace-registry.ts";
@@ -40,6 +46,7 @@ export class FakeRepositoryObjects implements RepositoryObjects {
       initialize: (init) => store.initialize(init),
       describe: () => store.describe(),
       advertiseReceivePack: () => store.advertiseReceivePack(),
+      receivePack: (body) => store.receivePack(body),
       destroy: async () => {
         this.#destroyed.push(durableObjectId);
         this.#storages.get(durableObjectId)?.close();
@@ -95,6 +102,32 @@ export interface TestApp {
   readonly objects: FakeRepositoryObjects;
   readonly close: () => void;
 }
+
+/**
+ * An installation holding `acme/demo`, which is what every Git test needs
+ * before it can ask a repository anything. Built through the REST API rather
+ * than by seeding rows, so a Git test is always talking to a repository the
+ * service itself created.
+ */
+export const createGitTestApp = async (
+  repository: Partial<CreateRepoRequest> = {},
+): Promise<TestApp> => {
+  const harness = createTestApp();
+
+  const post = (path: string, body: CreateNamespaceRequest | CreateRepoRequest) =>
+    harness.app.request(
+      new Request(`http://local.test${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+
+  await post(NAMESPACES_PATH, { slug: "acme" });
+  await post(`${NAMESPACES_PATH}/acme/repos`, { name: "demo", ...repository });
+
+  return harness;
+};
 
 export const createTestApp = (): TestApp => {
   const registryDatabase = createTestDatabase();

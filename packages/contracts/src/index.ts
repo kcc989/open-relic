@@ -225,6 +225,7 @@ export const IMPLEMENTED_ENDPOINT_IDS = [
   "repositories.get",
   "repositories.delete",
   "git.receivePack.advertise",
+  "git.receivePack",
 ] as const satisfies readonly EndpointId[];
 
 export type ImplementedEndpointId = (typeof IMPLEMENTED_ENDPOINT_IDS)[number];

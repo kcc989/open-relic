@@ -1,12 +1,11 @@
-import { ERROR_CODES, NAMESPACES_PATH } from "@open-relic/contracts";
+import { ERROR_CODES } from "@open-relic/contracts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import type { ApiEnv } from "../../../alchemy.run.ts";
 import { ANONYMOUS_WRITE_VARIABLE } from "../src/git/authorization.ts";
-import { createTestApp, type TestApp } from "./support/app.ts";
+import { createGitTestApp, type TestApp } from "./support/app.ts";
 import { errorCode } from "./support/envelope.ts";
 
-const NAMESPACES = `http://local.test${NAMESPACES_PATH}`;
 const INFO_REFS = "http://local.test/git/acme/demo.git/info/refs";
 const ADVERTISE = `${INFO_REFS}?service=git-receive-pack`;
 
@@ -24,22 +23,7 @@ const advertise = (url = ADVERTISE, env: ApiEnv = ANONYMOUS_WRITE_ALLOWED) =>
   harness.app.request(url, undefined, env);
 
 beforeEach(async () => {
-  harness = createTestApp();
-
-  await harness.app.request(
-    new Request(NAMESPACES, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ slug: "acme" }),
-    }),
-  );
-  await harness.app.request(
-    new Request(`${NAMESPACES}/acme/repos`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "demo" }),
-    }),
-  );
+  harness = await createGitTestApp();
 });
 
 afterEach(() => {

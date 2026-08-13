@@ -10,10 +10,10 @@ Artifacts should work against an installation with nothing changed but the host.
 [ADR-0001](./docs/adr/0001-wire-compatible-with-cloudflare-artifacts.md) records
 what that binds us to, and where the API below does not match yet.
 
-The namespace and repository APIs are implemented, and a Git client can now get
-a ref advertisement for `git-receive-pack`. Everything else — tokens, contents,
-forks, imports, and the rest of Git Smart HTTP — is still a registered route
-that answers `501`:
+**`git push` works.** The namespace and repository APIs are implemented, and a
+Git client can create and fast-forward branches over Git Smart HTTP. Everything
+else — tokens, contents, forks, imports, and the fetch half of Git — is still a
+registered route that answers `501`:
 
 - Hono routes for every REST and Git Smart HTTP endpoint in the initial API
 - Effect v4 as the typed stub service boundary
@@ -167,8 +167,8 @@ A create answers with a deliberately narrower shape than a list or get: the
 identity, the remote to clone from, and the one token it will not show again.
 List and get carry the full `RepoInfo` — `id`, `name`, `description`,
 `default_branch`, `created_at`, `updated_at`, `last_push_at`, `source`,
-`read_only` — plus `remote`. `source` and `last_push_at` are always `null` until
-import and push exist to write them.
+`read_only` — plus `remote`. `last_push_at` is stamped by a push that moved a
+ref; `source` stays `null` until import exists to write it.
 
 `sort` is one of `created_at`, `updated_at`, `last_push_at`, or `name`,
 defaulting to `created_at` descending. `search` filters on an infix of the name.
@@ -200,7 +200,8 @@ curl -X POST http://localhost:1337/namespaces/acme/repos \
 
 A repository's remote is `/git/:namespace/:repo.git`, and the first thing any
 Git client asks it for is an **advertisement**: the refs the server holds and
-the capabilities it supports. The push side of that is implemented.
+the capabilities it supports. The push side of the protocol is implemented, from
+that advertisement through to the refs a push moves.
 
 ```sh
 curl 'http://localhost:1337/git/acme/demo.git/info/refs?service=git-receive-pack'
@@ -254,19 +255,94 @@ ALLOW_ANONYMOUS_WRITE=true bun run deploy
 
 Refs live in a `refs` table in the repository object rather than as Git's loose
 files plus `packed-refs`: that split exists because of a filesystem, and a push
-has to move several refs in one transaction. Nothing writes to it yet — the
-advertisement is a read of an empty ref store until push lands.
+has to move several refs in one transaction.
+
+## Push
+
+`POST /git/:namespace/:repo.git/git-receive-pack` is the other half. The body is
+the client's ref update commands as pkt-lines, then a flush, then the pack; the
+response is `report-status`, one line per ref.
+
+```text
+0000000000000000000000000000000000000000 <new> refs/heads/main\0report-status side-band-64k …
+0000
+PACK…
+```
+
+```text
+000eunpack ok
+0017ok refs/heads/main
+0000
+```
+
+A push is read in one pass by `RepositoryStore.receivePack`, and the order is
+the design:
+
+1. **Read the commands.** The capabilities travel on the first one and apply to
+   the whole push.
+2. **Screen each command** against the refs we hold — deletes, malformed names,
+   a ref named twice, a create of something that exists, an update from a value
+   the ref no longer has. This is pure policy and lives in `git/receive-pack.ts`
+   with the rest of the wire; nothing here reads storage.
+3. **Read the pack** into the object store, streaming. A push whose commands are
+   all deletes carries no pack, so none is waited for.
+4. **Walk what the push claims.** From each new ref value, out through commits,
+   trees, and tags, confirming the repository holds every one. The walk stops at
+   objects a previous push already proved, so the cost of a push is
+   proportional to what it added rather than to the history.
+5. **Check the fast-forward.** A commits-only walk back from the new tip looking
+   for the old one.
+6. **Move the refs**, all of them and any HEAD rewrite, in one transaction.
+
+**Blobs are skipped in the walk.** They are the expensive half of any real
+repository — most of the objects and nearly all of the bytes — and a pack that
+parsed completely already implies them: every entry was inflated, hashed, and
+written. What the walk is looking for is the shape a truncated or hand-made pack
+gets wrong, which is a commit or tree naming something that was never sent.
+
+Objects written by a push that then fails are left in place. A ref is the only
+thing that makes an object reachable, so orphans are a storage cost rather than
+a correctness problem; sweeping them is separate work.
+
+**Deletes and non-fast-forward updates are rejected**, per-command, in
+`report-status` — matching the advertisement, which offers neither `delete-refs`
+nor any way to force. A client that sends one anyway is told so rather than
+quietly ignored.
+
+| `ng` reason                                 | When                                              |
+| ------------------------------------------- | ------------------------------------------------- |
+| `deleting a ref is not supported`           | The new value is the zero id                      |
+| `non-fast-forward`                          | The old tip is not behind the new one             |
+| `missing necessary objects`                 | The connectivity walk found a gap                 |
+| `the ref has moved since it was advertised` | The old value is not what we hold                 |
+| `funny refname`                             | Not under `refs/`, or not a name Git would create |
+| `n/a (unpacker error)`                      | The pack could not be read; `unpack` says why     |
+
+HEAD retargets in exactly one case: the repository held no refs at all and the
+push created exactly one branch. That is `git init && git push -u origin master`
+against a repository created with a different default, where a HEAD naming a
+branch nobody will push is a repository no clone can check out. Any other push
+leaves it alone — which branch a repository is _for_ is not a push's to decide
+once there is anything to decide between. The registry's `default_branch` and
+`last_push_at` are stamped afterwards, outside the transaction: they are copies
+for the REST surface, and a stamp that fails leaves them stale rather than
+leaving a ref half-moved.
+
+The Worker's CPU ceiling is five minutes, which is what a first push of a real
+repository needs and what the fast-forward walk is budgeted against — proving a
+push is _not_ a fast-forward means reading every commit the new tip reaches, so
+it gives up after `FAST_FORWARD_COMMIT_BUDGET` commits and says so on the
+progress band rather than being killed mid-request.
+
+`git ls-remote` and `git clone` still answer `501`: they are upload-pack, and
+that is the fetch half.
 
 ## Objects and packs
 
-`readPack` is the next of the named RPC methods
-[ADR-0004](./docs/adr/0004-git-reaches-a-repository-over-rpc.md) calls for, one
-per Git operation: it takes the byte stream of a Git pack and leaves the
-repository holding every object the pack carried, named by SHA-1. Streams cross
-the RPC boundary, so a pack reaches the object without the Worker buffering it.
-Nothing calls it over HTTP yet — receive-pack lands with push, alongside the ref
-updates that make these objects reachable — but the storage and the parse are
-what everything Git-shaped is built on.
+`readPack` is what a push is built on: it takes the byte stream of a Git pack and
+leaves the repository holding every object the pack carried, named by SHA-1.
+Streams cross the RPC boundary, so a pack reaches the object without the Worker
+buffering it.
 
 Objects are stored inflated: metadata in the `objects` table, bytes in the
 object's synchronous KV storage under `o:<oid>:<n>`, split into 1.5 MiB chunks
@@ -285,13 +361,17 @@ directly — a pack four times longer is read with no more in flight. A rewrite
 that buffered the pack would pass every other test and lose the reason the store
 looks like this.
 
-| Module                | What it is                                                                                    |
-| --------------------- | --------------------------------------------------------------------------------------------- |
-| `src/pack.ts`         | The pack reader: entry headers, `ofs-delta` and `ref-delta` resolution, the trailing checksum |
-| `src/object-store.ts` | Objects as chunked rows, and the sink the pack is read into                                   |
-| `src/inflate.ts`      | A resumable zlib decompressor                                                                 |
-| `src/sha1.ts`         | Incremental SHA-1                                                                             |
-| `src/delta.ts`        | Git's copy/insert delta encoding                                                              |
+| Module                    | What it is                                                                                                 |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `src/pack.ts`             | The pack reader: entry headers, `ofs-delta` and `ref-delta` resolution, the trailing checksum              |
+| `src/object-store.ts`     | Objects as chunked rows, and the sink the pack is read into                                                |
+| `src/connectivity.ts`     | What a commit, tree, or tag names, and the walks that answer "is it all here" and "is this a fast-forward" |
+| `src/inflate.ts`          | A resumable zlib decompressor                                                                              |
+| `src/sha1.ts`             | Incremental SHA-1                                                                                          |
+| `src/delta.ts`            | Git's copy/insert delta encoding                                                                           |
+| `src/git/pkt-line.ts`     | Git's framing, written and read — and the hand-off from the commands to the pack behind them               |
+| `src/git/receive-pack.ts` | The push conversation: commands in, `report-status` out, and what this server accepts                      |
+| `src/repository-store.ts` | The order all of it happens in, and the transaction at the end                                             |
 
 `DecompressionStream("deflate")` cannot do this job: a pack is a concatenation
 of zlib streams with no length prefix, so the next object can only be found by
@@ -377,10 +457,10 @@ before it finished.
 `alchemy.run.ts` is the only description of the deployed system. It declares the
 `Api` Worker (bundled from `apps/api/src/index.ts`), the `Namespaces` and
 `Repositories` Durable Object namespaces bound to it as `NAMESPACES` and
-`REPOSITORIES`, and Workers Observability. There is no `wrangler.toml`; Alchemy
-owns the Worker script, bindings, migrations, and `workers.dev` subdomain. It
-creates new Durable Object classes as `new_sqlite_classes`, which is where both
-objects' SQLite storage comes from.
+`REPOSITORIES`, Workers Observability, and a five-minute CPU limit. There is no
+`wrangler.toml`; Alchemy owns the Worker script, bindings, migrations, and
+`workers.dev` subdomain. It creates new Durable Object classes as
+`new_sqlite_classes`, which is where both objects' SQLite storage comes from.
 
 Bindings flow back into the application as types. The stack exports
 
@@ -437,6 +517,6 @@ Subdomain:Edit, Workers Observability:Edit, and Account Settings:Read.
 ```
 
 Alongside the endpoints above, routes for forks, imports, tokens, repository
-contents, archives, the upload-pack advertisement, and both pack transfers are
-registered from the manifest in `packages/contracts/src/index.ts`, answer `501`,
-and are covered by tests.
+contents, archives, and both halves of upload-pack are registered from the
+manifest in `packages/contracts/src/index.ts`, answer `501`, and are covered by
+tests.

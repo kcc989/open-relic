@@ -3,6 +3,7 @@
  * the refs we hold with our capabilities attached to the first line.
  */
 
+import { ZERO_OID } from "../object.ts";
 import { flushPkt, pktLine, pktLineStream } from "./pkt-line.ts";
 
 export const RECEIVE_PACK_SERVICE = "git-receive-pack";
@@ -29,8 +30,6 @@ export const RECEIVE_PACK_CAPABILITIES: readonly string[] = [
   "object-format=sha1",
   `agent=open-relic/${SERVICE_VERSION}`,
 ];
-
-export const ZERO_OID = "0".repeat(40);
 
 /**
  * The ref name a server sends when it has no refs at all, so that a client

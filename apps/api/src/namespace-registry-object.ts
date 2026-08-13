@@ -18,6 +18,7 @@ import {
   type CreateRepositoryOutcome,
   type DeletedRepository,
   type ListRepositoriesQuery,
+  type PushRecord,
   type RepositoryPage,
   type RepositoryPointer,
 } from "./repository-index.ts";
@@ -82,5 +83,9 @@ export class NamespaceRegistryObject extends DurableObject {
 
   deleteRepository(namespaceSlug: string, name: string): Promise<DeletedRepository | null> {
     return this.#repositories.deleteRepository(namespaceSlug, name);
+  }
+
+  recordPush(namespaceSlug: string, name: string, record: PushRecord): Promise<void> {
+    return this.#repositories.recordPush(namespaceSlug, name, record);
   }
 }

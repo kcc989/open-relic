@@ -12,6 +12,18 @@ export type ObjectType = (typeof OBJECT_TYPES)[number];
 export const isObjectType = (value: string): value is ObjectType =>
   OBJECT_TYPES.some((type) => type === value);
 
+const OBJECT_ID_PATTERN = /^[0-9a-f]{40}$/;
+
+/** The shape of a name, not a claim that anything answers to it. */
+export const isObjectId = (value: string): boolean => OBJECT_ID_PATTERN.test(value);
+
+/**
+ * The name no object has. Git spells the absence of an object this way rather
+ * than by omitting it — an advertisement with no refs still names one, and a
+ * push spells "create this ref" as an update from it.
+ */
+export const ZERO_OID = "0".repeat(40);
+
 /**
  * The largest object we will hold, and so the largest we will accept.
  *

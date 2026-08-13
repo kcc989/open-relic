@@ -2,7 +2,12 @@ import type { RepoInfo, RepoSortField, SortDirection } from "@open-relic/contrac
 import { and, asc, desc, eq, sql, type SQL } from "drizzle-orm";
 
 import type { SyncSqliteDatabase } from "./db/database.ts";
-import { namespaces, repositories, type RepositoryRow } from "./db/registry-schema.ts";
+import {
+  namespaces,
+  repositories,
+  type NewRepositoryRow,
+  type RepositoryRow,
+} from "./db/registry-schema.ts";
 import { escapeLikePattern } from "./pagination.ts";
 
 export interface CreateRepositoryCommand {
@@ -64,6 +69,17 @@ export interface DeletedRepository {
   readonly durableObjectId: string;
 }
 
+/**
+ * What a push changes about a repository's index entry. `defaultBranch` is
+ * `null` on all but the one push that retargets HEAD, and the row is left
+ * alone then — the repository object stays authoritative for HEAD, and this
+ * column is the copy that keeps listing a namespace one query.
+ */
+export interface PushRecord {
+  readonly pushedAt: string;
+  readonly defaultBranch: string | null;
+}
+
 export interface RepositoryIndexClient {
   readonly createRepository: (command: CreateRepositoryCommand) => Promise<CreateRepositoryOutcome>;
   readonly listRepositories: (
@@ -78,6 +94,7 @@ export interface RepositoryIndexClient {
     namespaceSlug: string,
     name: string,
   ) => Promise<DeletedRepository | null>;
+  readonly recordPush: (namespaceSlug: string, name: string, record: PushRecord) => Promise<void>;
 }
 
 const toRepository = (row: RepositoryRow): RepoInfo => ({
@@ -281,5 +298,28 @@ export class RepositoryIndex {
       });
 
     return deleted[0] ?? null;
+  }
+
+  /**
+   * Stamps a push onto the index entry, after the refs have already moved.
+   *
+   * Deliberately not part of the push: the repository object is where a push
+   * either happens or does not, and the row here is a copy for the REST
+   * surface's benefit. A stamp that fails leaves `last_push_at` stale rather
+   * than leaving a ref half-moved.
+   */
+  async recordPush(namespaceSlug: string, name: string, record: PushRecord): Promise<void> {
+    // Built in statements rather than spread conditionally: `default_branch`
+    // is left alone on all but the one push that retargets HEAD, and an
+    // omission is easier to read as an omission than as an empty object.
+    const stamp: Partial<NewRepositoryRow> = { lastPushAt: record.pushedAt };
+    if (record.defaultBranch !== null) {
+      stamp.defaultBranch = record.defaultBranch;
+    }
+
+    await this.#db
+      .update(repositories)
+      .set(stamp)
+      .where(and(eq(repositories.namespaceSlug, namespaceSlug), eq(repositories.name, name)));
   }
 }

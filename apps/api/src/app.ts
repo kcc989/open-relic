@@ -81,7 +81,7 @@ export const createApp = ({
     // Both advertisement operations share a path, so the Git routes own it and
     // dispatch by the service Git names in the query string — including the
     // upload-pack advertisement, which is still a stub.
-    if (endpoint.id.endsWith(".advertise")) {
+    if (endpoint.id.endsWith(".advertise") || isImplementedEndpoint(endpoint.id)) {
       continue;
     }
     registerStub(endpoint.method, endpoint.path, endpoint.id);

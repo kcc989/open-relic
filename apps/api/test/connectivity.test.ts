@@ -1,0 +1,239 @@
+import { describe, expect, test } from "bun:test";
+
+import {
+  ObjectParseError,
+  commitParents,
+  findAncestor,
+  findMissingObject,
+  linksToVerify,
+  type ObjectSource,
+} from "../src/connectivity.ts";
+import type { PackBase } from "../src/pack.ts";
+import {
+  GITLINK_MODE,
+  blob,
+  commit,
+  tag,
+  tree,
+  treeEntry,
+  type GitObject,
+} from "./support/git-objects.ts";
+import { concat } from "./support/pack.ts";
+
+const encoder = new TextEncoder();
+
+/** A repository that holds exactly these objects and nothing else. */
+const holding = (...objects: readonly GitObject[]): ObjectSource => {
+  const held = new Map(objects.map((object) => [object.oid, object]));
+
+  return {
+    read: async (oid): Promise<PackBase | null> => {
+      const found = held.get(oid);
+      return found === undefined ? null : { type: found.type, bytes: found.bytes };
+    },
+  };
+};
+
+const walk = (tip: string, source: ObjectSource) =>
+  findMissingObject(tip, source, {
+    verified: new Set<string>(),
+    visited: new Set<string>(),
+  });
+
+const README = blob("Anvil firmware\n");
+const DOCS = tree([treeEntry("README.md", README)]);
+const ROOT = tree([treeEntry("docs", DOCS), treeEntry("main.c", blob("int"))]);
+const FIRST = commit({ tree: ROOT, message: "First" });
+const SECOND = commit({ tree: ROOT, parents: [FIRST], message: "Second" });
+
+describe("what an object names", () => {
+  test("a commit names its tree and every parent", () => {
+    expect(linksToVerify("commit", SECOND.bytes)).toEqual([
+      { oid: ROOT.oid, type: "tree" },
+      { oid: FIRST.oid, type: "commit" },
+    ]);
+  });
+
+  test("a merge commit names both parents, in order", () => {
+    const merge = commit({ tree: ROOT, parents: [FIRST, SECOND] });
+
+    expect(commitParents(merge.bytes)).toEqual([FIRST.oid, SECOND.oid]);
+  });
+
+  test("a tree names its subtrees and not its blobs", () => {
+    // Blobs are the expensive half — most of the objects and nearly all of the
+    // bytes — and a pack that parsed completely already implies them.
+    expect(linksToVerify("tree", ROOT.bytes)).toEqual([{ oid: DOCS.oid, type: "tree" }]);
+  });
+
+  test("a tree does not name a submodule's commit, which lives elsewhere", () => {
+    const withSubmodule = tree([
+      { mode: GITLINK_MODE, name: "vendor", oid: FIRST.oid },
+      treeEntry("docs", DOCS),
+    ]);
+
+    expect(linksToVerify("tree", withSubmodule.bytes)).toEqual([{ oid: DOCS.oid, type: "tree" }]);
+  });
+
+  test("a tag names what it points at, with the type it declares", () => {
+    expect(linksToVerify("tag", tag({ target: SECOND, name: "v1" }).bytes)).toEqual([
+      { oid: SECOND.oid, type: "commit" },
+    ]);
+  });
+
+  test("a blob names nothing", () => {
+    expect(linksToVerify("blob", README.bytes)).toEqual([]);
+  });
+
+  const unreadable: ReadonlyArray<readonly [string, "commit" | "tag", string]> = [
+    ["a commit with no tree", "commit", "author nobody\n\nno tree here\n"],
+    ["a commit whose tree is not an object id", "commit", "tree nope\n\n"],
+    ["a tag naming no object", "tag", "type commit\n\n"],
+    [
+      "a tag naming a type there is no such thing as",
+      "tag",
+      `object ${FIRST.oid}\ntype sandwich\n\n`,
+    ],
+  ];
+
+  for (const [label, type, contents] of unreadable) {
+    test(`refuses to guess at ${label}`, () => {
+      expect(() => linksToVerify(type, encoder.encode(contents))).toThrow(ObjectParseError);
+    });
+  }
+
+  test("refuses a tree entry that ends mid-object-id", () => {
+    const truncated = concat(encoder.encode("100644 README.md\0"), new Uint8Array(7));
+
+    expect(() => linksToVerify("tree", truncated)).toThrow(ObjectParseError);
+  });
+});
+
+describe("the connectivity walk", () => {
+  test("finds nothing missing when the whole history is there", async () => {
+    const source = holding(SECOND, FIRST, ROOT, DOCS);
+
+    expect(await walk(SECOND.oid, source)).toBeNull();
+  });
+
+  test("names the tree a commit points at but the push did not carry", async () => {
+    expect(await walk(FIRST.oid, holding(FIRST))).toBe(ROOT.oid);
+  });
+
+  test("names a missing parent, so a truncated history is caught", async () => {
+    expect(await walk(SECOND.oid, holding(SECOND, ROOT, DOCS))).toBe(FIRST.oid);
+  });
+
+  test("names a missing subtree several levels down", async () => {
+    expect(await walk(FIRST.oid, holding(FIRST, ROOT))).toBe(DOCS.oid);
+  });
+
+  test("does not go looking for blobs", async () => {
+    // Everything but the blobs is here, and that is enough: the pack carried
+    // them or it would not have parsed.
+    expect(await walk(FIRST.oid, holding(FIRST, ROOT, DOCS))).toBeNull();
+  });
+
+  test("walks through an annotated tag to what it tags", async () => {
+    const annotated = tag({ target: FIRST, name: "v1" });
+
+    expect(await walk(annotated.oid, holding(annotated, FIRST, ROOT))).toBe(DOCS.oid);
+    expect(await walk(annotated.oid, holding(annotated, FIRST, ROOT, DOCS))).toBeNull();
+  });
+
+  test("an object we cannot parse is as good as missing", async () => {
+    const source: ObjectSource = {
+      read: async () => ({ type: "commit", bytes: encoder.encode("garbage") }),
+    };
+
+    expect(await walk(FIRST.oid, source)).toBe(FIRST.oid);
+  });
+
+  test("stops at objects a previous push already walked", async () => {
+    const reads: string[] = [];
+    const source: ObjectSource = {
+      read: async (oid) => {
+        reads.push(oid);
+        return holding(SECOND).read(oid);
+      },
+    };
+
+    const missing = await findMissingObject(SECOND.oid, source, {
+      verified: new Set([ROOT.oid, FIRST.oid]),
+      visited: new Set(),
+    });
+
+    // The old tip and its tree were proven when they landed, so a push that
+    // adds one commit costs one commit rather than the whole history.
+    expect(missing).toBeNull();
+    expect(reads).toEqual([SECOND.oid]);
+  });
+
+  test("walks shared history once across the commands of one push", async () => {
+    const reads: string[] = [];
+    const store = holding(SECOND, FIRST, ROOT, DOCS);
+    const source: ObjectSource = {
+      read: async (oid) => {
+        reads.push(oid);
+        return store.read(oid);
+      },
+    };
+    const shared = {
+      verified: new Set<string>(),
+      visited: new Set<string>(),
+    };
+
+    await findMissingObject(SECOND.oid, source, shared);
+    const before = reads.length;
+    await findMissingObject(FIRST.oid, source, shared);
+
+    expect(reads.length).toBe(before);
+  });
+});
+
+describe("the fast-forward check", () => {
+  const history = holding(SECOND, FIRST, ROOT, DOCS);
+
+  test("a commit is its own ancestor, so an unchanged tip fast-forwards", async () => {
+    expect(await findAncestor(FIRST.oid, FIRST.oid, history)).toBe("ancestor");
+  });
+
+  test("finds the old tip behind the new one", async () => {
+    expect(await findAncestor(SECOND.oid, FIRST.oid, history)).toBe("ancestor");
+  });
+
+  test("does not find the new tip behind the old one, which is a rewind", async () => {
+    expect(await findAncestor(FIRST.oid, SECOND.oid, history)).toBe("unrelated");
+  });
+
+  test("finds an ancestor that only one parent of a merge reaches", async () => {
+    // The trap a walk that stopped at the first known tip would fall into: the
+    // old tip is behind the *other* parent.
+    const sideways = commit({ tree: ROOT, message: "Sideways" });
+    const merge = commit({ tree: ROOT, parents: [sideways, SECOND] });
+
+    expect(
+      await findAncestor(merge.oid, FIRST.oid, holding(merge, sideways, SECOND, FIRST, ROOT, DOCS)),
+    ).toBe("ancestor");
+  });
+
+  test("reads no trees, because history is made of commits", async () => {
+    const reads: string[] = [];
+    const source: ObjectSource = {
+      read: async (oid) => {
+        reads.push(oid);
+        return history.read(oid);
+      },
+    };
+
+    await findAncestor(SECOND.oid, FIRST.oid, source);
+
+    expect(reads).not.toContain(ROOT.oid);
+  });
+
+  test("gives up rather than reading a history without end", async () => {
+    // Proving *no* means reading everything the new tip reaches; the ceiling is
+    // what makes that a rejection we can explain instead of a Worker we lose.
+    expect(await findAncestor(SECOND.oid, "d".repeat(40), history, 1)).toBe("budget-exhausted");
+  });
+});

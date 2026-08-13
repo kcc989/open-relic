@@ -1,12 +1,41 @@
 import { asc, eq } from "drizzle-orm";
 
+import {
+  FAST_FORWARD_COMMIT_BUDGET,
+  findAncestor,
+  findMissingObject,
+  type WalkOptions,
+} from "./connectivity.ts";
 import type { SyncSqliteDatabase } from "./db/database.ts";
 import type { SyncKv } from "./db/kv.ts";
 import { REPOSITORY_STATE_ID, refs, repositoryState } from "./db/repository-schema.ts";
 import { receivePackAdvertisementStream, type AdvertisedRef } from "./git/advertisement.ts";
-import { HEAD_KEY, formatHead, headBranch, parseHead, symbolicHead } from "./head.ts";
+import { PktLineError, PktLineReader } from "./git/pkt-line.ts";
+import {
+  REJECTIONS,
+  REPORT_STATUS_CAPABILITY,
+  ReceivePackError,
+  UNPACK_OK,
+  accepted,
+  isCreate,
+  isDelete,
+  readReceivePackRequest,
+  receivePackResult,
+  rejected,
+  screenCommands,
+  type ReceivePackCommand,
+  type RefStatus,
+} from "./git/receive-pack.ts";
+import {
+  BRANCH_REF_PREFIX,
+  HEAD_KEY,
+  formatHead,
+  headBranch,
+  parseHead,
+  symbolicHead,
+} from "./head.ts";
 import { ObjectStore } from "./object-store.ts";
-import { readPack, type PackBase, type PackSummary } from "./pack.ts";
+import { PackError, readPack, type PackBase } from "./pack.ts";
 
 /** The Git side of a `git init --bare`; the registry owns naming. */
 export interface RepositoryInit {
@@ -21,11 +50,41 @@ export interface RepositorySnapshot {
   readonly createdAt: string;
 }
 
+/**
+ * What a push leaves behind, as the Worker needs to see it. The report is bytes
+ * because the object owns Git and the Worker owns the response; the two fields
+ * beside it are the only things about a push the registry has to be told.
+ */
+export interface ReceivePackOutcome {
+  /** The `report-status` body, already framed for the client's capabilities. */
+  readonly report: Uint8Array<ArrayBuffer>;
+  /** Whether any ref actually moved, which is what makes this a push at all. */
+  readonly accepted: boolean;
+  /**
+   * The branch HEAD points at now, when this push is what retargeted it, so the
+   * registry's denormalized copy can follow. `null` when HEAD did not move.
+   */
+  readonly retargetedTo: string | null;
+}
+
 export interface RepositoryObjectClient {
   readonly initialize: (init: RepositoryInit) => Promise<RepositorySnapshot>;
   readonly describe: () => Promise<RepositorySnapshot | null>;
   readonly advertiseReceivePack: () => Promise<ReadableStream<Uint8Array>>;
+  readonly receivePack: (body: ReadableStream<Uint8Array>) => Promise<ReceivePackOutcome>;
   readonly destroy: () => Promise<void>;
+}
+
+/** The wire strings live with the wire; this is where callers found them. */
+export { REJECTIONS } from "./git/receive-pack.ts";
+
+/**
+ * A command that survived every check, waiting on the one transaction that
+ * applies them all.
+ */
+interface PendingUpdate {
+  readonly at: number;
+  readonly command: ReceivePackCommand;
 }
 
 /**
@@ -100,21 +159,109 @@ export class RepositoryStore {
     return receivePackAdvertisementStream(await this.#refs());
   }
 
-  /** Byte order by full ref name, which is the order Git advertises in. */
-  async #refs(): Promise<readonly AdvertisedRef[]> {
-    const rows = await this.#db.select().from(refs).orderBy(asc(refs.name));
-
-    return rows.map((row) => ({ name: row.name, oid: row.objectId }));
-  }
-
   /**
-   * Reads a pack into the repository's objects, leaving them unreachable until
-   * a ref names them — which is what the advertisement above will list once
-   * push lands. The stream is consumed as it arrives rather than buffered, so a
-   * pack far larger than the object's memory is fine.
+   * A push, start to finish: the client's ref update commands, the pack behind
+   * them, a walk that confirms the pack was complete, and then one transaction
+   * that moves the refs.
+   *
+   * The order is the whole design. Objects are written before anything is
+   * checked, because the pack streams through once and holding it back would
+   * mean holding it in memory. A ref is the only thing that makes an object
+   * reachable, so objects a failed push left behind are a storage cost rather
+   * than a correctness problem — sweeping them is separate work.
    */
-  readPack(pack: ReadableStream<Uint8Array>): Promise<PackSummary> {
-    return readPack(pack, this.#objects);
+  async receivePack(body: ReadableStream<Uint8Array>): Promise<ReceivePackOutcome> {
+    const lines = new PktLineReader(body);
+
+    let commands: readonly ReceivePackCommand[];
+    let capabilities: readonly string[];
+    try {
+      ({ commands, capabilities } = await readReceivePackRequest(lines));
+    } catch (error) {
+      if (error instanceof ReceivePackError) {
+        await lines.cancel();
+        return this.#refuse(error.message, error.capabilities);
+      }
+      if (error instanceof PktLineError) {
+        // The framing itself was wrong, so nothing was negotiated either.
+        await lines.cancel();
+        return this.#refuse(error.message, [REPORT_STATUS_CAPABILITY]);
+      }
+      throw error;
+    }
+
+    const current = await this.#refMap();
+    const messages: string[] = [];
+
+    // Only rejections are recorded: a command with no entry here was applied,
+    // which makes the report total by construction rather than by invariant.
+    const rejections = new Map<number, RefStatus>();
+    const pending: PendingUpdate[] = [];
+
+    screenCommands(commands, current).forEach((reason, at) => {
+      const command = commands[at]!;
+      if (reason === null) {
+        pending.push({ at, command });
+      } else {
+        rejections.set(at, rejected(command.name, reason));
+      }
+    });
+
+    // A push with nothing but deletes carries no pack, so waiting for one would
+    // wait for a body the client has already finished sending.
+    if (commands.some((command) => !isDelete(command))) {
+      try {
+        await readPack(lines.rest(), this.#objects);
+      } catch (error) {
+        if (!(error instanceof PackError)) {
+          throw error;
+        }
+
+        // No ref can be singled out: every one of them was riding on this pack.
+        return this.#refuse(
+          error.message,
+          capabilities,
+          commands.map((command) => rejected(command.name, REJECTIONS.unpacker)),
+        );
+      }
+    } else {
+      await lines.cancel();
+    }
+
+    const walk = { verified: new Set(current.values()), visited: new Set<string>() };
+    const updates: PendingUpdate[] = [];
+
+    for (const update of pending) {
+      const verdict = await this.#verify(update.command, walk);
+
+      if (verdict === null) {
+        updates.push(update);
+        continue;
+      }
+
+      rejections.set(update.at, rejected(update.command.name, verdict.reason));
+      if (verdict.message !== undefined) {
+        messages.push(verdict.message);
+      }
+    }
+
+    const retargetedTo = this.#retarget(current, updates);
+    if (updates.length > 0) {
+      await this.#applyUpdates(updates, retargetedTo);
+    }
+
+    return {
+      report: receivePackResult(
+        {
+          unpack: UNPACK_OK,
+          refs: commands.map((command, at) => rejections.get(at) ?? accepted(command.name)),
+          messages,
+        },
+        capabilities,
+      ),
+      accepted: updates.length > 0,
+      retargetedTo,
+    };
   }
 
   /** `null` when the repository does not hold that object. */
@@ -124,6 +271,138 @@ export class RepositoryStore {
 
   hasObject(oid: string): Promise<boolean> {
     return this.#objects.has(oid);
+  }
+
+  /** Byte order by full ref name, which is the order Git advertises in. */
+  async #refs(): Promise<readonly AdvertisedRef[]> {
+    const rows = await this.#db.select().from(refs).orderBy(asc(refs.name));
+
+    return rows.map((row) => ({ name: row.name, oid: row.objectId }));
+  }
+
+  async #refMap(): Promise<ReadonlyMap<string, string>> {
+    return new Map((await this.#refs()).map((ref) => [ref.name, ref.oid]));
+  }
+
+  /**
+   * A push that moved nothing, because we could not read far enough into it to
+   * say otherwise. `refs` is empty when the failure came before any ref was
+   * named, and every command when it came with the pack they all rode on.
+   */
+  #refuse(
+    detail: string,
+    capabilities: readonly string[],
+    refs: readonly RefStatus[] = [],
+  ): ReceivePackOutcome {
+    return {
+      report: receivePackResult(
+        {
+          unpack: detail,
+          refs,
+          messages: [`open-relic could not read the push: ${detail}`],
+        },
+        capabilities,
+      ),
+      accepted: false,
+      retargetedTo: null,
+    };
+  }
+
+  /**
+   * The two questions that need the objects themselves: is everything the push
+   * claims actually here, and does the new tip descend from the old one.
+   * `null` is a command with nothing left to object to.
+   */
+  async #verify(
+    command: ReceivePackCommand,
+    walk: WalkOptions,
+  ): Promise<{ reason: string; message?: string } | null> {
+    const missing = await findMissingObject(command.newOid, this.#objects, walk);
+
+    if (missing !== null) {
+      return {
+        reason: REJECTIONS.missingObjects,
+        message: `${command.name} needs ${missing}, which the push did not carry.`,
+      };
+    }
+
+    // A branch that did not exist has no history to fast-forward from.
+    if (isCreate(command)) {
+      return null;
+    }
+
+    const verdict = await findAncestor(command.newOid, command.oldOid, this.#objects);
+
+    switch (verdict) {
+      case "ancestor":
+        return null;
+      case "budget-exhausted":
+        return {
+          reason: REJECTIONS.unprovable,
+          message: `${command.name} was not confirmed as a fast-forward within ${FAST_FORWARD_COMMIT_BUDGET} commits.`,
+        };
+      case "unrelated":
+        return { reason: REJECTIONS.nonFastForward };
+    }
+  }
+
+  /**
+   * HEAD follows a push only in the one case where leaving it alone is plainly
+   * wrong: a repository that held no refs at all, and a push that gave it
+   * exactly one branch. That is `git init && git push -u origin master` against
+   * a repository created with a different default, where a HEAD naming a branch
+   * nobody will ever push is a repository no clone can check out.
+   *
+   * Any other push leaves it alone. Which branch a repository is *for* is not
+   * something a push is entitled to decide once there is anything to decide
+   * between.
+   */
+  #retarget(
+    current: ReadonlyMap<string, string>,
+    updates: readonly PendingUpdate[],
+  ): string | null {
+    if (current.size > 0) {
+      return null;
+    }
+
+    const branches = updates
+      .map((update) => update.command.name)
+      .filter((name) => name.startsWith(BRANCH_REF_PREFIX));
+
+    const [only] = branches;
+    if (only === undefined || branches.length > 1) {
+      return null;
+    }
+
+    const branch = only.slice(BRANCH_REF_PREFIX.length);
+    return formatHead(symbolicHead(branch)) === this.#kv.get(HEAD_KEY) ? null : branch;
+  }
+
+  /**
+   * One transaction for every ref the push moved, and for HEAD along with them.
+   * The body is synchronous because the driver is: a transaction that yielded
+   * would commit before it finished, and the KV write would land in a storage
+   * turn of its own rather than this one.
+   */
+  async #applyUpdates(
+    updates: readonly PendingUpdate[],
+    retargetedTo: string | null,
+  ): Promise<void> {
+    await this.#db.transaction((tx) => {
+      for (const { command } of updates) {
+        tx.insert(refs)
+          .values({ name: command.name, objectId: command.newOid })
+          .onConflictDoUpdate({
+            target: refs.name,
+            set: { objectId: command.newOid },
+          })
+          .run();
+      }
+
+      if (retargetedTo !== null) {
+        this.#kv.put(HEAD_KEY, formatHead(symbolicHead(retargetedTo)));
+      }
+    });
   }
 
   /** Missing or unreadable contents read the same as a detached HEAD. */
