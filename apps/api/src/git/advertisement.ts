@@ -95,6 +95,7 @@ export const receivePackAdvertisementStream = (
 ): ReadableStream<Uint8Array> => pktLineStream(receivePackAdvertisement(refs));
 
 export const uploadPackCapabilities = (head: Head | null): readonly string[] => [
+  "multi_ack_detailed",
   "thin-pack",
   "side-band-64k",
   "ofs-delta",

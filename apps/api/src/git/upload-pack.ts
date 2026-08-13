@@ -18,6 +18,7 @@ const decoder = new TextDecoder();
 const WANT_PATTERN = /^want ([0-9a-f]{40})(?: (.*))?\n?$/;
 const HAVE_PATTERN = /^have ([0-9a-f]{40})\n?$/;
 
+const MULTI_ACK_DETAILED = "multi_ack_detailed";
 const SIDE_BAND_64K = "side-band-64k";
 const THIN_PACK = "thin-pack";
 const DATA_BAND = 1;
@@ -335,9 +336,18 @@ async function* uploadPackResult(
   }
 
   const client = await reachable(request.haves, source, false);
-  const acknowledgement = request.haves.find((oid) => client.held.has(oid));
+  const acknowledgements = request.haves.filter((oid) => client.held.has(oid));
+  const acknowledgement = acknowledgements.at(-1);
 
   if (!request.done) {
+    if (request.capabilities.includes(MULTI_ACK_DETAILED)) {
+      for (const oid of acknowledgements) {
+        yield pktLine(`ACK ${oid} common\n`);
+      }
+      yield pktLine("NAK\n");
+      return;
+    }
+
     yield pktLine(acknowledgement === undefined ? "NAK\n" : `ACK ${acknowledgement}\n`);
     return;
   }

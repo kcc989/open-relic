@@ -12,9 +12,6 @@ const README = blob("Anvil firmware\n");
 const ROOT = tree([treeEntry("README.md", README)]);
 const FIRST = commit({ tree: ROOT, message: "First" });
 const V1 = tag({ target: FIRST, name: "v1" });
-const REVISED = blob("Anvil firmware, revised\n");
-const SECOND_ROOT = tree([treeEntry("README.md", REVISED)]);
-const SECOND = commit({ tree: SECOND_ROOT, parents: [FIRST], message: "Second" });
 const MAIN = "refs/heads/main";
 
 let harness: TestApp;
@@ -98,29 +95,67 @@ describe("a real Git client", () => {
     }
   });
 
-  test("fetches a fast-forward pushed after the clone", async () => {
+  test("fetches a coalesced multi-round response after a fast-forward push", async () => {
+    let coalesceUploadPackResponses = false;
+    let uploadPackRounds = 0;
+    let acknowledgedNegotiationRounds = 0;
     const server = Bun.serve({
       port: 0,
-      fetch: (request) => harness.app.fetch(request),
+      fetch: async (request) => {
+        const uploadPackRequest =
+          coalesceUploadPackResponses &&
+          request.method === "POST" &&
+          request.url.endsWith("/git-upload-pack")
+            ? new Uint8Array(await request.clone().arrayBuffer())
+            : null;
+        const response = await harness.app.fetch(request);
+        if (uploadPackRequest !== null) {
+          uploadPackRounds += 1;
+          const uploadPackResponse = new Uint8Array(await response.arrayBuffer());
+          const requestText = new TextDecoder().decode(uploadPackRequest);
+          const responseText = new TextDecoder().decode(uploadPackResponse);
+          if (!requestText.includes("done\n") && responseText.includes("ACK ")) {
+            acknowledgedNegotiationRounds += 1;
+          }
+          return new Response(uploadPackResponse, response);
+        }
+        return response;
+      },
     });
-    const checkout = join(directory, "checkout");
+    const remote = remoteFor(server.port);
+    const writer = join(directory, "writer");
+    const reader = join(directory, "reader");
 
     try {
-      await run(["git", "clone", remoteFor(server.port), checkout]);
+      await run(["git", "clone", remote, writer]);
+      await run(["git", "-C", writer, "config", "user.name", "Open Relic"]);
+      await run(["git", "-C", writer, "config", "user.email", "tests@open-relic.dev"]);
+      for (let commit = 1; commit <= 80; commit += 1) {
+        await run(["git", "-C", writer, "commit", "--allow-empty", "-m", `Remote ${commit}`]);
+      }
+      await run(["git", "-C", writer, "push", "origin", "HEAD:main"]);
 
-      const response = await push(
-        pushBody({
-          commands: [{ oldOid: FIRST.oid, newOid: SECOND.oid, name: MAIN }],
-          objects: [SECOND, SECOND_ROOT, REVISED],
-        }),
-      );
-      expect(response.status).toBe(200);
+      await run(["git", "clone", remote, reader]);
+      await run(["git", "-C", reader, "config", "user.name", "Open Relic"]);
+      await run(["git", "-C", reader, "config", "user.email", "tests@open-relic.dev"]);
+      for (let commit = 1; commit <= 40; commit += 1) {
+        await run(["git", "-C", reader, "commit", "--allow-empty", "-m", `Local ${commit}`]);
+      }
 
-      await run(["git", "-C", checkout, "fetch", "origin"]);
+      await writeFile(join(writer, "README.md"), "Anvil firmware, remote\n");
+      await run(["git", "-C", writer, "add", "README.md"]);
+      await run(["git", "-C", writer, "commit", "-m", "New remote tip"]);
+      const remoteTip = await run(["git", "-C", writer, "rev-parse", "HEAD"]);
+      await run(["git", "-C", writer, "push", "origin", "HEAD:main"]);
 
-      expect(await run(["git", "-C", checkout, "rev-parse", "origin/main"])).toBe(SECOND.oid);
-      expect(await run(["git", "-C", checkout, "show", "origin/main:README.md"])).toBe(
-        "Anvil firmware, revised",
+      coalesceUploadPackResponses = true;
+      await run(["git", "-C", reader, "fetch", "origin"]);
+
+      expect(uploadPackRounds).toBeGreaterThanOrEqual(2);
+      expect(acknowledgedNegotiationRounds).toBeGreaterThanOrEqual(1);
+      expect(await run(["git", "-C", reader, "rev-parse", "origin/main"])).toBe(remoteTip);
+      expect(await run(["git", "-C", reader, "show", "origin/main:README.md"])).toBe(
+        "Anvil firmware, remote",
       );
     } finally {
       server.stop(true);
