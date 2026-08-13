@@ -1,19 +1,12 @@
 import type { Namespace } from "@open-relic/contracts";
 import { asc, eq } from "drizzle-orm";
-import type { SQLiteAsyncDatabase } from "drizzle-orm/sqlite-core/async/db";
 
-import { namespaces, type NamespaceRow } from "./db/schema.ts";
-
-/**
- * Any synchronous SQLite database drizzle can drive.
- *
- * `DrizzleSqliteDODatabase` (the Durable Object's storage) and
- * `SQLiteBunDatabase` (`bun:sqlite`, used by the tests) both extend this, so
- * the queries below are written once and run unchanged in both places. The run
- * result type is the only thing that differs between the two drivers and
- * nothing here reads it.
- */
-export type NamespaceDatabase = SQLiteAsyncDatabase<"sync", unknown>;
+import type { SyncSqliteDatabase } from "./db/database.ts";
+import {
+  namespaces,
+  repositories,
+  type NamespaceRow,
+} from "./db/registry-schema.ts";
 
 export interface CreateNamespaceCommand {
   readonly slug: string;
@@ -31,6 +24,17 @@ export type CreateNamespaceOutcome =
   | { readonly created: false; readonly reason: "slug-taken" };
 
 /**
+ * Deleting a namespace takes its repositories with it. The object ids of the
+ * repositories that were dropped come back so the caller can destroy their
+ * storage; the index row and the object it points at are removed by different
+ * layers, and only the caller holds the `REPOSITORIES` binding.
+ */
+export interface DeleteNamespaceOutcome {
+  readonly deleted: boolean;
+  readonly repositoryObjectIds: readonly string[];
+}
+
+/**
  * The registry as a caller sees it: the Durable Object's RPC surface.
  *
  * A `DurableObjectStub<NamespaceRegistryObject>` satisfies this, and so does a
@@ -43,7 +47,7 @@ export interface NamespaceRegistryClient {
   ) => Promise<CreateNamespaceOutcome>;
   readonly listNamespaces: () => Promise<readonly Namespace[]>;
   readonly getNamespace: (slug: string) => Promise<Namespace | null>;
-  readonly deleteNamespace: (slug: string) => Promise<boolean>;
+  readonly deleteNamespace: (slug: string) => Promise<DeleteNamespaceOutcome>;
 }
 
 const toNamespace = (row: NamespaceRow): Namespace => ({
@@ -61,9 +65,9 @@ const toNamespace = (row: NamespaceRow): Namespace => ({
  * queries against the same generated migrations — without a Workers runtime.
  */
 export class NamespaceRegistry {
-  readonly #db: NamespaceDatabase;
+  readonly #db: SyncSqliteDatabase;
 
-  constructor(db: NamespaceDatabase) {
+  constructor(db: SyncSqliteDatabase) {
     this.#db = db;
   }
 
@@ -110,13 +114,30 @@ export class NamespaceRegistry {
     return row === undefined ? null : toNamespace(row);
   }
 
-  /** Returns whether a row was actually removed. */
-  async deleteNamespace(slug: string): Promise<boolean> {
-    const deleted = await this.#db
-      .delete(namespaces)
-      .where(eq(namespaces.slug, slug))
-      .returning({ slug: namespaces.slug });
+  /**
+   * Removes a namespace and every repository indexed under it, in one
+   * transaction so a caller can never observe repositories orphaned from their
+   * namespace. Repositories go first: the index row is the child of the
+   * namespace row.
+   */
+  async deleteNamespace(slug: string): Promise<DeleteNamespaceOutcome> {
+    return this.#db.transaction((tx): DeleteNamespaceOutcome => {
+      const removed = tx
+        .delete(repositories)
+        .where(eq(repositories.namespaceSlug, slug))
+        .returning({ durableObjectId: repositories.durableObjectId })
+        .all();
 
-    return deleted.length > 0;
+      const deleted = tx
+        .delete(namespaces)
+        .where(eq(namespaces.slug, slug))
+        .returning({ slug: namespaces.slug })
+        .all();
+
+      return {
+        deleted: deleted.length > 0,
+        repositoryObjectIds: removed.map((row) => row.durableObjectId),
+      };
+    });
   }
 }

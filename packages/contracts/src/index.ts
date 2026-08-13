@@ -185,6 +185,10 @@ export const IMPLEMENTED_ENDPOINT_IDS = [
   "namespaces.list",
   "namespaces.get",
   "namespaces.delete",
+  "repositories.create",
+  "repositories.list",
+  "repositories.get",
+  "repositories.delete",
 ] as const satisfies readonly EndpointId[];
 
 export type ImplementedEndpointId = (typeof IMPLEMENTED_ENDPOINT_IDS)[number];
@@ -209,6 +213,7 @@ export const PROBLEM_TYPES = {
   namespaceExists: `${PROBLEM_BASE_URI}/namespace-exists`,
   notFound: `${PROBLEM_BASE_URI}/not-found`,
   notImplemented: `${PROBLEM_BASE_URI}/not-implemented`,
+  repositoryExists: `${PROBLEM_BASE_URI}/repository-exists`,
 } as const;
 
 /**
@@ -292,5 +297,141 @@ export const describeNamespaceSlugViolation = (
       return "A namespace slug may only contain lowercase letters, digits, and interior hyphens.";
     case "reserved":
       return "That namespace slug is reserved by the API.";
+  }
+};
+
+/**
+ * A repository inside a namespace. `namespace` and `name` together are its
+ * identity in both the REST API (`/api/v1/namespaces/:namespace/repos/:repo`)
+ * and Git Smart HTTP (`/git/:namespace/:repo.git`).
+ *
+ * `defaultBranch` is the branch a fresh clone checks out — the target of the
+ * repository's `HEAD`.
+ */
+export interface Repository {
+  readonly namespace: string;
+  readonly name: string;
+  readonly description: string | null;
+  readonly defaultBranch: string;
+  readonly createdAt: string;
+}
+
+export interface CreateRepositoryBody {
+  readonly name: string;
+  readonly description?: string;
+  readonly defaultBranch?: string;
+}
+
+export interface RepositoryListBody {
+  readonly repositories: readonly Repository[];
+}
+
+export const REPOSITORY_NAME_MAX_LENGTH = 100;
+export const REPOSITORY_DESCRIPTION_MAX_LENGTH = 500;
+export const BRANCH_NAME_MAX_LENGTH = 255;
+
+/** The branch a repository gets when the create request does not name one. */
+export const DEFAULT_BRANCH = "main";
+
+/**
+ * Lowercase alphanumerics with interior dots, underscores, and hyphens. Wider
+ * than {@link NAMESPACE_SLUG_PATTERN} because repository names carry file-like
+ * conventions (`my.config`, `dot_files`), but held to the same lowercase-only
+ * rule so a clone URL never depends on case folding.
+ */
+export const REPOSITORY_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/;
+
+export type RepositoryNameViolation =
+  | "empty"
+  | "git-suffix"
+  | "malformed"
+  | "too-long";
+
+export const validateRepositoryName = (
+  name: string,
+): RepositoryNameViolation | null => {
+  if (name.length === 0) {
+    return "empty";
+  }
+  if (name.length > REPOSITORY_NAME_MAX_LENGTH) {
+    return "too-long";
+  }
+  if (!REPOSITORY_NAME_PATTERN.test(name)) {
+    return "malformed";
+  }
+  // `/git/:namespace/:repo.git` appends the suffix itself, so a name that
+  // already ends in `.git` would produce two spellings of one clone URL.
+  if (name.endsWith(".git")) {
+    return "git-suffix";
+  }
+  return null;
+};
+
+export const describeRepositoryNameViolation = (
+  violation: RepositoryNameViolation,
+): string => {
+  switch (violation) {
+    case "empty":
+      return "A repository name is required.";
+    case "too-long":
+      return `A repository name may be at most ${REPOSITORY_NAME_MAX_LENGTH} characters.`;
+    case "malformed":
+      return "A repository name may only contain lowercase letters, digits, and interior dots, underscores, and hyphens.";
+    case "git-suffix":
+      return 'A repository name may not end in ".git".';
+  }
+};
+
+export type BranchNameViolation = "empty" | "malformed" | "too-long";
+
+/**
+ * A conservative subset of `git check-ref-format` for the one branch name the
+ * API accepts today. It rejects everything Git rejects and some things Git
+ * would allow; widening it later cannot invalidate a name already stored.
+ */
+export const validateBranchName = (name: string): BranchNameViolation | null => {
+  if (name.length === 0) {
+    return "empty";
+  }
+  if (name.length > BRANCH_NAME_MAX_LENGTH) {
+    return "too-long";
+  }
+  // The allowed alphabet, which also settles the rules about control
+  // characters, spaces, `~^:?*[\`, and `@{` by never admitting them.
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name)) {
+    return "malformed";
+  }
+  if (name.includes("..") || name.endsWith(".")) {
+    return "malformed";
+  }
+
+  // Git applies its dot rules to each slash-separated component rather than to
+  // the name as a whole, so `foo/.bar` and `a.lock/b` are refs it will not
+  // create even though neither the name nor its first component offends. An
+  // empty component covers `foo//bar` and a trailing slash; a leading one is
+  // already excluded by the alphabet above.
+  for (const component of name.split("/")) {
+    if (
+      component.length === 0 ||
+      component.startsWith(".") ||
+      component.endsWith(".lock")
+    ) {
+      return "malformed";
+    }
+  }
+
+  return null;
+};
+
+export const describeBranchNameViolation = (
+  violation: BranchNameViolation,
+): string => {
+  switch (violation) {
+    case "empty":
+      return "A branch name is required.";
+    case "too-long":
+      return `A branch name may be at most ${BRANCH_NAME_MAX_LENGTH} characters.`;
+    case "malformed":
+      return "That branch name is not a valid Git branch name.";
   }
 };

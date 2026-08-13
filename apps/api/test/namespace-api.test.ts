@@ -5,27 +5,22 @@ import {
 } from "@open-relic/contracts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
-import { createApp } from "../src/app.ts";
-import { NamespaceRegistry } from "../src/namespace-registry.ts";
-import { createTestDatabase } from "./support/database.ts";
+import { createTestApp, type TestApp } from "./support/app.ts";
 
 const NAMESPACES = `http://local.test${API_BASE_PATH}/namespaces`;
 
-let app: ReturnType<typeof createApp>;
-let closeDatabase: () => void;
+let harness: TestApp;
+let app: TestApp["app"];
 
+// The routes run against the same registry the Durable Object wraps, so the
+// only thing these tests skip is the RPC hop.
 beforeEach(() => {
-  const { db, close } = createTestDatabase();
-  closeDatabase = close;
-
-  // The routes run against the same registry the Durable Object wraps, so the
-  // only thing these tests skip is the RPC hop.
-  const registry = new NamespaceRegistry(db);
-  app = createApp({ namespaceRegistry: () => registry });
+  harness = createTestApp();
+  app = harness.app;
 });
 
 afterEach(() => {
-  closeDatabase();
+  harness.close();
 });
 
 const create = (body: unknown) =>

@@ -11,60 +11,37 @@ import {
 } from "@open-relic/contracts";
 import type { Hono } from "hono";
 
+import type { RepositoryObjects } from "./bindings.ts";
 import type {
   CreateNamespaceCommand,
   NamespaceRegistryClient,
 } from "./namespace-registry.ts";
 import type { ApiEnv } from "../../../alchemy.run.ts";
-import { invalidRequest, notFound, problemResponse } from "./problems.ts";
-
-/**
- * Name of the single registry object. Every request resolves the same id, so
- * slug allocation is serialized by one Durable Object.
- */
-export const NAMESPACE_REGISTRY_KEY = "registry";
-
-export const namespaceRegistryFromEnv = (
-  env: ApiEnv,
-): NamespaceRegistryClient => env.NAMESPACES.getByName(NAMESPACE_REGISTRY_KEY);
-
-type Rejected = { readonly ok: false; readonly detail: string };
+import {
+  conflict,
+  invalidRequest,
+  notFound,
+  problemResponse,
+} from "./problems.ts";
+import {
+  parseJsonObject,
+  parseOptionalText,
+  type Rejected,
+} from "./request-body.ts";
 
 type ParsedCreate =
   | { readonly ok: true; readonly command: CreateNamespaceCommand }
   | Rejected;
 
-type ParsedText = { readonly ok: true; readonly value: string | null } | Rejected;
-
-const parseOptionalText = (
-  value: unknown,
-  field: string,
-  maxLength: number,
-): ParsedText => {
-  if (value === undefined || value === null) {
-    return { ok: true, value: null };
-  }
-  if (typeof value !== "string") {
-    return { ok: false, detail: `"${field}" must be a string.` };
-  }
-
-  const trimmed = value.trim();
-  if (trimmed.length > maxLength) {
-    return {
-      ok: false,
-      detail: `"${field}" may be at most ${maxLength} characters.`,
-    };
-  }
-
-  return { ok: true, value: trimmed.length === 0 ? null : trimmed };
-};
-
 const parseCreateBody = (payload: unknown): ParsedCreate => {
-  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
-    return { ok: false, detail: "The request body must be a JSON object." };
+  const object = parseJsonObject(payload);
+  if (!object.ok) {
+    return object;
   }
 
-  const body = payload as Partial<Record<keyof CreateNamespaceBody, unknown>>;
+  const body = object.value as Partial<
+    Record<keyof CreateNamespaceBody, unknown>
+  >;
   if (typeof body.slug !== "string") {
     return { ok: false, detail: `"slug" must be a string.` };
   }
@@ -114,6 +91,7 @@ const namespaceLocation = (namespace: Namespace): string =>
 export const registerNamespaceRoutes = (
   app: Hono<{ Bindings: ApiEnv }>,
   resolveRegistry: (env: ApiEnv) => NamespaceRegistryClient,
+  resolveObjects: (env: ApiEnv) => RepositoryObjects,
 ): void => {
   app.post(`${API_BASE_PATH}/namespaces`, async (context) => {
     let payload: unknown;
@@ -137,13 +115,13 @@ export const registerNamespaceRoutes = (
     );
 
     if (!outcome.created) {
-      return problemResponse({
-        type: PROBLEM_TYPES.namespaceExists,
-        title: "Conflict",
-        status: 409,
-        detail: `The namespace "${parsed.command.slug}" already exists.`,
-        operation: "namespaces.create",
-      });
+      return problemResponse(
+        conflict(
+          "namespaces.create",
+          PROBLEM_TYPES.namespaceExists,
+          `The namespace "${parsed.command.slug}" already exists.`,
+        ),
+      );
     }
 
     return Response.json(outcome.namespace, {
@@ -173,11 +151,21 @@ export const registerNamespaceRoutes = (
 
   app.delete(`${API_BASE_PATH}/namespaces/:namespace`, async (context) => {
     const slug = context.req.param("namespace");
-    const deleted = await resolveRegistry(context.env).deleteNamespace(slug);
+    const outcome = await resolveRegistry(context.env).deleteNamespace(slug);
 
-    if (!deleted) {
+    if (!outcome.deleted) {
       return problemResponse(
         notFound("namespaces.delete", `No namespace named "${slug}" exists.`),
+      );
+    }
+
+    // Deleting a namespace takes its repositories with it. The index rows are
+    // already gone, so this only discards storage nothing can reach; the
+    // objects are independent of each other, so discard them concurrently.
+    if (outcome.repositoryObjectIds.length > 0) {
+      const objects = resolveObjects(context.env);
+      await Promise.all(
+        outcome.repositoryObjectIds.map((id) => objects.get(id).destroy()),
       );
     }
 
