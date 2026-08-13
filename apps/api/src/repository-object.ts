@@ -44,6 +44,10 @@ export class RepositoryObject extends DurableObject {
     return this.#store.describe();
   }
 
+  advertiseReceivePack(): Promise<ReadableStream<Uint8Array>> {
+    return this.#store.advertiseReceivePack();
+  }
+
   /**
    * Leaves the storage empty, which is the point: a Durable Object is only
    * reclaimed once its storage is empty, so re-creating the schema here — even
@@ -55,13 +59,18 @@ export class RepositoryObject extends DurableObject {
     await this.ctx.storage.deleteAll();
   }
 
+  /**
+   * Git reaches this object through RPC methods like
+   * {@link RepositoryObject.advertiseReceivePack}, never through a forwarded
+   * request, so nothing should arrive here.
+   */
   override async fetch(): Promise<Response> {
     return Response.json(
       {
         type: "https://open-relic.dev/problems/not-implemented",
         title: "Not Implemented",
         status: 501,
-        detail: "Git Smart HTTP has not been implemented.",
+        detail: "A repository object is addressed over RPC, not over HTTP.",
       },
       {
         status: 501,

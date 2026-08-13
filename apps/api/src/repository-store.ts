@@ -1,11 +1,16 @@
-import { eq } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 
 import type { SyncSqliteDatabase } from "./db/database.ts";
 import type { SyncKv } from "./db/kv.ts";
 import {
   REPOSITORY_STATE_ID,
+  refs,
   repositoryState,
 } from "./db/repository-schema.ts";
+import {
+  receivePackAdvertisementStream,
+  type AdvertisedRef,
+} from "./git/advertisement.ts";
 import {
   HEAD_KEY,
   formatHead,
@@ -30,6 +35,7 @@ export interface RepositorySnapshot {
 export interface RepositoryObjectClient {
   readonly initialize: (init: RepositoryInit) => Promise<RepositorySnapshot>;
   readonly describe: () => Promise<RepositorySnapshot | null>;
+  readonly advertiseReceivePack: () => Promise<ReadableStream<Uint8Array>>;
   readonly destroy: () => Promise<void>;
 }
 
@@ -89,6 +95,25 @@ export class RepositoryStore {
     }
 
     return { defaultBranch: this.#defaultBranch(), createdAt: row.createdAt };
+  }
+
+  /**
+   * The push side of the Git protocol's opening reply, encoded here rather than
+   * in the Worker because the refs it lists are only consistent from inside the
+   * object that owns them.
+   *
+   * A stream, so a repository with many refs is not assembled in memory on its
+   * way to the client.
+   */
+  async advertiseReceivePack(): Promise<ReadableStream<Uint8Array>> {
+    return receivePackAdvertisementStream(await this.#refs());
+  }
+
+  /** Byte order by full ref name, which is the order Git advertises in. */
+  async #refs(): Promise<readonly AdvertisedRef[]> {
+    const rows = await this.#db.select().from(refs).orderBy(asc(refs.name));
+
+    return rows.map((row) => ({ name: row.name, oid: row.objectId }));
   }
 
   /** Missing or unreadable contents read the same as a detached HEAD. */

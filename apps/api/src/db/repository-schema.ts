@@ -20,3 +20,19 @@ export const repositoryState = sqliteTable("repository_state", {
 export const REPOSITORY_STATE_ID = "repository";
 
 export type RepositoryStateRow = typeof repositoryState.$inferSelect;
+
+/**
+ * The repository's refs, full name (`refs/heads/main`) to object id. A table
+ * rather than Git's loose files plus `packed-refs`, because the only reason
+ * that split exists is a filesystem, and because a push has to move several
+ * refs in one transaction.
+ *
+ * HEAD is not here: it is the one ref-shaped thing Git keeps outside the ref
+ * store, and it stays outside ours too (ADR-0003).
+ */
+export const refs = sqliteTable("refs", {
+  name: text("name").primaryKey(),
+  objectId: text("object_id").notNull(),
+});
+
+export type RefRow = typeof refs.$inferSelect;

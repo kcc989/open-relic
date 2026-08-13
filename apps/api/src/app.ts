@@ -15,6 +15,11 @@ import {
   repositoryObjectsFromEnv,
   type RepositoryObjects,
 } from "./bindings.ts";
+import { registerGitRoutes } from "./git-routes.ts";
+import {
+  allowAnonymousWrite,
+  type AuthorizeGitRequest,
+} from "./git/authorization.ts";
 import type { NamespaceRegistryClient } from "./namespace-registry.ts";
 import { registerNamespaceRoutes } from "./namespace-routes.ts";
 import { notImplemented, problemResponse } from "./problems.ts";
@@ -31,6 +36,7 @@ export interface AppDependencies {
   readonly namespaceRegistry?: (env: ApiEnv) => NamespaceRegistryClient;
   readonly repositoryIndex?: (env: ApiEnv) => RepositoryIndexClient;
   readonly repositoryObjects?: (env: ApiEnv) => RepositoryObjects;
+  readonly authorizeGit?: AuthorizeGitRequest;
 }
 
 export const createApp = ({
@@ -38,6 +44,7 @@ export const createApp = ({
   namespaceRegistry = namespaceRegistryFromEnv,
   repositoryIndex = repositoryIndexFromEnv,
   repositoryObjects = repositoryObjectsFromEnv,
+  authorizeGit = allowAnonymousWrite,
 }: AppDependencies = {}) => {
   const app = new Hono<{ Bindings: ApiEnv }>();
 
@@ -81,21 +88,21 @@ export const createApp = ({
   }
 
   for (const endpoint of GIT_HTTP_ENDPOINTS) {
-    // Both advertisement operations share a path. Dispatch by Git's required
-    // service query parameter while keeping each operation separately named.
+    // Both advertisement operations share a path, so the Git routes own it and
+    // dispatch by the service Git names in the query string — including the
+    // upload-pack advertisement, which is still a stub.
     if (endpoint.id.endsWith(".advertise")) {
       continue;
     }
     registerStub(endpoint.method, endpoint.path, endpoint.id);
   }
 
-  app.get("/git/:namespace/:repo.git/info/refs", (context) =>
-    invokeStub(
-      context.req.query("service") === "git-upload-pack"
-        ? "git.uploadPack.advertise"
-        : "git.receivePack.advertise",
-    ),
-  );
+  registerGitRoutes(app, {
+    repositoryIndex,
+    repositoryObjects,
+    authorize: authorizeGit,
+    notImplemented: invokeStub,
+  });
 
   app.notFound(() =>
     problemResponse({

@@ -4,7 +4,7 @@ import {
   type ProblemDetails,
 } from "@open-relic/contracts";
 
-export type ProblemStatus = 400 | 404 | 409 | 501;
+export type ProblemStatus = 400 | 403 | 404 | 409 | 501;
 
 export interface ProblemInit {
   readonly type: string;
@@ -35,6 +35,21 @@ export const invalidRequest = (
   type: PROBLEM_TYPES.invalidRequest,
   title: "Bad Request",
   status: 400,
+  detail,
+  operation,
+});
+
+/**
+ * Not `401`: there is no credential to supply yet, so asking the client for one
+ * would send it round a loop it cannot finish.
+ */
+export const forbidden = (
+  operation: EndpointId,
+  detail: string,
+): ProblemInit => ({
+  type: PROBLEM_TYPES.forbidden,
+  title: "Forbidden",
+  status: 403,
   detail,
   operation,
 });
