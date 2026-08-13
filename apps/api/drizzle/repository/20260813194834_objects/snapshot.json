@@ -1,0 +1,165 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "id": "e4d7533f-899a-423a-9dba-d3ee29ac623a",
+  "prevIds": [
+    "e1ddd293-566b-437d-ad5a-b444b23f2500"
+  ],
+  "ddl": [
+    {
+      "name": "object_deltas",
+      "entityType": "tables"
+    },
+    {
+      "name": "objects",
+      "entityType": "tables"
+    },
+    {
+      "name": "repository_state",
+      "entityType": "tables"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "oid",
+      "entityType": "columns",
+      "table": "object_deltas"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "base_oid",
+      "entityType": "columns",
+      "table": "object_deltas"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "size",
+      "entityType": "columns",
+      "table": "object_deltas"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "chunk_count",
+      "entityType": "columns",
+      "table": "object_deltas"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "oid",
+      "entityType": "columns",
+      "table": "objects"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "type",
+      "entityType": "columns",
+      "table": "objects"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "size",
+      "entityType": "columns",
+      "table": "objects"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "chunk_count",
+      "entityType": "columns",
+      "table": "objects"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "repository_state"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "repository_state"
+    },
+    {
+      "columns": [
+        "oid"
+      ],
+      "tableTo": "objects",
+      "columnsTo": [
+        "oid"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_object_deltas_oid_objects_oid_fk",
+      "entityType": "fks",
+      "table": "object_deltas"
+    },
+    {
+      "columns": [
+        "oid"
+      ],
+      "nameExplicit": false,
+      "name": "object_deltas_pk",
+      "table": "object_deltas",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "oid"
+      ],
+      "nameExplicit": false,
+      "name": "objects_pk",
+      "table": "objects",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "repository_state_pk",
+      "table": "repository_state",
+      "entityType": "pks"
+    }
+  ],
+  "renames": []
+}

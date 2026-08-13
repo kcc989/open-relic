@@ -123,6 +123,55 @@ curl -X POST http://localhost:1337/api/v1/namespaces/acme/repos \
 Git Smart HTTP is still unimplemented, so `RepositoryObject`'s `fetch` handler
 answers `501`; the REST API reaches it over RPC.
 
+## Objects and packs
+
+`RepositoryObject.readPack` takes the byte stream of a Git pack and leaves the
+repository holding every object the pack carried, named by SHA-1. Nothing calls
+it over HTTP yet — receive-pack lands with push — but the storage and the parse
+are what everything Git-shaped is built on.
+
+Objects are stored inflated: metadata in the `objects` table, bytes in the
+object's synchronous KV storage under `o:<oid>:<n>`, split into 1.5 MiB chunks
+because Durable Object storage caps a key and its value together at 2 MB. When
+an object arrived as a **delta**, the raw delta goes under `d:<oid>:<n>` with its
+base's hash in `object_deltas` — nothing reads it until fetch lands, but the pack
+passes through our hands exactly once. See
+[ADR-0002](./docs/adr/0002-git-objects-are-chunked-rows-in-the-repository-object.md).
+
+The parse is a single streaming pass, and that is the whole point of storing
+objects this way. Each resolved object is written the moment it is complete, so
+a delta resolves by reading its base back out of storage rather than by holding
+the pack in memory: peak residency is one object, one base, and one stream
+chunk, independent of pack size. `apps/api/test/pack.test.ts` measures that
+directly — a pack four times longer is read with no more in flight. A rewrite
+that buffered the pack would pass every other test and lose the reason the store
+looks like this.
+
+| Module | What it is |
+| --- | --- |
+| `src/pack.ts` | The pack reader: entry headers, `ofs-delta` and `ref-delta` resolution, the trailing checksum |
+| `src/object-store.ts` | Objects as chunked rows, and the sink the pack is read into |
+| `src/inflate.ts` | A resumable zlib decompressor |
+| `src/sha1.ts` | Incremental SHA-1 |
+| `src/delta.ts` | Git's copy/insert delta encoding |
+
+`DecompressionStream("deflate")` cannot do this job: a pack is a concatenation
+of zlib streams with no length prefix, so the next object can only be found by
+being told how many input bytes the last stream consumed, which the platform
+stream hides. `crypto.subtle.digest` is likewise whole-buffer only, and the
+pack's trailing checksum covers a stream we never buffer. Both are hand-written
+for that reason and for no other.
+
+Both delta encodings resolve, including chains several deep. Thin packs are out
+of scope — `no-thin` is advertised, so a delta whose base is nowhere is a
+`missing-base` error, distinguishable from `truncated`, `checksum-mismatch`, and
+the rest of `PackError`'s codes.
+
+`apps/api/test/fixtures` holds packs written by a real Git client, alongside the
+object ids that client reported; `fixtures/generate.sh` rebuilds them. Agreeing
+with Git about what its own objects are called is the only test that matters
+here, so it runs against both delta encodings.
+
 ## Database
 
 Drizzle is the ORM. Each Durable Object class has its own storage, so each has
@@ -153,11 +202,12 @@ Tests construct one over `bun:sqlite` and migrate it from the same `drizzle/`
 folder, so the queries and the generated schema run for real without a Workers
 runtime — the only thing the tests skip is the RPC hop.
 
-Git files are the exception to the schema. `RepositoryStore` also takes the
+Git bytes are the exception to the schema. `RepositoryStore` also takes the
 synchronous KV half of the same storage, because `HEAD` is stored as the file
-Git writes rather than as columns; the tests hand it a `Map`. KV and SQL are one
-SQLite database inside the object, so a row and a file written in the same
-storage turn commit together.
+Git writes rather than as columns, and because an object's bytes are chunks
+rather than a column; the tests hand it a `Map` that structured-clones the way
+the real thing does. KV and SQL are one SQLite database inside the object, so a
+row and a file written in the same storage turn commit together.
 
 The registry's transactions run synchronously (`.all()` rather than `await`)
 because the driver is synchronous: a transaction body that yielded would commit

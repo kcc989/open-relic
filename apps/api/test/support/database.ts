@@ -18,15 +18,20 @@ export interface TestRepositoryStorage extends TestDatabase {
   readonly kv: SyncKv;
 }
 
+/**
+ * Durable Object KV structured-clones what it is given, so the fake does too —
+ * otherwise a caller could hand over a buffer, reuse it, and see the store
+ * change underneath it in tests but not in production.
+ */
 export const createTestKv = (): SyncKv => {
-  const entries = new Map<string, string>();
+  const entries = new Map<string, unknown>();
 
   return {
-    get: (key) => entries.get(key),
-    put: (key, value) => {
-      entries.set(key, value);
+    get: <T>(key: string): T | undefined => entries.get(key) as T | undefined,
+    put: (key: string, value: unknown): void => {
+      entries.set(key, structuredClone(value));
     },
-    delete: (key) => {
+    delete: (key: string): void => {
       entries.delete(key);
     },
   };
