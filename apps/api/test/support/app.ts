@@ -47,6 +47,7 @@ export class FakeRepositoryObjects implements RepositoryObjects {
       describe: () => store.describe(),
       advertiseReceivePack: () => store.advertiseReceivePack(),
       receivePack: (body) => store.receivePack(body),
+      sweep: () => store.sweep(),
       destroy: async () => {
         this.#destroyed.push(durableObjectId);
         this.#storages.get(durableObjectId)?.close();

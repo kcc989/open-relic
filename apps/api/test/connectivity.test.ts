@@ -5,6 +5,7 @@ import {
   commitParents,
   findAncestor,
   findMissingObject,
+  linksToReach,
   linksToVerify,
   type ObjectSource,
 } from "../src/connectivity.ts";
@@ -64,6 +65,13 @@ describe("what an object names", () => {
     // Blobs are the expensive half — most of the objects and nearly all of the
     // bytes — and a pack that parsed completely already implies them.
     expect(linksToVerify("tree", ROOT.bytes)).toEqual([{ oid: DOCS.oid, type: "tree" }]);
+  });
+
+  test("a reachability walk names both trees and blobs", () => {
+    expect(linksToReach("tree", ROOT.bytes)).toEqual([
+      { oid: DOCS.oid, type: "tree" },
+      { oid: blob("int").oid, type: "blob" },
+    ]);
   });
 
   test("a tree does not name a submodule's commit, which lives elsewhere", () => {

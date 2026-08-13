@@ -55,6 +55,10 @@ _Avoid_: default branch, main branch
 An object no ref can reach. Invisible to every reader, and collectable.
 _Avoid_: dangling object, garbage
 
+**Sweep**:
+A repository's resumable walk from every ref that marks reachable objects and reclaims its orphans.
+_Avoid_: garbage collection, cleanup
+
 **Fast-forward**:
 A ref update whose old value is an ancestor of its new one, so nothing that was
 reachable stops being reachable. The only kind of update a push may make.

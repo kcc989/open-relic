@@ -1,0 +1,1 @@
+ALTER TABLE `sweep_reachable` ADD `expected_type` text;
