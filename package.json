@@ -1,18 +1,22 @@
 {
   "name": "open-relic",
   "private": true,
-  "type": "module",
   "workspaces": [
     "apps/*",
     "packages/*"
   ],
+  "type": "module",
   "scripts": {
-    "check": "bun run typecheck && bun test",
+    "check": "bun run typecheck && bun run lint && bun run fmt:check && bun test",
     "db:generate": "drizzle-kit generate && drizzle-kit generate --config drizzle.repository.config.ts",
     "deploy": "bun alchemy deploy",
     "deploy:prod": "bun alchemy deploy --stage prod",
     "dev": "bun alchemy dev",
     "destroy": "bun alchemy destroy",
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
     "plan": "bun alchemy plan",
     "plan:prod": "bun alchemy plan --stage prod",
     "tail": "bun alchemy tail",
@@ -23,10 +27,13 @@
     "@cloudflare/workers-types": "5.20260813.1",
     "@effect/platform-bun": "4.0.0-rc.108",
     "@effect/platform-node": "4.0.0-rc.108",
+    "@oxlint/plugins": "1.78.0",
     "@types/bun": "^1.2.7",
     "alchemy": "2.0.0-beta.72",
     "drizzle-kit": "1.0.0-rc.4",
     "effect": "4.0.0-rc.108",
+    "oxfmt": "0.63.0",
+    "oxlint": "1.78.0",
     "typescript": "^5.9.2"
   },
   "packageManager": "bun@1.2.7"

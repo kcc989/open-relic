@@ -10,7 +10,7 @@ export const OBJECT_TYPES = ["commit", "tree", "blob", "tag"] as const;
 export type ObjectType = (typeof OBJECT_TYPES)[number];
 
 export const isObjectType = (value: string): value is ObjectType =>
-  (OBJECT_TYPES as readonly string[]).includes(value);
+  OBJECT_TYPES.some((type) => type === value);
 
 /**
  * The largest object we will hold, and so the largest we will accept.

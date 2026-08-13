@@ -2,11 +2,7 @@ import type { NamespaceInfo } from "@open-relic/contracts";
 import { asc, eq, gt } from "drizzle-orm";
 
 import type { SyncSqliteDatabase } from "./db/database.ts";
-import {
-  namespaces,
-  repositories,
-  type NamespaceRow,
-} from "./db/registry-schema.ts";
+import { namespaces, repositories, type NamespaceRow } from "./db/registry-schema.ts";
 
 export interface CreateNamespaceCommand {
   readonly slug: string;
@@ -47,12 +43,8 @@ export interface DeleteNamespaceOutcome {
 }
 
 export interface NamespaceRegistryClient {
-  readonly createNamespace: (
-    command: CreateNamespaceCommand,
-  ) => Promise<CreateNamespaceOutcome>;
-  readonly listNamespaces: (
-    query: ListNamespacesQuery,
-  ) => Promise<NamespacePage>;
+  readonly createNamespace: (command: CreateNamespaceCommand) => Promise<CreateNamespaceOutcome>;
+  readonly listNamespaces: (query: ListNamespacesQuery) => Promise<NamespacePage>;
   readonly getNamespace: (slug: string) => Promise<NamespaceInfo | null>;
   readonly deleteNamespace: (slug: string) => Promise<DeleteNamespaceOutcome>;
 }
@@ -80,9 +72,7 @@ export class NamespaceRegistry {
    * `ON CONFLICT DO NOTHING ... RETURNING` claims a slug in one statement, so
    * two concurrent creates cannot both observe it as free.
    */
-  async createNamespace(
-    command: CreateNamespaceCommand,
-  ): Promise<CreateNamespaceOutcome> {
+  async createNamespace(command: CreateNamespaceCommand): Promise<CreateNamespaceOutcome> {
     const inserted = await this.#db
       .insert(namespaces)
       .values({
@@ -117,17 +107,12 @@ export class NamespaceRegistry {
 
     return {
       namespaces: page.map(toNamespace),
-      next:
-        rows.length > query.limit && last !== undefined ? last.slug : null,
+      next: rows.length > query.limit && last !== undefined ? last.slug : null,
     };
   }
 
   async getNamespace(slug: string): Promise<NamespaceInfo | null> {
-    const rows = await this.#db
-      .select()
-      .from(namespaces)
-      .where(eq(namespaces.slug, slug))
-      .limit(1);
+    const rows = await this.#db.select().from(namespaces).where(eq(namespaces.slug, slug)).limit(1);
 
     const row = rows[0];
     return row === undefined ? null : toNamespace(row);

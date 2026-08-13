@@ -17,9 +17,7 @@ describe("formatHead", () => {
   });
 
   test("writes a hierarchical branch as its full ref path", () => {
-    expect(formatHead(symbolicHead("release/2.0.x"))).toBe(
-      "ref: refs/heads/release/2.0.x\n",
-    );
+    expect(formatHead(symbolicHead("release/2.0.x"))).toBe("ref: refs/heads/release/2.0.x\n");
   });
 
   test("writes a detached HEAD as a bare object id", () => {

@@ -5,10 +5,7 @@ import { fileURLToPath } from "node:url";
 import { CHUNK_BYTES, ObjectStore } from "../src/object-store.ts";
 import { hashObject, isObjectType, type ObjectType } from "../src/object.ts";
 import { readPack } from "../src/pack.ts";
-import {
-  createTestRepositoryStorage,
-  type TestRepositoryStorage,
-} from "./support/database.ts";
+import { createTestRepositoryStorage, type TestRepositoryStorage } from "./support/database.ts";
 import { streamOf } from "./support/pack.ts";
 
 /**
@@ -107,17 +104,12 @@ for (const [encoding, file] of packs) {
 
 test("an object larger than a chunk arrives split and reads back whole", async () => {
   const objects = store();
-  await readPack(
-    streamOf(fixture("real-git-ofs-delta.pack"), { chunkSize: 4_096 }),
-    objects,
-  );
+  await readPack(streamOf(fixture("real-git-ofs-delta.pack"), { chunkSize: 4_096 }), objects);
 
   const large = manifest.find((entry) => entry.size > CHUNK_BYTES);
   const row = await objects.describe(large!.oid);
 
   expect(row?.chunkCount).toBe(Math.ceil(large!.size / CHUNK_BYTES));
   expect(row!.chunkCount).toBeGreaterThan(1);
-  expect(hashObject(row!.type, (await objects.read(large!.oid))!.bytes)).toBe(
-    large!.oid,
-  );
+  expect(hashObject(row!.type, (await objects.read(large!.oid))!.bytes)).toBe(large!.oid);
 });

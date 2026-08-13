@@ -2,11 +2,7 @@ import { expect, test } from "bun:test";
 
 import { DeltaError, applyDelta } from "../src/delta.ts";
 import { MAX_OBJECT_BYTES } from "../src/object.ts";
-import {
-  buildDelta,
-  copyInstruction,
-  insertInstruction,
-} from "./support/pack.ts";
+import { buildDelta, copyInstruction, insertInstruction } from "./support/pack.ts";
 
 const utf8 = (text: string): Uint8Array => new TextEncoder().encode(text);
 const text = (bytes: Uint8Array): string => new TextDecoder().decode(bytes);
@@ -38,9 +34,7 @@ test("a delta written against a different base is rejected", () => {
 });
 
 test("a copy that reaches past the base is rejected", () => {
-  const delta = buildDelta(base.length, 10, [
-    copyInstruction(base.length - 2, 10),
-  ]);
+  const delta = buildDelta(base.length, 10, [copyInstruction(base.length - 2, 10)]);
 
   expect(() => applyDelta(base, delta)).toThrow(/past the base/);
 });
@@ -58,22 +52,21 @@ test("the reserved instruction is rejected", () => {
 });
 
 test("a delta declaring a result larger than we will hold is rejected before allocating", () => {
-  const delta = buildDelta(base.length, MAX_OBJECT_BYTES + 1, [
-    copyInstruction(0, 4),
-  ]);
+  const delta = buildDelta(base.length, MAX_OBJECT_BYTES + 1, [copyInstruction(0, 4)]);
 
   expect(() => applyDelta(base, delta)).toThrow(/past the/);
   try {
     applyDelta(base, delta);
   } catch (error) {
-    expect((error as DeltaError).code).toBe("too-large");
+    expect(error).toBeInstanceOf(DeltaError);
+    if (error instanceof DeltaError) {
+      expect(error.code).toBe("too-large");
+    }
   }
 });
 
 test("a delta that stops mid-instruction is rejected", () => {
   const delta = buildDelta(base.length, 5, [insertInstruction(utf8("abcde"))]);
 
-  expect(() => applyDelta(base, delta.subarray(0, delta.length - 2))).toThrow(
-    DeltaError,
-  );
+  expect(() => applyDelta(base, delta.subarray(0, delta.length - 2))).toThrow(DeltaError);
 });

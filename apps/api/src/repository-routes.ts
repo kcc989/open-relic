@@ -13,7 +13,6 @@ import {
   describeRepositoryNameViolation,
   validateBranchName,
   validateRepositoryName,
-  type CreateRepoRequest,
   type CreateRepoResult,
   type DeleteRepoResult,
   type RepoInfo,
@@ -21,18 +20,12 @@ import {
   type RepoWithRemote,
   type SortDirection,
 } from "@open-relic/contracts";
+import { Schema } from "effect";
 import type { Hono } from "hono";
 
 import type { ApiEnv } from "../../../alchemy.run.ts";
 import type { RepositoryObjects } from "./bindings.ts";
-import {
-  alreadyExists,
-  invalidInput,
-  invalidRepoName,
-  notFound,
-  ok,
-  okList,
-} from "./envelope.ts";
+import { alreadyExists, invalidInput, invalidRepoName, notFound, ok, okList } from "./envelope.ts";
 import { encodeCursor } from "./pagination.ts";
 import {
   CURSOR_QUERY_MISMATCH,
@@ -49,9 +42,10 @@ import type {
   RepositoryIndexClient,
 } from "./repository-index.ts";
 import {
-  parseJsonObject,
+  decodeJson,
   parseOptionalFlag,
   parseOptionalText,
+  type Json,
   type Rejected,
 } from "./request-body.ts";
 
@@ -61,23 +55,27 @@ type ParsedCreate =
   | { readonly ok: true; readonly command: NewRepository }
   | (Rejected & { readonly badName?: true });
 
-const parseCreateBody = (
-  namespaceSlug: string,
-  payload: unknown,
-): ParsedCreate => {
-  const object = parseJsonObject(payload);
+const CreateRepoJson = Schema.Struct({
+  name: Schema.optionalKey(
+    Schema.Union([Schema.String, Schema.Number, Schema.Boolean, Schema.Null]),
+  ),
+  description: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  default_branch: Schema.optionalKey(Schema.String),
+  read_only: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
+});
+
+const parseCreateBody = (namespaceSlug: string, payload: Json): ParsedCreate => {
+  const object = decodeJson(CreateRepoJson, payload);
   if (!object.ok) {
     return object;
   }
 
-  const body = object.value as Partial<
-    Record<keyof CreateRepoRequest, unknown>
-  >;
-  if (typeof body.name !== "string") {
+  const name = object.value.name;
+  if (!Schema.is(Schema.String)(name)) {
     return { ok: false, detail: `"name" must be a string.`, badName: true };
   }
 
-  const nameViolation = validateRepositoryName(body.name);
+  const nameViolation = validateRepositoryName(name);
   if (nameViolation !== null) {
     return {
       ok: false,
@@ -87,7 +85,7 @@ const parseCreateBody = (
   }
 
   const description = parseOptionalText(
-    body.description,
+    object.value.description,
     "description",
     REPOSITORY_DESCRIPTION_MAX_LENGTH,
   );
@@ -95,23 +93,12 @@ const parseCreateBody = (
     return description;
   }
 
-  const readOnly = parseOptionalFlag(body.read_only, "read_only", false);
+  const readOnly = parseOptionalFlag(object.value.read_only, false);
   if (!readOnly.ok) {
     return readOnly;
   }
 
-  if (
-    body.default_branch !== undefined &&
-    typeof body.default_branch !== "string"
-  ) {
-    return {
-      ok: false,
-      detail: `"default_branch" must be a string.`,
-      pointer: "/default_branch",
-    };
-  }
-
-  const defaultBranch = body.default_branch ?? DEFAULT_BRANCH;
+  const defaultBranch = object.value.default_branch ?? DEFAULT_BRANCH;
   const branchViolation = validateBranchName(defaultBranch);
   if (branchViolation !== null) {
     return {
@@ -125,7 +112,7 @@ const parseCreateBody = (
     ok: true,
     command: {
       namespaceSlug,
-      name: body.name,
+      name: name,
       description: description.value,
       defaultBranch,
       readOnly: readOnly.value,
@@ -142,11 +129,11 @@ const noSuchRepository = (namespaceSlug: string, name: string): string =>
  * of one filtered set; replaying them under a different one would compare a
  * value against a column it never came from.
  */
-const cursorBinding = (
-  sort: RepoSortField,
-  direction: SortDirection,
-  search: string | null,
-): Record<string, string> => ({ s: sort, d: direction, q: search ?? "" });
+const cursorBinding = (sort: RepoSortField, direction: SortDirection, search: string | null) => ({
+  s: sort,
+  d: direction,
+  q: search ?? "",
+});
 
 export const registerRepositoryRoutes = (
   app: Hono<{ Bindings: ApiEnv }>,
@@ -169,9 +156,10 @@ export const registerRepositoryRoutes = (
   app.post(REPOS, async (context) => {
     const namespaceSlug = context.req.param("namespace");
 
-    let payload: unknown;
+    let payload: Json;
     try {
-      payload = await context.req.json();
+      // SAFETY: req.json() is the JSON value at this HTTP boundary; Schema rejects the rest.
+      payload = (await context.req.json()) as Json;
     } catch {
       return invalidInput("The request body must be valid JSON.");
     }
@@ -198,9 +186,7 @@ export const registerRepositoryRoutes = (
     if (!outcome.created) {
       return outcome.reason === "namespace-missing"
         ? notFound(`No namespace named "${namespaceSlug}" exists.`)
-        : alreadyExists(
-            `The repository "${namespaceSlug}/${parsed.command.name}" already exists.`,
-          );
+        : alreadyExists(`The repository "${namespaceSlug}/${parsed.command.name}" already exists.`);
     }
 
     // The name is claimed; now give the object its Git state.
@@ -217,11 +203,7 @@ export const registerRepositoryRoutes = (
       name: outcome.repository.name,
       description: outcome.repository.description,
       default_branch: outcome.repository.default_branch,
-      remote: gitRemoteUrl(
-        context.req.url,
-        namespaceSlug,
-        outcome.repository.name,
-      ),
+      remote: gitRemoteUrl(context.req.url, namespaceSlug, outcome.repository.name),
       token: mintArtifactToken(),
     } satisfies CreateRepoResult);
   });
@@ -229,11 +211,7 @@ export const registerRepositoryRoutes = (
   app.get(REPOS, async (context) => {
     const namespaceSlug = context.req.param("namespace");
 
-    const limit = parseLimit(
-      context.req.query("limit"),
-      LIST_DEFAULT_LIMIT,
-      LIST_MAX_LIMIT,
-    );
+    const limit = parseLimit(context.req.query("limit"), LIST_DEFAULT_LIMIT, LIST_MAX_LIMIT);
     if (!limit.ok) {
       return invalidInput(limit.detail);
     }
@@ -258,10 +236,7 @@ export const registerRepositoryRoutes = (
       return invalidInput(direction.detail);
     }
 
-    const search = parseSearch(
-      context.req.query("search"),
-      REPOSITORY_NAME_MAX_LENGTH,
-    );
+    const search = parseSearch(context.req.query("search"), REPOSITORY_NAME_MAX_LENGTH);
     if (!search.ok) {
       return invalidInput(search.detail);
     }
@@ -285,25 +260,20 @@ export const registerRepositoryRoutes = (
       position = { value: key.v, name: key.n };
     }
 
-    const page = await resolveIndex(context.env).listRepositories(
-      namespaceSlug,
-      {
-        limit: limit.value,
-        cursor: position,
-        search: search.value,
-        sort: sort.value,
-        direction: direction.value,
-      },
-    );
+    const page = await resolveIndex(context.env).listRepositories(namespaceSlug, {
+      limit: limit.value,
+      cursor: position,
+      search: search.value,
+      sort: sort.value,
+      direction: direction.value,
+    });
 
     if (page === null) {
       return notFound(`No namespace named "${namespaceSlug}" exists.`);
     }
 
     return okList(
-      page.repositories.map((repository) =>
-        withRemote(context, namespaceSlug, repository),
-      ),
+      page.repositories.map((repository) => withRemote(context, namespaceSlug, repository)),
       {
         cursor:
           page.next === null
@@ -322,10 +292,7 @@ export const registerRepositoryRoutes = (
   app.get(REPO, async (context) => {
     const namespaceSlug = context.req.param("namespace");
     const name = context.req.param("repo");
-    const found = await resolveIndex(context.env).getRepository(
-      namespaceSlug,
-      name,
-    );
+    const found = await resolveIndex(context.env).getRepository(namespaceSlug, name);
 
     if (found === null) {
       return notFound(noSuchRepository(namespaceSlug, name));
@@ -342,10 +309,7 @@ export const registerRepositoryRoutes = (
   app.delete(REPO, async (context) => {
     const namespaceSlug = context.req.param("namespace");
     const name = context.req.param("repo");
-    const deleted = await resolveIndex(context.env).deleteRepository(
-      namespaceSlug,
-      name,
-    );
+    const deleted = await resolveIndex(context.env).deleteRepository(namespaceSlug, name);
 
     if (deleted === null) {
       return notFound(noSuchRepository(namespaceSlug, name));

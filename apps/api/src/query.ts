@@ -36,21 +36,19 @@ export const parseChoice = <T extends string>(
   if (raw === undefined) {
     return { ok: true, value: fallback };
   }
-  if (!(allowed as readonly string[]).includes(raw)) {
+  const match = allowed.find((choice) => choice === raw);
+  if (match === undefined) {
     return {
       ok: false,
       detail: `"${field}" must be one of ${allowed.join(", ")}.`,
     };
   }
 
-  return { ok: true, value: raw as T };
+  return { ok: true, value: match };
 };
 
 /** Absent and blank both mean "no filter", so `?search=` is not a dead end. */
-export const parseSearch = (
-  raw: string | undefined,
-  maxLength: number,
-): Parsed<string | null> => {
+export const parseSearch = (raw: string | undefined, maxLength: number): Parsed<string | null> => {
   if (raw === undefined) {
     return { ok: true, value: null };
   }
@@ -72,9 +70,7 @@ export const parseSearch = (
  * of the walk — a client that garbled one should be told so, not handed an
  * empty page it cannot tell apart from a finished list.
  */
-export const parseCursorKey = (
-  raw: string | undefined,
-): Parsed<CursorKey | null> => {
+export const parseCursorKey = (raw: string | undefined): Parsed<CursorKey | null> => {
   if (raw === undefined || raw.length === 0) {
     return { ok: true, value: null };
   }
@@ -95,8 +91,7 @@ export const parseCursorKey = (
 export const cursorMatchesQuery = (
   key: CursorKey,
   fields: Readonly<Record<string, string>>,
-): boolean =>
-  Object.entries(fields).every(([field, value]) => key[field] === value);
+): boolean => Object.entries(fields).every(([field, value]) => key[field] === value);
 
 export const CURSOR_QUERY_MISMATCH =
   `"cursor" was issued for a different sort, direction, or search. Start the walk again without it.` as const;

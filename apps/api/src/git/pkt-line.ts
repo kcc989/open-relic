@@ -15,8 +15,7 @@ export const PKT_LINE_LENGTH_BYTES = 4;
  */
 export const PKT_LINE_MAX_BYTES = 65520;
 
-export const PKT_LINE_MAX_PAYLOAD_BYTES =
-  PKT_LINE_MAX_BYTES - PKT_LINE_LENGTH_BYTES;
+export const PKT_LINE_MAX_PAYLOAD_BYTES = PKT_LINE_MAX_BYTES - PKT_LINE_LENGTH_BYTES;
 
 export const FLUSH_PKT_TEXT = "0000";
 
@@ -28,7 +27,7 @@ export const FLUSH_PKT_TEXT = "0000";
 export const flushPkt = (): Uint8Array => encoder.encode(FLUSH_PKT_TEXT);
 
 export const pktLine = (payload: Uint8Array | string): Uint8Array => {
-  const bytes = typeof payload === "string" ? encoder.encode(payload) : payload;
+  const bytes = payload instanceof Uint8Array ? payload : encoder.encode(payload);
 
   if (bytes.length > PKT_LINE_MAX_PAYLOAD_BYTES) {
     throw new RangeError(
@@ -48,9 +47,7 @@ export const pktLine = (payload: Uint8Array | string): Uint8Array => {
  * Pulls one line at a time from `lines`, so a response is never assembled in
  * memory and a generator upstream can encode as it reads.
  */
-export const pktLineStream = (
-  lines: Iterable<Uint8Array>,
-): ReadableStream<Uint8Array> => {
+export const pktLineStream = (lines: Iterable<Uint8Array>): ReadableStream<Uint8Array> => {
   const iterator = lines[Symbol.iterator]();
 
   return new ReadableStream<Uint8Array>({

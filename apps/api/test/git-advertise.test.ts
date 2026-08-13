@@ -10,9 +10,10 @@ const NAMESPACES = `http://local.test${NAMESPACES_PATH}`;
 const INFO_REFS = "http://local.test/git/acme/demo.git/info/refs";
 const ADVERTISE = `${INFO_REFS}?service=git-receive-pack`;
 
+// SAFETY: these tests only read ALLOW_ANONYMOUS_WRITE from the Worker env.
 const ANONYMOUS_WRITE_ALLOWED = {
   [ANONYMOUS_WRITE_VARIABLE]: "true",
-} as unknown as ApiEnv;
+} as ApiEnv;
 
 const MAIN = "1a2b3c4d5e6f708192a3b4c5d6e7f80912345678";
 const NEXT = "abcdef0123456789abcdef0123456789abcdef01";
@@ -53,9 +54,7 @@ describe("GET /git/:namespace/:repo.git/info/refs?service=git-receive-pack", () 
     expect(response.headers.get("content-type")).toBe(
       "application/x-git-receive-pack-advertisement",
     );
-    expect(response.headers.get("cache-control")).toBe(
-      "no-cache, max-age=0, must-revalidate",
-    );
+    expect(response.headers.get("cache-control")).toBe("no-cache, max-age=0, must-revalidate");
     expect(await response.text()).toBe(
       "001f# service=git-receive-pack\n" +
         "0000" +
@@ -123,6 +122,7 @@ describe("GET /git/:namespace/:repo.git/info/refs?service=git-receive-pack", () 
 });
 
 describe("without the anonymous-write configuration", () => {
+  // SAFETY: a Worker deployed without the binding has an empty env object at runtime.
   const unconfigured = {} as ApiEnv;
 
   test("refuses the request outright", async () => {

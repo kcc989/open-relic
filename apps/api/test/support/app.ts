@@ -67,10 +67,7 @@ export class FakeRepositoryObjects implements RepositoryObjects {
   }
 
   /** Stands in for the push that will write them once receive-pack lands. */
-  seedRefs(
-    durableObjectId: string,
-    entries: Readonly<Record<string, string>>,
-  ): Promise<void> {
+  seedRefs(durableObjectId: string, entries: Readonly<Record<string, string>>): Promise<void> {
     return seedRefs(this.#storageFor(durableObjectId).db, entries);
   }
 

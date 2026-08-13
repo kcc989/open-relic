@@ -13,8 +13,7 @@ export type Head =
   | { readonly kind: "symbolic"; readonly ref: string }
   | { readonly kind: "detached"; readonly oid: string };
 
-export const branchRef = (branch: string): string =>
-  `${BRANCH_REF_PREFIX}${branch}`;
+export const branchRef = (branch: string): string => `${BRANCH_REF_PREFIX}${branch}`;
 
 export const symbolicHead = (branch: string): Head => ({
   kind: "symbolic",

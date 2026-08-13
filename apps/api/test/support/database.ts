@@ -25,11 +25,11 @@ export interface TestRepositoryStorage extends TestDatabase {
  * change underneath it in tests but not in production.
  */
 export const createTestKv = (): SyncKv => {
-  const entries = new Map<string, unknown>();
+  const entries = new Map();
 
   return {
-    get: <T>(key: string): T | undefined => entries.get(key) as T | undefined,
-    put: (key: string, value: unknown): void => {
+    get: <T>(key: string): T | undefined => entries.get(key),
+    put: <T>(key: string, value: T): void => {
       entries.set(key, structuredClone(value));
     },
     delete: (key: string): void => {
@@ -47,9 +47,7 @@ export const createTestKv = (): SyncKv => {
  * them and `bun:sqlite` does not; without the pragma the tests would be looser
  * than production.
  */
-const createDatabase = (
-  durableObject: "registry" | "repository",
-): TestDatabase => {
+const createDatabase = (durableObject: "registry" | "repository"): TestDatabase => {
   const client = new Database(":memory:");
   client.run("PRAGMA foreign_keys = ON");
   const db = drizzle({ client });

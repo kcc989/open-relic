@@ -1,16 +1,8 @@
-import type {
-  RepoInfo,
-  RepoSortField,
-  SortDirection,
-} from "@open-relic/contracts";
+import type { RepoInfo, RepoSortField, SortDirection } from "@open-relic/contracts";
 import { and, asc, desc, eq, sql, type SQL } from "drizzle-orm";
 
 import type { SyncSqliteDatabase } from "./db/database.ts";
-import {
-  namespaces,
-  repositories,
-  type RepositoryRow,
-} from "./db/registry-schema.ts";
+import { namespaces, repositories, type RepositoryRow } from "./db/registry-schema.ts";
 import { escapeLikePattern } from "./pagination.ts";
 
 export interface CreateRepositoryCommand {
@@ -73,9 +65,7 @@ export interface DeletedRepository {
 }
 
 export interface RepositoryIndexClient {
-  readonly createRepository: (
-    command: CreateRepositoryCommand,
-  ) => Promise<CreateRepositoryOutcome>;
+  readonly createRepository: (command: CreateRepositoryCommand) => Promise<CreateRepositoryOutcome>;
   readonly listRepositories: (
     namespaceSlug: string,
     query: ListRepositoriesQuery,
@@ -102,8 +92,7 @@ const toRepository = (row: RepositoryRow): RepoInfo => ({
   read_only: row.readOnly,
 });
 
-const newRepositoryId = (): string =>
-  `repo_${crypto.randomUUID().replaceAll("-", "")}`;
+const newRepositoryId = (): string => `repo_${crypto.randomUUID().replaceAll("-", "")}`;
 
 /**
  * `last_push_at` is the one nullable sort key, and NULL breaks the tuple
@@ -159,9 +148,7 @@ export class RepositoryIndex {
    * rather than awaited — a transaction that yielded would commit before its
    * body finished.
    */
-  async createRepository(
-    command: CreateRepositoryCommand,
-  ): Promise<CreateRepositoryOutcome> {
+  async createRepository(command: CreateRepositoryCommand): Promise<CreateRepositoryOutcome> {
     return this.#db.transaction((tx): CreateRepositoryOutcome => {
       const namespace = tx
         .select({ slug: namespaces.slug })
@@ -229,9 +216,7 @@ export class RepositoryIndex {
 
     if (query.search !== null) {
       const pattern = `%${escapeLikePattern(query.search)}%`;
-      filters.push(
-        sql`${repositories.name} LIKE ${pattern} ESCAPE '\\'`,
-      );
+      filters.push(sql`${repositories.name} LIKE ${pattern} ESCAPE '\\'`);
     }
 
     if (query.cursor !== null) {
@@ -268,19 +253,11 @@ export class RepositoryIndex {
     };
   }
 
-  async getRepository(
-    namespaceSlug: string,
-    name: string,
-  ): Promise<RepositoryPointer | null> {
+  async getRepository(namespaceSlug: string, name: string): Promise<RepositoryPointer | null> {
     const rows = await this.#db
       .select()
       .from(repositories)
-      .where(
-        and(
-          eq(repositories.namespaceSlug, namespaceSlug),
-          eq(repositories.name, name),
-        ),
-      )
+      .where(and(eq(repositories.namespaceSlug, namespaceSlug), eq(repositories.name, name)))
       .limit(1);
 
     const row = rows[0];
@@ -294,18 +271,10 @@ export class RepositoryIndex {
    * destroy its storage, and the public id the response answers with. `null`
    * when there was no such repository.
    */
-  async deleteRepository(
-    namespaceSlug: string,
-    name: string,
-  ): Promise<DeletedRepository | null> {
+  async deleteRepository(namespaceSlug: string, name: string): Promise<DeletedRepository | null> {
     const deleted = await this.#db
       .delete(repositories)
-      .where(
-        and(
-          eq(repositories.namespaceSlug, namespaceSlug),
-          eq(repositories.name, name),
-        ),
-      )
+      .where(and(eq(repositories.namespaceSlug, namespaceSlug), eq(repositories.name, name)))
       .returning({
         id: repositories.id,
         durableObjectId: repositories.durableObjectId,
