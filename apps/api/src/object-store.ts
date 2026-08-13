@@ -1,8 +1,14 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 
 import type { SyncSqliteDatabase } from "./db/database.ts";
 import type { SyncKv } from "./db/kv.ts";
-import { objectDeltas, objects, type ObjectRow } from "./db/repository-schema.ts";
+import {
+  SWEEP_STATE_ID,
+  objectDeltas,
+  objects,
+  sweepState,
+  type ObjectRow,
+} from "./db/repository-schema.ts";
 import type { PackBase, PackDelta, PackObject, PackSink } from "./pack.ts";
 
 /**
@@ -25,6 +31,13 @@ export class ObjectStoreError extends Error {
     super(message);
     this.name = "ObjectStoreError";
   }
+}
+
+export interface ReclaimedObject {
+  readonly objects: 1;
+  readonly chunks: number;
+  /** Inflated object bytes plus persisted delta bytes; storage overhead is excluded. */
+  readonly bytes: number;
 }
 
 /**
@@ -119,6 +132,50 @@ export class ObjectStore implements PackSink {
     return {
       baseOid: row.baseOid,
       bytes: this.#readChunks(DELTA_PREFIX, oid, row.size, row.chunkCount),
+    };
+  }
+
+  /**
+   * Remove every representation of one object in one storage transaction.
+   * `null` makes retries idempotent when a previous sweep already reclaimed it.
+   */
+  async reclaim(oid: string): Promise<ReclaimedObject | null> {
+    const [object] = await this.#db.select().from(objects).where(eq(objects.oid, oid)).limit(1);
+    if (object === undefined) {
+      return null;
+    }
+
+    const [delta] = await this.#db
+      .select()
+      .from(objectDeltas)
+      .where(eq(objectDeltas.oid, oid))
+      .limit(1);
+
+    await this.#db.transaction((tx) => {
+      for (let index = 0; index < object.chunkCount; index += 1) {
+        this.#kv.delete(chunkKey(OBJECT_PREFIX, oid, index));
+      }
+      if (delta !== undefined) {
+        for (let index = 0; index < delta.chunkCount; index += 1) {
+          this.#kv.delete(chunkKey(DELTA_PREFIX, oid, index));
+        }
+      }
+
+      tx.delete(objects).where(eq(objects.oid, oid)).run();
+      tx.update(sweepState)
+        .set({
+          reclaimedObjects: sql`${sweepState.reclaimedObjects} + 1`,
+          reclaimedChunks: sql`${sweepState.reclaimedChunks} + ${object.chunkCount + (delta?.chunkCount ?? 0)}`,
+          reclaimedBytes: sql`${sweepState.reclaimedBytes} + ${object.size + (delta?.size ?? 0)}`,
+        })
+        .where(eq(sweepState.id, SWEEP_STATE_ID))
+        .run();
+    });
+
+    return {
+      objects: 1,
+      chunks: object.chunkCount + (delta?.chunkCount ?? 0),
+      bytes: object.size + (delta?.size ?? 0),
     };
   }
 

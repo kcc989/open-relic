@@ -144,7 +144,7 @@ const tagLinks = (bytes: Uint8Array): readonly ObjectLink[] => {
  * blobs are the half we deliberately do not check, and a gitlink names a commit
  * in a repository that is not this one.
  */
-const treeLinks = (bytes: Uint8Array): readonly ObjectLink[] => {
+const treeLinks = (bytes: Uint8Array, includeBlobs: boolean): readonly ObjectLink[] => {
   const links: ObjectLink[] = [];
   let at = 0;
 
@@ -173,6 +173,12 @@ const treeLinks = (bytes: Uint8Array): readonly ObjectLink[] => {
       if (!/^[0-7]{5,6}$/.test(mode)) {
         throw new ObjectParseError(`"${mode}" is not a tree entry mode.`);
       }
+      if (includeBlobs) {
+        links.push({
+          oid: toHex(bytes.subarray(nul + 1, nul + 21)),
+          type: "blob",
+        });
+      }
     }
 
     at = nul + 21;
@@ -190,7 +196,25 @@ export const linksToVerify = (type: ObjectType, bytes: Uint8Array): readonly Obj
     case "commit":
       return commitLinks(bytes);
     case "tree":
-      return treeLinks(bytes);
+      return treeLinks(bytes, false);
+    case "tag":
+      return tagLinks(bytes);
+    case "blob":
+      return [];
+  }
+};
+
+/**
+ * Every object this one makes reachable. Unlike the connectivity walk, a
+ * sweep must follow blobs too: skipping their existence is safe while proving
+ * a complete pack, but skipping their mark would collect live file contents.
+ */
+export const linksToReach = (type: ObjectType, bytes: Uint8Array): readonly ObjectLink[] => {
+  switch (type) {
+    case "commit":
+      return commitLinks(bytes);
+    case "tree":
+      return treeLinks(bytes, true);
     case "tag":
       return tagLinks(bytes);
     case "blob":

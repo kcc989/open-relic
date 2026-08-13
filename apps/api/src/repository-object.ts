@@ -12,6 +12,7 @@ import {
   type RepositoryInit,
   type RepositorySnapshot,
 } from "./repository-store.ts";
+import type { SweepProgress } from "./sweep.ts";
 
 /**
  * One repository, in its own Durable Object: a repository is what Git
@@ -54,8 +55,22 @@ export class RepositoryObject extends DurableObject {
    * the Worker buffering it, and the outcome comes back as bytes plus the two
    * facts the registry needs.
    */
-  receivePack(body: ReadableStream<Uint8Array>): Promise<ReceivePackOutcome> {
-    return this.#store.receivePack(body);
+  async receivePack(body: ReadableStream<Uint8Array>): Promise<ReceivePackOutcome> {
+    // Persist the follow-up before reading the stream. Even a disconnected or
+    // CPU-killed push can then leave only temporary orphans. Calling into the
+    // store before yielding claims its operation gate, so an immediately due
+    // alarm cannot finish a stale sweep before this push begins.
+    const scheduled = this.ctx.storage.setAlarm(Date.now());
+    return this.#store.receivePack(body, scheduled);
+  }
+
+  /** Start or resume reclamation; alarms carry subsequent batches. */
+  async sweep(): Promise<SweepProgress> {
+    return this.#advanceSweep();
+  }
+
+  override async alarm(): Promise<void> {
+    await this.#advanceSweep();
   }
 
   readObject(oid: string): Promise<PackBase | null> {
@@ -70,7 +85,20 @@ export class RepositoryObject extends DurableObject {
    * somehow reach it again, the constructor migrates it from scratch.
    */
   async destroy(): Promise<void> {
-    await this.ctx.storage.deleteAll();
+    await this.#store.destroyStorage(() => this.ctx.storage.deleteAll());
+  }
+
+  async #advanceSweep(): Promise<SweepProgress> {
+    return this.#store.sweep(undefined, async (progress) => {
+      if (progress.phase === "complete") {
+        console.log("Repository sweep completed", {
+          repositoryObject: this.ctx.id.toString(),
+          ...progress,
+        });
+      } else {
+        await this.ctx.storage.setAlarm(Date.now());
+      }
+    });
   }
 
   /**

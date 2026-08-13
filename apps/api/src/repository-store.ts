@@ -1,4 +1,4 @@
-import { asc, eq } from "drizzle-orm";
+import { asc, eq, sql } from "drizzle-orm";
 
 import {
   FAST_FORWARD_COMMIT_BUDGET,
@@ -36,6 +36,7 @@ import {
 } from "./head.ts";
 import { ObjectStore } from "./object-store.ts";
 import { PackError, readPack, type PackBase } from "./pack.ts";
+import { RepositorySweeper, type SweepProgress } from "./sweep.ts";
 
 /** The Git side of a `git init --bare`; the registry owns naming. */
 export interface RepositoryInit {
@@ -72,6 +73,7 @@ export interface RepositoryObjectClient {
   readonly describe: () => Promise<RepositorySnapshot | null>;
   readonly advertiseReceivePack: () => Promise<ReadableStream<Uint8Array>>;
   readonly receivePack: (body: ReadableStream<Uint8Array>) => Promise<ReceivePackOutcome>;
+  readonly sweep: () => Promise<SweepProgress>;
   readonly destroy: () => Promise<void>;
 }
 
@@ -100,11 +102,14 @@ export class RepositoryStore {
   readonly #db: SyncSqliteDatabase;
   readonly #kv: SyncKv;
   readonly #objects: ObjectStore;
+  readonly #sweeper: RepositorySweeper;
+  #operation = Promise.resolve();
 
   constructor(db: SyncSqliteDatabase, kv: SyncKv) {
     this.#db = db;
     this.#kv = kv;
     this.#objects = new ObjectStore(db, kv);
+    this.#sweeper = new RepositorySweeper(db, this.#objects);
   }
 
   /**
@@ -170,7 +175,34 @@ export class RepositoryStore {
    * reachable, so objects a failed push left behind are a storage cost rather
    * than a correctness problem — sweeping them is separate work.
    */
-  async receivePack(body: ReadableStream<Uint8Array>): Promise<ReceivePackOutcome> {
+  async receivePack(
+    body: ReadableStream<Uint8Array>,
+    before: Promise<void> = Promise.resolve(),
+  ): Promise<ReceivePackOutcome> {
+    return this.#exclusive(async () => {
+      await before;
+      return this.#receivePack(body);
+    });
+  }
+
+  /** Advance one durable sweep batch without racing receive-pack or destruction. */
+  async sweep(
+    batchSize?: number,
+    after: (progress: SweepProgress) => Promise<void> = async () => {},
+  ): Promise<SweepProgress> {
+    return this.#exclusive(async () => {
+      const progress = await this.#sweeper.step(batchSize);
+      await after(progress);
+      return progress;
+    });
+  }
+
+  /** Keep deletion ordered after any active push or sweep, including its alarm re-arm. */
+  async destroyStorage(remove: () => Promise<void>): Promise<void> {
+    await this.#exclusive(remove);
+  }
+
+  async #receivePack(body: ReadableStream<Uint8Array>): Promise<ReceivePackOutcome> {
     const lines = new PktLineReader(body);
 
     let commands: readonly ReceivePackCommand[];
@@ -402,7 +434,32 @@ export class RepositoryStore {
       if (retargetedTo !== null) {
         this.#kv.put(HEAD_KEY, formatHead(symbolicHead(retargetedTo)));
       }
+
+      tx.update(repositoryState)
+        .set({ refVersion: sql`${repositoryState.refVersion} + 1` })
+        .where(eq(repositoryState.id, REPOSITORY_STATE_ID))
+        .run();
     });
+  }
+
+  /**
+   * Durable Objects may interleave RPC events after an await. This gate spans
+   * the whole push and one sweep step, so no sweep can observe the dangerous
+   * interval after object writes and before the ref transaction.
+   */
+  async #exclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.#operation;
+    let release = (): void => {};
+    this.#operation = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
   }
 
   /** Missing or unreadable contents read the same as a detached HEAD. */

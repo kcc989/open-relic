@@ -147,3 +147,31 @@ test("an object whose chunks went missing is an error, not silent truncation", a
 
   expect(objects.read(written.oid)).rejects.toThrow(/is missing/);
 });
+
+test("reclaim removes object chunks, metadata, and a persisted delta", async () => {
+  const opened = storage();
+  const objects = new ObjectStore(opened.db, opened.kv);
+  const resolved = filled(CHUNK_BYTES + 7, 17);
+  const rawDelta = filled(CHUNK_BYTES + 3, 29);
+  const oid = hashObject("blob", resolved);
+
+  await objects.write({
+    oid,
+    type: "blob",
+    bytes: resolved,
+    delta: { baseOid: "9d5c1f2b8a4e7c0d3f6b1a8e5c2d9f0b7a4e6c31", bytes: rawDelta },
+  });
+
+  expect(await objects.reclaim(oid)).toEqual({
+    objects: 1,
+    chunks: 4,
+    bytes: resolved.length + rawDelta.length,
+  });
+  expect(await objects.read(oid)).toBeNull();
+  expect(await objects.readDelta(oid)).toBeNull();
+  expect(opened.kv.get(`o:${oid}:0`)).toBeUndefined();
+  expect(opened.kv.get(`o:${oid}:1`)).toBeUndefined();
+  expect(opened.kv.get(`d:${oid}:0`)).toBeUndefined();
+  expect(opened.kv.get(`d:${oid}:1`)).toBeUndefined();
+  expect(await objects.reclaim(oid)).toBeNull();
+});

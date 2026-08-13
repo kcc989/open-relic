@@ -13,6 +13,8 @@ import { OBJECT_TYPES } from "../object.ts";
 export const repositoryState = sqliteTable("repository_state", {
   id: text("id").primaryKey(),
   createdAt: text("created_at").notNull(),
+  /** Incremented with every accepted ref transaction so a sweep can detect a stale walk. */
+  refVersion: integer("ref_version").notNull().default(0),
 });
 
 /**
@@ -68,3 +70,36 @@ export const objectDeltas = sqliteTable("object_deltas", {
 });
 
 export type ObjectDeltaRow = typeof objectDeltas.$inferSelect;
+
+export const SWEEP_PHASES = ["mark", "sweep", "complete"] as const;
+
+/**
+ * The durable checkpoint for one repository sweep. A completed row is retained
+ * as the repository's latest reclamation report; the next sweep replaces it.
+ */
+export const sweepState = sqliteTable("sweep_state", {
+  id: text("id").primaryKey(),
+  phase: text("phase", { enum: SWEEP_PHASES }).notNull(),
+  refVersion: integer("ref_version").notNull(),
+  startedAt: text("started_at").notNull(),
+  completedAt: text("completed_at"),
+  reachableObjects: integer("reachable_objects").notNull().default(0),
+  reclaimedObjects: integer("reclaimed_objects").notNull().default(0),
+  reclaimedChunks: integer("reclaimed_chunks").notNull().default(0),
+  reclaimedBytes: integer("reclaimed_bytes").notNull().default(0),
+});
+
+export const SWEEP_STATE_ID = "sweep";
+
+export type SweepStateRow = typeof sweepState.$inferSelect;
+
+/**
+ * The persisted mark set and work queue. Row presence means reachable; pending
+ * says that object's outgoing links still need to be walked.
+ */
+export const sweepReachable = sqliteTable("sweep_reachable", {
+  oid: text("oid").primaryKey(),
+  /** Null only for a ref root, whose type is learned from its own metadata. */
+  expectedType: text("expected_type", { enum: OBJECT_TYPES }),
+  pending: integer("pending", { mode: "boolean" }).notNull(),
+});
