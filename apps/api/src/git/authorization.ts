@@ -18,9 +18,7 @@ export type AuthorizationDecision =
   | { readonly allowed: true }
   | { readonly allowed: false; readonly detail: string };
 
-export type AuthorizeGitRequest = (
-  request: GitAuthorizationRequest,
-) => AuthorizationDecision;
+export type AuthorizeGitRequest = (request: GitAuthorizationRequest) => AuthorizationDecision;
 
 /**
  * The installation's blanket opt-in to unauthenticated pushes. A `string`
@@ -39,9 +37,8 @@ const ANONYMOUS_WRITE_ENABLED = "true";
 export const allowAnonymousWrite: AuthorizeGitRequest = ({ env }) => {
   // `env` is typed as always present, but a Worker deployed without the
   // variable is exactly the case this exists to refuse.
-  const configured = (env as Partial<ApiEnv> | undefined)?.[
-    ANONYMOUS_WRITE_VARIABLE
-  ];
+  // SAFETY: a Worker env may omit this binding at runtime even though ApiEnv names it.
+  const configured = (env as Partial<ApiEnv> | undefined)?.[ANONYMOUS_WRITE_VARIABLE];
 
   return configured === ANONYMOUS_WRITE_ENABLED
     ? { allowed: true }

@@ -37,13 +37,13 @@ The API implemented so far predated this decision and did not match. Most of the
 gap is now closed — the shape of the wire is Artifacts' — and what remains is
 behavior that has not been built at all rather than behavior built differently:
 
-| | Open Relic today | Artifacts |
-| --- | --- | --- |
-| Namespaces | created and deleted explicitly | created implicitly with the first repo; list and get only |
-| Tokens | route registered, answers `501`; create mints an unstored token | issued, listed, and revoked for real |
-| Contents | routes registered, answer `501` | serve refs, log, objects, and files |
-| Fork, import | routes registered, answer `501` | copy and mirror repositories |
-| `source`, `last_push_at` | always `null` — nothing writes them yet | set by import and by push |
+|                          | Open Relic today                                                | Artifacts                                                 |
+| ------------------------ | --------------------------------------------------------------- | --------------------------------------------------------- |
+| Namespaces               | created and deleted explicitly                                  | created implicitly with the first repo; list and get only |
+| Tokens                   | route registered, answers `501`; create mints an unstored token | issued, listed, and revoked for real                      |
+| Contents                 | routes registered, answer `501`                                 | serve refs, log, objects, and files                       |
+| Fork, import             | routes registered, answer `501`                                 | copy and mirror repositories                              |
+| `source`, `last_push_at` | always `null` — nothing writes them yet                         | set by import and by push                                 |
 
 These closed with the reshaping of the REST surface: the path shape, the v4
 envelope, `result_info` pagination, `errors[]` in place of RFC 9457 problem
@@ -62,10 +62,10 @@ Artifacts documents its routes relative to `/accounts/$ACCOUNT_ID`, hung off
 `https://api.cloudflare.com/client/v4`. An installation serves the same
 endpoints at the root instead:
 
-| Artifacts | Open Relic |
-| --- | --- |
-| `GET /client/v4/accounts/:id/artifacts/namespaces` | `GET /namespaces` |
-| `POST /client/v4/accounts/:id/artifacts/namespaces/:namespace/repos` | `POST /namespaces/:namespace/repos` |
+| Artifacts                                                             | Open Relic                           |
+| --------------------------------------------------------------------- | ------------------------------------ |
+| `GET /client/v4/accounts/:id/artifacts/namespaces`                    | `GET /namespaces`                    |
+| `POST /client/v4/accounts/:id/artifacts/namespaces/:namespace/repos`  | `POST /namespaces/:namespace/repos`  |
 | `POST /client/v4/accounts/:id/artifacts/namespaces/:namespace/tokens` | `POST /namespaces/:namespace/tokens` |
 
 An installation is single-tenant and is nothing but Artifacts, so

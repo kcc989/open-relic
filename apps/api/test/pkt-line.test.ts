@@ -43,9 +43,7 @@ describe("pktLine", () => {
     // dies with `protocol error: bad line length` above 65520 on the wire.
     expect(PKT_LINE_MAX_PAYLOAD_BYTES).toBe(65516);
     expect(() => pktLine("x".repeat(PKT_LINE_MAX_PAYLOAD_BYTES))).not.toThrow();
-    expect(() => pktLine("x".repeat(PKT_LINE_MAX_PAYLOAD_BYTES + 1))).toThrow(
-      RangeError,
-    );
+    expect(() => pktLine("x".repeat(PKT_LINE_MAX_PAYLOAD_BYTES + 1))).toThrow(RangeError);
   });
 });
 

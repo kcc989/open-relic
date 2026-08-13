@@ -42,8 +42,8 @@ one or more chunks; nothing but storage knows about them.
 _Avoid_: block, segment, page
 
 **Ref**:
-A named pointer to an object — `refs/heads/main`, `refs/tags/v1`. Use *ref* for
-the general case and *branch* only for `refs/heads/*`.
+A named pointer to an object — `refs/heads/main`, `refs/tags/v1`. Use _ref_ for
+the general case and _branch_ only for `refs/heads/*`.
 _Avoid_: reference, pointer
 
 **HEAD**:
@@ -63,7 +63,7 @@ packfile encoding.
 _Avoid_: bundle, archive
 
 **Delta**:
-An object expressed as edits against another object, its *base*, rather than in
+An object expressed as edits against another object, its _base_, rather than in
 full.
 
 **Advertisement**:

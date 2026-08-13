@@ -7,7 +7,8 @@ import {
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { createTestApp, type TestApp } from "./support/app.ts";
-import { envelope, errorCode, result } from "./support/envelope.ts";
+import { envelope, errorCode, pageCursor, result } from "./support/envelope.ts";
+import type { Json } from "../src/request-body.ts";
 
 const NAMESPACES = `http://local.test${NAMESPACES_PATH}`;
 
@@ -25,7 +26,7 @@ afterEach(() => {
   harness.close();
 });
 
-const create = (body: unknown) =>
+const create = (body: Json) =>
   app.request(
     new Request(NAMESPACES, {
       method: "POST",
@@ -79,7 +80,7 @@ describe("POST /namespaces", () => {
     expect(body.errors[0]?.code).toBe(ERROR_CODES.alreadyExists);
   });
 
-  const invalidBodies: ReadonlyArray<readonly [string, unknown]> = [
+  const invalidBodies: ReadonlyArray<readonly [string, Json]> = [
     ["a missing slug", {}],
     ["a non-string slug", { slug: 42 }],
     ["an empty slug", { slug: "" }],
@@ -91,10 +92,7 @@ describe("POST /namespaces", () => {
     ["an over-long slug", { slug: "a".repeat(NAMESPACE_SLUG_MAX_LENGTH + 1) }],
     ["a non-string description", { slug: "acme", description: 42 }],
     ["an over-long description", { slug: "acme", description: "x".repeat(501) }],
-    [
-      "an over-long display name",
-      { slug: "acme", display_name: "x".repeat(101) },
-    ],
+    ["an over-long display name", { slug: "acme", display_name: "x".repeat(101) }],
     ["a JSON array", []],
   ];
 
@@ -140,10 +138,7 @@ describe("GET /namespaces", () => {
     await create({ slug: "zeta" });
     await create({ slug: "acme" });
 
-    expect(await slugs(await app.request(NAMESPACES))).toEqual([
-      "acme",
-      "zeta",
-    ]);
+    expect(await slugs(await app.request(NAMESPACES))).toEqual(["acme", "zeta"]);
   });
 
   test("pages with limit and cursor", async () => {
@@ -153,21 +148,14 @@ describe("GET /namespaces", () => {
 
     const first = await app.request(`${NAMESPACES}?limit=2`);
     const firstBody = await envelope<NamespaceInfo[]>(first);
-    const cursor = (firstBody.result_info as { cursor: string }).cursor;
+    const cursor = pageCursor(firstBody.result_info);
     const secondBody = await envelope<NamespaceInfo[]>(
-      await app.request(
-        `${NAMESPACES}?limit=2&cursor=${encodeURIComponent(cursor)}`,
-      ),
+      await app.request(`${NAMESPACES}?limit=2&cursor=${encodeURIComponent(cursor)}`),
     );
 
-    expect(firstBody.result?.map((namespace) => namespace.slug)).toEqual([
-      "acme",
-      "beta",
-    ]);
+    expect(firstBody.result?.map((namespace) => namespace.slug)).toEqual(["acme", "beta"]);
     expect(cursor).not.toBe("");
-    expect(secondBody.result?.map((namespace) => namespace.slug)).toEqual([
-      "delta",
-    ]);
+    expect(secondBody.result?.map((namespace) => namespace.slug)).toEqual(["delta"]);
     expect(secondBody.result_info).toMatchObject({ cursor: "", count: 1 });
   });
 
@@ -232,9 +220,7 @@ describe("DELETE /namespaces/:namespace", () => {
   test("removes the namespace and names what it removed", async () => {
     await create({ slug: "acme" });
 
-    const response = await app.request(
-      new Request(`${NAMESPACES}/acme`, { method: "DELETE" }),
-    );
+    const response = await app.request(new Request(`${NAMESPACES}/acme`, { method: "DELETE" }));
 
     // 200, not the 202 a repository delete answers: this one really has
     // finished by the time it replies.
@@ -244,9 +230,7 @@ describe("DELETE /namespaces/:namespace", () => {
   });
 
   test("404s for an unknown namespace", async () => {
-    const response = await app.request(
-      new Request(`${NAMESPACES}/nope`, { method: "DELETE" }),
-    );
+    const response = await app.request(new Request(`${NAMESPACES}/nope`, { method: "DELETE" }));
 
     expect(response.status).toBe(404);
     expect(await errorCode(response)).toBe(ERROR_CODES.notFound);

@@ -32,21 +32,19 @@ export const ok = <T>(result: T, init?: ResponseInit): Response =>
  * A list answers with a bare array in `result` and its paging state beside it
  * in `result_info`, rather than an object wrapping both.
  */
-export const okList = <T>(
-  result: readonly T[],
-  resultInfo: ResultInfo,
-): Response =>
+export const okList = <T>(result: readonly T[], resultInfo: ResultInfo): Response =>
   envelope({ result, success: true, result_info: resultInfo });
 
 export const fail = (status: number, error: ApiError): Response =>
   envelope({ result: null, success: false, errors: [error] }, { status });
 
-export const invalidInput = (message: string, pointer?: string): Response =>
-  fail(400, {
-    code: ERROR_CODES.invalidInput,
-    message,
-    ...(pointer === undefined ? {} : { source: { pointer } }),
-  });
+export const invalidInput = (message: string, pointer?: string): Response => {
+  const error: ApiError =
+    pointer === undefined
+      ? { code: ERROR_CODES.invalidInput, message }
+      : { code: ERROR_CODES.invalidInput, message, source: { pointer } };
+  return fail(400, error);
+};
 
 export const invalidRepoName = (message: string): Response =>
   fail(400, {

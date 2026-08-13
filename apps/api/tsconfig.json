@@ -6,10 +6,5 @@
     // apply.
     "allowJs": true
   },
-  "include": [
-    "src/**/*.ts",
-    "test/**/*.ts",
-    "types/**/*.d.ts",
-    "drizzle/**/*.js"
-  ]
+  "include": ["src/**/*.ts", "test/**/*.ts", "types/**/*.d.ts", "drizzle/**/*.js"]
 }

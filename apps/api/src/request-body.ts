@@ -1,3 +1,5 @@
+import { Result, Schema } from "effect";
+
 /**
  * `pointer` is the JSON pointer at the offending field, which the v4 envelope
  * carries as `errors[].source.pointer` so a client can attribute the rejection
@@ -9,38 +11,35 @@ export type Rejected = {
   readonly pointer?: string;
 };
 
-export type ParsedObject =
-  | { readonly ok: true; readonly value: Record<string, unknown> }
-  | Rejected;
+export type Parsed<Value> = { readonly ok: true; readonly value: Value } | Rejected;
 
-export type ParsedText =
-  | { readonly ok: true; readonly value: string | null }
-  | Rejected;
+export type ParsedText = { readonly ok: true; readonly value: string | null } | Rejected;
 
-export type ParsedFlag =
-  | { readonly ok: true; readonly value: boolean }
-  | Rejected;
+export type ParsedFlag = { readonly ok: true; readonly value: boolean } | Rejected;
 
-export const parseJsonObject = (payload: unknown): ParsedObject =>
-  typeof payload !== "object" || payload === null || Array.isArray(payload)
-    ? { ok: false, detail: "The request body must be a JSON object." }
-    : { ok: true, value: payload as Record<string, unknown> };
+export type Json =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly Json[]
+  | { readonly [key: string]: Json };
+
+export const decodeJson = <Value>(schema: Schema.Codec<Value>, payload: Json): Parsed<Value> => {
+  const decoded = Schema.decodeUnknownResult(schema)(payload);
+  return Result.isFailure(decoded)
+    ? { ok: false, detail: decoded.failure.message }
+    : { ok: true, value: decoded.success };
+};
 
 /** Absent, null, and blank all parse to `null` — one spelling of "unset". */
 export const parseOptionalText = (
-  value: unknown,
+  value: string | null | undefined,
   field: string,
   maxLength: number,
 ): ParsedText => {
   if (value === undefined || value === null) {
     return { ok: true, value: null };
-  }
-  if (typeof value !== "string") {
-    return {
-      ok: false,
-      detail: `"${field}" must be a string.`,
-      pointer: `/${field}`,
-    };
   }
 
   const trimmed = value.trim();
@@ -57,19 +56,11 @@ export const parseOptionalText = (
 
 /** Strict: `"true"` and `1` are not booleans, and guessing at them would hide a bug. */
 export const parseOptionalFlag = (
-  value: unknown,
-  field: string,
+  value: boolean | null | undefined,
   fallback: boolean,
 ): ParsedFlag => {
   if (value === undefined || value === null) {
     return { ok: true, value: fallback };
-  }
-  if (typeof value !== "boolean") {
-    return {
-      ok: false,
-      detail: `"${field}" must be a boolean.`,
-      pointer: `/${field}`,
-    };
   }
 
   return { ok: true, value };

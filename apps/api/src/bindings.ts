@@ -9,9 +9,8 @@ import type { RepositoryObjectClient } from "./repository-store.ts";
  */
 export const NAMESPACE_REGISTRY_KEY = "registry";
 
-export const namespaceRegistryFromEnv = (
-  env: ApiEnv,
-): NamespaceRegistryClient => env.NAMESPACES.getByName(NAMESPACE_REGISTRY_KEY);
+export const namespaceRegistryFromEnv = (env: ApiEnv): NamespaceRegistryClient =>
+  env.NAMESPACES.getByName(NAMESPACE_REGISTRY_KEY);
 
 /**
  * The index lives in the same object as the namespace registry, so this is the
@@ -28,6 +27,5 @@ export interface RepositoryObjects {
 
 export const repositoryObjectsFromEnv = (env: ApiEnv): RepositoryObjects => ({
   createId: () => env.REPOSITORIES.newUniqueId().toString(),
-  get: (durableObjectId) =>
-    env.REPOSITORIES.get(env.REPOSITORIES.idFromString(durableObjectId)),
+  get: (durableObjectId) => env.REPOSITORIES.get(env.REPOSITORIES.idFromString(durableObjectId)),
 });

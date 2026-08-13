@@ -5,8 +5,8 @@ Status: accepted
 A repository object stores `HEAD` under a single key in the synchronous KV API,
 holding exactly the bytes `.git/HEAD` holds — `ref: refs/heads/main\n` when
 symbolic, a bare 40-hex SHA when detached. The `default_branch` column that
-`repository_state` carried is removed: it stored a branch *name* where Git stores
-a ref *path*, it could not express a detached HEAD at all, and having both left
+`repository_state` carried is removed: it stored a branch _name_ where Git stores
+a ref _path_, it could not express a detached HEAD at all, and having both left
 the repository object with two candidate authorities for one fact.
 
 ## Consequences

@@ -3,10 +3,7 @@ import { afterEach, expect, test } from "bun:test";
 import { CHUNK_BYTES, ObjectStore } from "../src/object-store.ts";
 import { hashObject } from "../src/object.ts";
 import type { PackObject } from "../src/pack.ts";
-import {
-  createTestRepositoryStorage,
-  type TestRepositoryStorage,
-} from "./support/database.ts";
+import { createTestRepositoryStorage, type TestRepositoryStorage } from "./support/database.ts";
 
 const openHandles: Array<() => void> = [];
 
@@ -137,9 +134,7 @@ test("a store reopened on the same storage sees the objects", async () => {
   const written = blob(utf8("survives eviction"));
   await new ObjectStore(db, kv).write(written);
 
-  expect((await new ObjectStore(db, kv).read(written.oid))?.bytes).toEqual(
-    written.bytes,
-  );
+  expect((await new ObjectStore(db, kv).read(written.oid))?.bytes).toEqual(written.bytes);
 });
 
 test("an object whose chunks went missing is an error, not silent truncation", async () => {

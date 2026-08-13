@@ -11,9 +11,7 @@ import { Sha1, fromHex } from "../../src/sha1.ts";
  */
 
 export const concat = (...parts: readonly Uint8Array[]): Uint8Array => {
-  const joined = new Uint8Array(
-    parts.reduce((total, part) => total + part.length, 0),
-  );
+  const joined = new Uint8Array(parts.reduce((total, part) => total + part.length, 0));
   let at = 0;
   for (const part of parts) {
     joined.set(part, at);
@@ -22,12 +20,12 @@ export const concat = (...parts: readonly Uint8Array[]): Uint8Array => {
   return joined;
 };
 
-const ENTRY_TYPES: Readonly<Record<ObjectType, number>> = {
+const ENTRY_TYPES = {
   commit: 1,
   tree: 2,
   blob: 3,
   tag: 4,
-};
+} as const;
 const OFS_DELTA = 6;
 const REF_DELTA = 7;
 
@@ -111,8 +109,7 @@ export const buildDelta = (
   baseSize: number,
   resultSize: number,
   instructions: readonly Uint8Array[],
-): Uint8Array =>
-  concat(deltaVarint(baseSize), deltaVarint(resultSize), ...instructions);
+): Uint8Array => concat(deltaVarint(baseSize), deltaVarint(resultSize), ...instructions);
 
 export type PackEntry =
   | {
@@ -154,12 +151,7 @@ export const buildPack = (
     offsets.push(at);
 
     if (entry.kind === "object") {
-      push(
-        entryHeader(
-          ENTRY_TYPES[entry.type],
-          entry.declaredSize ?? entry.bytes.length,
-        ),
-      );
+      push(entryHeader(ENTRY_TYPES[entry.type], entry.declaredSize ?? entry.bytes.length));
       push(new Uint8Array(deflateSync(entry.bytes)));
       continue;
     }

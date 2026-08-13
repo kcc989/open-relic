@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
 import type { ApiEnv } from "../../../alchemy.run.ts";
-import {
-  ANONYMOUS_WRITE_VARIABLE,
-  allowAnonymousWrite,
-} from "../src/git/authorization.ts";
+import { ANONYMOUS_WRITE_VARIABLE, allowAnonymousWrite } from "../src/git/authorization.ts";
 
-const authorize = (env: unknown) =>
+type TestEnv = ApiEnv | { readonly [ANONYMOUS_WRITE_VARIABLE]?: string };
+
+const authorize = (env: TestEnv | undefined) =>
   allowAnonymousWrite({
+    // SAFETY: the seam under test must observe a missing or partial Worker env.
     env: env as ApiEnv,
     request: new Request("http://local.test/git/acme/demo.git/info/refs"),
     namespace: "acme",
@@ -21,7 +21,7 @@ describe("the anonymous-write seam", () => {
     });
   });
 
-  const refusals: ReadonlyArray<readonly [string, unknown]> = [
+  const refusals: ReadonlyArray<readonly [string, TestEnv | undefined]> = [
     ["the variable is missing", {}],
     ["the environment is missing entirely", undefined],
     ["the variable is empty", { [ANONYMOUS_WRITE_VARIABLE]: "" }],
@@ -36,9 +36,7 @@ describe("the anonymous-write seam", () => {
       const decision = authorize(env);
 
       expect(decision.allowed).toBe(false);
-      expect(decision.allowed === false && decision.detail).toContain(
-        ANONYMOUS_WRITE_VARIABLE,
-      );
+      expect(decision.allowed === false && decision.detail).toContain(ANONYMOUS_WRITE_VARIABLE);
     });
   }
 });

@@ -37,12 +37,7 @@ export interface GitRouteDependencies {
 
 export const registerGitRoutes = (
   app: Hono<{ Bindings: ApiEnv }>,
-  {
-    repositoryIndex,
-    repositoryObjects,
-    authorize,
-    notImplemented,
-  }: GitRouteDependencies,
+  { repositoryIndex, repositoryObjects, authorize, notImplemented }: GitRouteDependencies,
 ): void => {
   // Both advertisements share a path and are told apart by the service Git
   // names in the query string, so one route dispatches to two operations.
@@ -80,10 +75,7 @@ export const registerGitRoutes = (
 
     // The registry resolves the name, so an unknown namespace or repository is
     // answered without waking a repository object.
-    const found = await repositoryIndex(context.env).getRepository(
-      namespace,
-      name,
-    );
+    const found = await repositoryIndex(context.env).getRepository(namespace, name);
 
     if (found === null) {
       return notFound(`No repository named "${namespace}/${name}" exists.`);

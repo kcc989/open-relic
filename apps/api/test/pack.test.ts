@@ -1,12 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
 
 import { CHUNK_BYTES, ObjectStore } from "../src/object-store.ts";
-import {
-  MAX_OBJECT_BYTES,
-  hashObject,
-  type ObjectType,
-} from "../src/object.ts";
-import { PackError, readPack } from "../src/pack.ts";
+import { MAX_OBJECT_BYTES, hashObject, type ObjectType } from "../src/object.ts";
+import { PackError, readPack, type PackSummary } from "../src/pack.ts";
 import {
   buildDelta,
   buildPack,
@@ -16,10 +12,7 @@ import {
   streamOf,
   type PackEntry,
 } from "./support/pack.ts";
-import {
-  createTestRepositoryStorage,
-  type TestRepositoryStorage,
-} from "./support/database.ts";
+import { createTestRepositoryStorage, type TestRepositoryStorage } from "./support/database.ts";
 
 const openHandles: Array<() => void> = [];
 
@@ -42,15 +35,17 @@ afterEach(() => {
 
 const utf8 = (text: string): Uint8Array => new TextEncoder().encode(text);
 
-const oidOf = (type: ObjectType, bytes: Uint8Array): string =>
-  hashObject(type, bytes);
+const oidOf = (type: ObjectType, bytes: Uint8Array): string => hashObject(type, bytes);
 
-const packErrorCode = async (reading: Promise<unknown>): Promise<string> => {
+const packErrorCode = async (reading: Promise<PackSummary>): Promise<string> => {
   try {
     await reading;
   } catch (error) {
     expect(error).toBeInstanceOf(PackError);
-    return (error as PackError).code;
+    if (error instanceof PackError) {
+      return error.code;
+    }
+    throw error;
   }
 
   throw new Error("The pack was accepted where it should have been rejected.");
@@ -126,9 +121,7 @@ test("a ref-delta resolves against an object already in the repository", async (
 
   await readPack(streamOf(pack.bytes), objects);
 
-  expect((await objects.read(oidOf("blob", utf8("a base"))))?.bytes).toEqual(
-    utf8("a base"),
-  );
+  expect((await objects.read(oidOf("blob", utf8("a base"))))?.bytes).toEqual(utf8("a base"));
 });
 
 test("a chain of deltas several deep resolves, each against the one before", async () => {
@@ -187,10 +180,9 @@ test("an object spanning several chunks survives the round trip", async () => {
   const contents = noisy(CHUNK_BYTES + 4_096, 17);
 
   await readPack(
-    streamOf(
-      buildPack([{ kind: "object", type: "blob", bytes: contents }]).bytes,
-      { chunkSize: 8_192 },
-    ),
+    streamOf(buildPack([{ kind: "object", type: "blob", bytes: contents }]).bytes, {
+      chunkSize: 8_192,
+    }),
     objects,
   );
 
@@ -268,9 +260,7 @@ test("memory does not scale with the pack — the same pack four times over hold
 test("bytes that are not a pack are rejected", async () => {
   const notAPack = concat(utf8("NOPE"), new Uint8Array(28));
 
-  expect(await packErrorCode(readPack(streamOf(notAPack), store()))).toBe(
-    "not-a-pack",
-  );
+  expect(await packErrorCode(readPack(streamOf(notAPack), store()))).toBe("not-a-pack");
 });
 
 test("a pack version we do not speak is rejected", async () => {
@@ -278,20 +268,14 @@ test("a pack version we do not speak is rejected", async () => {
     version: 4,
   });
 
-  expect(await packErrorCode(readPack(streamOf(pack.bytes), store()))).toBe(
-    "unsupported-version",
-  );
+  expect(await packErrorCode(readPack(streamOf(pack.bytes), store()))).toBe("unsupported-version");
 });
 
 test("a truncated pack is rejected as truncated", async () => {
-  const pack = buildPack([
-    { kind: "object", type: "blob", bytes: noisy(4_000, 5) },
-  ]);
+  const pack = buildPack([{ kind: "object", type: "blob", bytes: noisy(4_000, 5) }]);
 
   expect(
-    await packErrorCode(
-      readPack(streamOf(pack.bytes.slice(0, pack.bytes.length - 40)), store()),
-    ),
+    await packErrorCode(readPack(streamOf(pack.bytes.slice(0, pack.bytes.length - 40)), store())),
   ).toBe("truncated");
 });
 
@@ -300,30 +284,22 @@ test("a pack claiming more objects than it carries is rejected as truncated", as
     declaredCount: 2,
   });
 
-  expect(await packErrorCode(readPack(streamOf(pack.bytes), store()))).toBe(
-    "truncated",
-  );
+  expect(await packErrorCode(readPack(streamOf(pack.bytes), store()))).toBe("truncated");
 });
 
 test("a bad trailing checksum is rejected as a checksum mismatch", async () => {
   const pack = buildPack([{ kind: "object", type: "blob", bytes: utf8("two") }]);
   pack.bytes[pack.bytes.length - 1] = pack.bytes[pack.bytes.length - 1]! ^ 0xff;
 
-  expect(await packErrorCode(readPack(streamOf(pack.bytes), store()))).toBe(
-    "checksum-mismatch",
-  );
+  expect(await packErrorCode(readPack(streamOf(pack.bytes), store()))).toBe("checksum-mismatch");
 });
 
 test("bytes past the trailer are rejected", async () => {
-  const pack = buildPack([
-    { kind: "object", type: "blob", bytes: utf8("three") },
-  ]);
+  const pack = buildPack([{ kind: "object", type: "blob", bytes: utf8("three") }]);
 
-  expect(
-    await packErrorCode(
-      readPack(streamOf(concat(pack.bytes, utf8("extra"))), store()),
-    ),
-  ).toBe("trailing-bytes");
+  expect(await packErrorCode(readPack(streamOf(concat(pack.bytes, utf8("extra"))), store()))).toBe(
+    "trailing-bytes",
+  );
 });
 
 test("a ref-delta whose base is nowhere is rejected — thin packs are out of scope", async () => {
@@ -335,9 +311,7 @@ test("a ref-delta whose base is nowhere is rejected — thin packs are out of sc
     },
   ]);
 
-  expect(await packErrorCode(readPack(streamOf(pack.bytes), store()))).toBe(
-    "missing-base",
-  );
+  expect(await packErrorCode(readPack(streamOf(pack.bytes), store()))).toBe("missing-base");
 });
 
 test("an ofs-delta pointing where no object began is rejected", async () => {
@@ -355,9 +329,7 @@ test("an ofs-delta pointing where no object began is rejected", async () => {
   const deltaHeaderAt = pack.offsets[1]! + 1;
   pack.bytes[deltaHeaderAt] = pack.bytes[deltaHeaderAt]! - 1;
 
-  expect(await packErrorCode(readPack(streamOf(pack.bytes), store()))).toBe(
-    "missing-base",
-  );
+  expect(await packErrorCode(readPack(streamOf(pack.bytes), store()))).toBe("missing-base");
 });
 
 test("an entry declaring more than we will hold is rejected before it is held", async () => {
@@ -376,9 +348,7 @@ test("an entry declaring more than we will hold is rejected before it is held", 
   expect(pack.bytes.length).toBeLessThan(1_024);
   // Reaching this code rather than a size mismatch is what says the buffer was
   // never allocated: nothing downstream of the header check ran.
-  expect(await packErrorCode(readPack(streamOf(pack.bytes), store()))).toBe(
-    "object-too-large",
-  );
+  expect(await packErrorCode(readPack(streamOf(pack.bytes), store()))).toBe("object-too-large");
 });
 
 test("a delta declaring a result larger than we will hold is rejected", async () => {
@@ -388,26 +358,18 @@ test("a delta declaring a result larger than we will hold is rejected", async ()
     {
       kind: "ofs-delta",
       baseIndex: 0,
-      delta: buildDelta(base.length, MAX_OBJECT_BYTES + 1, [
-        copyInstruction(0, base.length),
-      ]),
+      delta: buildDelta(base.length, MAX_OBJECT_BYTES + 1, [copyInstruction(0, base.length)]),
     },
   ]);
 
-  expect(await packErrorCode(readPack(streamOf(pack.bytes), store()))).toBe(
-    "object-too-large",
-  );
+  expect(await packErrorCode(readPack(streamOf(pack.bytes), store()))).toBe("object-too-large");
 });
 
 test("a corrupt object stream is rejected", async () => {
-  const pack = buildPack([
-    { kind: "object", type: "blob", bytes: noisy(5_000, 9) },
-  ]);
+  const pack = buildPack([{ kind: "object", type: "blob", bytes: noisy(5_000, 9) }]);
   // Deep enough into the deflate stream to break the data rather than the
   // header, so the failure is the zlib checksum rather than a bad magic byte.
   pack.bytes[200] = pack.bytes[200]! ^ 0xff;
 
-  expect(await packErrorCode(readPack(streamOf(pack.bytes), store()))).toBe(
-    "corrupt",
-  );
+  expect(await packErrorCode(readPack(streamOf(pack.bytes), store()))).toBe("corrupt");
 });
