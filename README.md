@@ -547,6 +547,12 @@ bun alchemy login   # or copy .env.example to .env and use an API token
 bun run deploy
 ```
 
+To deploy an isolated stage and exercise the real Workers and Durable Objects
+runtime with real Git repositories, follow the
+[Cloudflare smoke-testing runbook](./docs/cloudflare-smoke-testing.md). Its
+script removes all temporary clones on exit and destroys the smoke stage by
+default.
+
 ### Test coverage
 
 `bun test` requires `git` on `PATH` and fails at startup when it is missing. The
