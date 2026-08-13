@@ -1,6 +1,5 @@
 import {
   GIT_REPOSITORY_PATH,
-  PROBLEM_TYPES,
   repositoryNameFromPath,
   type EndpointId,
 } from "@open-relic/contracts";
@@ -8,12 +7,12 @@ import type { Hono } from "hono";
 
 import type { ApiEnv } from "../../../alchemy.run.ts";
 import type { RepositoryObjects } from "./bindings.ts";
+import { forbidden, invalidInput, notFound } from "./envelope.ts";
 import {
   RECEIVE_PACK_ADVERTISEMENT_CONTENT_TYPE,
   RECEIVE_PACK_SERVICE,
 } from "./git/advertisement.ts";
 import type { AuthorizeGitRequest } from "./git/authorization.ts";
-import { forbidden, notFound, problemResponse } from "./problems.ts";
 import type { RepositoryIndexClient } from "./repository-index.ts";
 
 export const UPLOAD_PACK_SERVICE = "git-upload-pack";
@@ -58,15 +57,11 @@ export const registerGitRoutes = (
       // No service parameter is Git's dumb protocol asking for a file listing.
       // We have no files to list, and saying so is better than a 404 that reads
       // like a missing repository.
-      return problemResponse({
-        type: PROBLEM_TYPES.invalidRequest,
-        title: "Bad Request",
-        status: 400,
-        detail: `"service" must be "${RECEIVE_PACK_SERVICE}" or "${UPLOAD_PACK_SERVICE}"; the dumb HTTP protocol is not supported.`,
-      });
+      return invalidInput(
+        `"service" must be "${RECEIVE_PACK_SERVICE}" or "${UPLOAD_PACK_SERVICE}"; the dumb HTTP protocol is not supported.`,
+      );
     }
 
-    const operation: EndpointId = "git.receivePack.advertise";
     const namespace = context.req.param("namespace");
     const name = repositoryNameFromPath(context.req.param("repo"));
 
@@ -80,7 +75,7 @@ export const registerGitRoutes = (
     });
 
     if (!decision.allowed) {
-      return problemResponse(forbidden(operation, decision.detail));
+      return forbidden(decision.detail);
     }
 
     // The registry resolves the name, so an unknown namespace or repository is
@@ -91,12 +86,7 @@ export const registerGitRoutes = (
     );
 
     if (found === null) {
-      return problemResponse(
-        notFound(
-          operation,
-          `No repository named "${namespace}/${name}" exists.`,
-        ),
-      );
+      return notFound(`No repository named "${namespace}/${name}" exists.`);
     }
 
     const advertisement = await repositoryObjects(context.env)

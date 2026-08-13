@@ -1,4 +1,4 @@
-import type { Namespace, Repository } from "@open-relic/contracts";
+import type { NamespaceInfo } from "@open-relic/contracts";
 import { DurableObject } from "cloudflare:workers";
 import {
   drizzle,
@@ -12,11 +12,16 @@ import {
   type CreateNamespaceCommand,
   type CreateNamespaceOutcome,
   type DeleteNamespaceOutcome,
+  type ListNamespacesQuery,
+  type NamespacePage,
 } from "./namespace-registry.ts";
 import {
   RepositoryIndex,
   type CreateRepositoryCommand,
   type CreateRepositoryOutcome,
+  type DeletedRepository,
+  type ListRepositoriesQuery,
+  type RepositoryPage,
   type RepositoryPointer,
 } from "./repository-index.ts";
 
@@ -53,11 +58,11 @@ export class NamespaceRegistryObject extends DurableObject {
     return this.#registry.createNamespace(command);
   }
 
-  listNamespaces(): Promise<Namespace[]> {
-    return this.#registry.listNamespaces();
+  listNamespaces(query: ListNamespacesQuery): Promise<NamespacePage> {
+    return this.#registry.listNamespaces(query);
   }
 
-  getNamespace(slug: string): Promise<Namespace | null> {
+  getNamespace(slug: string): Promise<NamespaceInfo | null> {
     return this.#registry.getNamespace(slug);
   }
 
@@ -73,8 +78,9 @@ export class NamespaceRegistryObject extends DurableObject {
 
   listRepositories(
     namespaceSlug: string,
-  ): Promise<readonly Repository[] | null> {
-    return this.#repositories.listRepositories(namespaceSlug);
+    query: ListRepositoriesQuery,
+  ): Promise<RepositoryPage | null> {
+    return this.#repositories.listRepositories(namespaceSlug, query);
   }
 
   getRepository(
@@ -87,7 +93,7 @@ export class NamespaceRegistryObject extends DurableObject {
   deleteRepository(
     namespaceSlug: string,
     name: string,
-  ): Promise<string | null> {
+  ): Promise<DeletedRepository | null> {
     return this.#repositories.deleteRepository(namespaceSlug, name);
   }
 }

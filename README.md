@@ -20,7 +20,56 @@ that answers `501`:
 - Drizzle as the ORM over Durable Object SQLite, with generated migrations
 - Alchemy v2 for the Cloudflare Worker and SQLite-backed Durable Objects
 - Bun workspaces for the API app and shared endpoint contracts
-- RFC 9457-style problem documents for every failure
+- The Cloudflare v4 envelope on every response, success or failure
+
+## The wire
+
+Artifacts documents its REST routes relative to `/accounts/$ACCOUNT_ID`, hung off
+`https://api.cloudflare.com/client/v4`. An installation is single-tenant and is
+nothing but Artifacts, so it serves the same endpoints at the root — `POST
+/namespaces/:namespace/repos`, not `POST
+/client/v4/accounts/:id/artifacts/namespaces/:namespace/repos`. Everything from
+`/namespaces` rightward matches Artifacts exactly, as does every body, field
+name, status code, and error shape. The base URL is the one thing a client
+changes, which is the same thing it already changes for the host.
+
+Every JSON response is the v4 envelope:
+
+```json
+{ "result": {}, "success": true, "errors": [], "messages": [] }
+```
+
+A failure keeps the shape and moves into `errors`, using
+[Artifacts' documented codes](https://developers.cloudflare.com/artifacts/api/errors/):
+
+```json
+{
+  "result": null,
+  "success": false,
+  "errors": [{ "code": 10200, "message": "No namespace named \"nope\" exists." }],
+  "messages": []
+}
+```
+
+A rejected field carries a JSON pointer at it in `errors[].source.pointer`.
+
+Lists answer with a bare array in `result` and their paging state beside it in
+`result_info`. Cursors are keyset, not offset — the cursor carries the sort key
+of the last row handed out — so a repository created mid-walk cannot shift rows
+onto a page the client has already seen. `cursor` is empty once the last page has
+been handed out.
+
+A cursor names a position in one ordering of one filtered set, so it also
+carries the `sort`, `direction`, and `search` it was issued under. Replaying it
+against a different query is a `400`, not a quietly different page: comparing a
+stored `created_at` against a name would let every row through and hand back
+page one again under a fresh cursor. A cursor the service did not issue is a
+`400` for the same reason — an empty page would be indistinguishable from a
+finished list.
+
+```json
+{ "result_info": { "cursor": "eyJ2IjoiLi4uIn0", "per_page": 20, "count": 20 } }
+```
 
 ## Monorepo
 
@@ -51,12 +100,20 @@ has to be a single serialized decision and listing namespaces has to see all of
 them; `onConflictDoNothing().returning()` makes the uniqueness check and the
 insert one statement.
 
+Artifacts creates a namespace implicitly with its first repository and documents
+only list and get. Explicit create and delete are ours; they sit on methods
+Artifacts has not spoken for on those paths.
+
 | Endpoint | Behavior |
 | --- | --- |
-| `POST /api/v1/namespaces` | `201` with a `Location` header, `409` if the slug is taken, `400` if the body is invalid |
-| `GET /api/v1/namespaces` | `200` with `{ "namespaces": [...] }`, ordered by slug |
-| `GET /api/v1/namespaces/:namespace` | `200` or `404` |
-| `DELETE /api/v1/namespaces/:namespace` | `204` or `404`; takes the namespace's repositories with it |
+| `POST /namespaces` | `201` with a `Location` header, `409` if the slug is taken, `400` if the body is invalid |
+| `GET /namespaces?limit=&cursor=` | `200`, ordered by slug, with `result_info` |
+| `GET /namespaces/:namespace` | `200` or `404` |
+| `DELETE /namespaces/:namespace` | `200` with `{ "slug": … }` or `404`; takes the namespace's repositories with it |
+
+The delete answers `200`, not the `202` a repository delete answers, because it
+really has finished: the index rows and the objects behind them are gone by the
+time it replies.
 
 A slug is lowercase alphanumerics with interior hyphens, at most 39 characters,
 and may not be one of the reserved segments of the HTTP surface (`api`, `git`,
@@ -64,9 +121,9 @@ and may not be one of the reserved segments of the HTTP surface (`api`, `git`,
 `packages/contracts` so clients can apply the same rule before a round trip.
 
 ```sh
-curl -X POST http://localhost:1337/api/v1/namespaces \
+curl -X POST http://localhost:1337/namespaces \
   -H 'Content-Type: application/json' \
-  -d '{"slug":"acme","displayName":"Acme, Inc."}'
+  -d '{"slug":"acme","display_name":"Acme, Inc."}'
 ```
 
 ## Repositories
@@ -101,14 +158,32 @@ that keeps listing a namespace one query.
 
 | Endpoint | Behavior |
 | --- | --- |
-| `POST /api/v1/namespaces/:namespace/repos` | `201` with a `Location` header, `404` if the namespace is unknown, `409` if the name is taken, `400` if the body is invalid |
-| `GET /api/v1/namespaces/:namespace/repos` | `200` with `{ "repositories": [...] }`, ordered by name, `404` if the namespace is unknown |
-| `GET /api/v1/namespaces/:namespace/repos/:repo` | `200` or `404` |
-| `DELETE /api/v1/namespaces/:namespace/repos/:repo` | `204` or `404`; discards the repository object's storage |
+| `POST /namespaces/:namespace/repos` | `200` with `{id, name, description, default_branch, remote, token}`, `404` if the namespace is unknown, `409` if the name is taken, `400` if the body is invalid |
+| `GET /namespaces/:namespace/repos?limit=&cursor=&search=&sort=&direction=` | `200` with `result_info`, `404` if the namespace is unknown |
+| `GET /namespaces/:namespace/repos/:repo` | `200` or `404` |
+| `DELETE /namespaces/:namespace/repos/:repo` | `202` with `{ "id": … }` or `404`; discards the repository object's storage |
+
+A create answers with a deliberately narrower shape than a list or get: the
+identity, the remote to clone from, and the one token it will not show again.
+List and get carry the full `RepoInfo` — `id`, `name`, `description`,
+`default_branch`, `created_at`, `updated_at`, `last_push_at`, `source`,
+`read_only` — plus `remote`. `source` and `last_push_at` are always `null` until
+import and push exist to write them.
+
+`sort` is one of `created_at`, `updated_at`, `last_push_at`, or `name`,
+defaulting to `created_at` descending. `search` filters on an infix of the name.
+`limit` defaults to 50 and caps at 200.
+
+The remote is built from the host the request arrived on, so an installation
+advertises whatever host the client actually reached it at. The token is a
+correctly shaped `art_v1_<40 hex>?expires=<unix seconds>` secret — **nothing
+stores or verifies it yet**, because the token API is still a stub and the Git
+surface answers `501`. Persisting it belongs with the work that makes tokens
+checkable.
 
 A name is lowercase alphanumerics with interior dots, underscores, and hyphens,
 at most 100 characters, and may not end in `.git` — `/git/:namespace/:repo.git`
-appends that suffix itself. `defaultBranch` defaults to `main` and is checked
+appends that suffix itself. `default_branch` defaults to `main` and is checked
 against a conservative subset of `git check-ref-format`.
 
 Deleting a namespace deletes its repositories in the same transaction and hands
@@ -116,7 +191,7 @@ back the object ids, which the route then discards; an index row and the object
 it points at are never removed by the same layer.
 
 ```sh
-curl -X POST http://localhost:1337/api/v1/namespaces/acme/repos \
+curl -X POST http://localhost:1337/namespaces/acme/repos \
   -H 'Content-Type: application/json' \
   -d '{"name":"demo","description":"Anvil firmware"}'
 ```
@@ -156,6 +231,11 @@ tags are not peeled — both belong to the upload-pack advertisement.
 `delete-refs`, `atomic`, `push-options`, and `report-status-v2` are deliberately
 absent: an unadvertised capability is how a client learns not to use one, and
 advertising something we do not honor is worse than not advertising it.
+
+An advertisement is Git's protocol rather than JSON, so it is the one response
+that is not a v4 envelope. Failures on this path still are — a Git client reads
+the status code and little else, and there is no reason for a second error
+shape.
 
 The path from a request to a repository is: the Worker resolves
 `namespace/repo` in the registry, passes an authorization seam, and calls a

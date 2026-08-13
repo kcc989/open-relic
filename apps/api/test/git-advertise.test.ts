@@ -1,11 +1,12 @@
-import { API_BASE_PATH } from "@open-relic/contracts";
+import { ERROR_CODES, NAMESPACES_PATH } from "@open-relic/contracts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import type { ApiEnv } from "../../../alchemy.run.ts";
 import { ANONYMOUS_WRITE_VARIABLE } from "../src/git/authorization.ts";
 import { createTestApp, type TestApp } from "./support/app.ts";
+import { errorCode } from "./support/envelope.ts";
 
-const NAMESPACES = `http://local.test${API_BASE_PATH}/namespaces`;
+const NAMESPACES = `http://local.test${NAMESPACES_PATH}`;
 const INFO_REFS = "http://local.test/git/acme/demo.git/info/refs";
 const ADVERTISE = `${INFO_REFS}?service=git-receive-pack`;
 
@@ -94,10 +95,7 @@ describe("GET /git/:namespace/:repo.git/info/refs?service=git-receive-pack", () 
     );
 
     expect(response.status).toBe(404);
-    expect(await response.json()).toMatchObject({
-      status: 404,
-      operation: "git.receivePack.advertise",
-    });
+    expect(await errorCode(response)).toBe(ERROR_CODES.notFound);
     expect(harness.objects.liveIds).toEqual(live);
   });
 
@@ -120,7 +118,7 @@ describe("GET /git/:namespace/:repo.git/info/refs?service=git-receive-pack", () 
     // The route does not match at all: a repository has one clone URL, and the
     // suffix-less spelling is not it.
     expect(response.status).toBe(404);
-    expect(await response.json()).toMatchObject({ status: 404 });
+    expect(await errorCode(response)).toBe(ERROR_CODES.notFound);
   });
 });
 
@@ -131,13 +129,7 @@ describe("without the anonymous-write configuration", () => {
     const response = await advertise(ADVERTISE, unconfigured);
 
     expect(response.status).toBe(403);
-    expect(response.headers.get("content-type")).toContain(
-      "application/problem+json",
-    );
-    expect(await response.json()).toMatchObject({
-      status: 403,
-      operation: "git.receivePack.advertise",
-    });
+    expect(await errorCode(response)).toBe(ERROR_CODES.forbidden);
   });
 
   test("refuses before the repository is resolved, so nothing leaks whether it exists", async () => {
@@ -155,10 +147,7 @@ describe("the other services on the advertisement path", () => {
     const response = await advertise(`${INFO_REFS}?service=git-upload-pack`);
 
     expect(response.status).toBe(501);
-    expect(await response.json()).toMatchObject({
-      status: 501,
-      operation: "git.uploadPack.advertise",
-    });
+    expect(await errorCode(response)).toBe(ERROR_CODES.notImplemented);
   });
 
   const rejected: ReadonlyArray<readonly [string, string]> = [
@@ -172,7 +161,7 @@ describe("the other services on the advertisement path", () => {
       const response = await advertise(url);
 
       expect(response.status).toBe(400);
-      expect(await response.json()).toMatchObject({ status: 400 });
+      expect(await errorCode(response)).toBe(ERROR_CODES.invalidInput);
     });
   }
 });

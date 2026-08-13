@@ -21,7 +21,7 @@ shown in, and it is the wrong one here:
 - RPC methods are typed at the call site. `context.env.REPOSITORIES` is a
   `DurableObjectNamespace<RepositoryObject>`, so a method that changes shape is a
   compile error rather than a `404` from a router inside an object.
-- The seam stays outside. Authorization, problem documents, and the HTTP
+- The seam stays outside. Authorization, the v4 error envelope, and the HTTP
   status of a refusal are the Worker's; what the object owns is Git.
 
 Streams cross the RPC boundary, so this costs nothing in buffering: the object

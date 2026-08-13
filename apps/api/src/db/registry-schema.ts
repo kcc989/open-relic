@@ -1,4 +1,10 @@
-import { primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import {
+  integer,
+  primaryKey,
+  sqliteTable,
+  text,
+  uniqueIndex,
+} from "drizzle-orm/sqlite-core";
 
 /**
  * The slug is the primary key, which is what makes claiming one a single
@@ -28,6 +34,11 @@ export type NewNamespaceRow = typeof namespaces.$inferInsert;
  * `default_branch` is denormalized from the repository object's `HEAD` so that
  * listing a namespace stays one query instead of a fan-out of RPCs. The
  * repository object stays authoritative; both are written on create.
+ *
+ * `id` is the API's opaque handle for the repository — what a delete answers
+ * with. It is not the `durable_object_id`: naming and storage are already
+ * separate here, and a public id that was a function of the object holding the
+ * bytes would tie the two back together.
  */
 export const repositories = sqliteTable(
   "repositories",
@@ -36,14 +47,29 @@ export const repositories = sqliteTable(
       .notNull()
       .references(() => namespaces.slug, { onDelete: "cascade" }),
     name: text("name").notNull(),
+    id: text("id").notNull(),
     durableObjectId: text("durable_object_id").notNull(),
     description: text("description"),
     defaultBranch: text("default_branch").notNull(),
+    /** Refused by the Git surface on push; the REST surface only reports it. */
+    readOnly: integer("read_only", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    /** The remote an import copied from; `null` for a repository created here. */
+    source: text("source"),
     createdAt: text("created_at")
       .notNull()
       .$defaultFn(() => new Date().toISOString()),
+    updatedAt: text("updated_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    /** `null` until the first push lands, which is what Artifacts reports. */
+    lastPushAt: text("last_push_at"),
   },
-  (table) => [primaryKey({ columns: [table.namespaceSlug, table.name] })],
+  (table) => [
+    primaryKey({ columns: [table.namespaceSlug, table.name] }),
+    uniqueIndex("repositories_id_unique").on(table.id),
+  ],
 );
 
 export type RepositoryRow = typeof repositories.$inferSelect;

@@ -1,3 +1,4 @@
+import { ERROR_CODES } from "@open-relic/contracts";
 import { DurableObject } from "cloudflare:workers";
 import {
   drizzle,
@@ -6,6 +7,7 @@ import {
 import { migrate } from "drizzle-orm/durable-sqlite/migrator";
 
 import migrations from "../drizzle/repository/migrations.js";
+import { fail } from "./envelope.ts";
 import {
   RepositoryStore,
   type RepositoryInit,
@@ -65,17 +67,9 @@ export class RepositoryObject extends DurableObject {
    * request, so nothing should arrive here.
    */
   override async fetch(): Promise<Response> {
-    return Response.json(
-      {
-        type: "https://open-relic.dev/problems/not-implemented",
-        title: "Not Implemented",
-        status: 501,
-        detail: "A repository object is addressed over RPC, not over HTTP.",
-      },
-      {
-        status: 501,
-        headers: { "Content-Type": "application/problem+json" },
-      },
-    );
+    return fail(501, {
+      code: ERROR_CODES.notImplemented,
+      message: "A repository object is addressed over RPC, not over HTTP.",
+    });
   }
 }
