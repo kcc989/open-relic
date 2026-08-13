@@ -16,6 +16,13 @@ const V1 = tag({ target: FIRST, name: "v1" });
 const REVISED = blob("Anvil firmware, revised\n");
 const SECOND_ROOT = tree([treeEntry("README.md", REVISED)]);
 const SECOND = commit({ tree: SECOND_ROOT, parents: [FIRST], message: "Second" });
+const DELTA_BASE = blob("Shared firmware base\n");
+const DELTA_RESULT = blob("Shared firmware result\n");
+const DELTA_ROOT = tree([
+  treeEntry("a-base.txt", DELTA_BASE),
+  treeEntry("b-result.txt", DELTA_RESULT),
+]);
+const DELTA_COMMIT = commit({ tree: DELTA_ROOT, parents: [FIRST], message: "Delta ordering" });
 const REJECTED = commit({ tree: ROOT, message: "Rejected" });
 
 const MAIN = "refs/heads/main";
@@ -133,6 +140,7 @@ describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
           reads.set(oid, (reads.get(oid) ?? 0) + 1);
           return objects.get(oid) ?? null;
         },
+        readDeltaBase: async () => null,
         readDelta: async () => null,
       },
       new Set([FIRST.oid]),
@@ -191,6 +199,7 @@ describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
             reads.set(oid, (reads.get(oid) ?? 0) + 1);
             return objects.get(oid) ?? null;
           },
+          readDeltaBase: async () => null,
           readDelta: async () => null,
         },
         new Set([SECOND.oid]),
@@ -225,6 +234,7 @@ describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
             reads.set(oid, (reads.get(oid) ?? 0) + 1);
             return objects.get(oid) ?? null;
           },
+          readDeltaBase: async () => null,
           readDelta: async () => null,
         },
         new Set([FIRST.oid]),
@@ -290,5 +300,176 @@ describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
       baseOid: README.oid,
       bytes: delta,
     });
+  });
+
+  test("orders a fresh clone's persisted delta after its base without making a thin pack", async () => {
+    const delta = buildDelta(DELTA_BASE.bytes.length, DELTA_RESULT.bytes.length, [
+      insertInstruction(DELTA_RESULT.bytes),
+    ]);
+    const pushed = buildPack([
+      { kind: "object", type: DELTA_COMMIT.type, bytes: DELTA_COMMIT.bytes },
+      { kind: "object", type: DELTA_ROOT.type, bytes: DELTA_ROOT.bytes },
+      { kind: "object", type: DELTA_BASE.type, bytes: DELTA_BASE.bytes },
+      { kind: "ref-delta", baseOid: DELTA_BASE.oid, delta },
+    ]).bytes;
+
+    const pushResponse = await harness.app.request(
+      new Request("http://local.test/git/acme/demo.git/git-receive-pack", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${harness.repositoryToken}` },
+        body: pushBody({
+          commands: [{ oldOid: FIRST.oid, newOid: DELTA_COMMIT.oid, name: MAIN }],
+          pack: pushed,
+        }),
+      }),
+    );
+    expect(pushResponse.status).toBe(200);
+
+    const request = concat(
+      pktLine(`want ${DELTA_COMMIT.oid} side-band-64k ofs-delta\n`),
+      flushPkt(),
+      pktLine("done\n"),
+    );
+    const response = await post(UPLOAD, request);
+    const pack = packFromSideband(new Uint8Array(await response.arrayBuffer()));
+    const held = new Map<string, PackBase>();
+    const received: PackObject[] = [];
+
+    await readPack(streamOf(pack), {
+      read: async (oid) => held.get(oid) ?? null,
+      write: async (object) => {
+        received.push(object);
+        held.set(object.oid, { type: object.type, bytes: object.bytes });
+      },
+    });
+
+    expect(received.findIndex((object) => object.oid === DELTA_BASE.oid)).toBeLessThan(
+      received.findIndex((object) => object.oid === DELTA_RESULT.oid),
+    );
+    expect(received.find((object) => object.oid === DELTA_RESULT.oid)?.delta).toEqual({
+      baseOid: DELTA_BASE.oid,
+      bytes: delta,
+    });
+  });
+
+  test("does not read a resolved object when its persisted delta can be sent", async () => {
+    const delta = buildDelta(DELTA_BASE.bytes.length, DELTA_RESULT.bytes.length, [
+      insertInstruction(DELTA_RESULT.bytes),
+    ]);
+    const objects = new Map(
+      [DELTA_COMMIT, DELTA_ROOT, DELTA_BASE, DELTA_RESULT, FIRST, ROOT, README].map((object) => [
+        object.oid,
+        { type: object.type, bytes: object.bytes },
+      ]),
+    );
+    const reads = new Map<string, number>();
+    const request = concat(
+      pktLine(`want ${DELTA_COMMIT.oid} side-band-64k ofs-delta\n`),
+      flushPkt(),
+      pktLine("done\n"),
+    );
+    const response = uploadPackResultStream(
+      streamOf(request),
+      {
+        has: async (oid) => objects.has(oid),
+        read: async (oid) => {
+          reads.set(oid, (reads.get(oid) ?? 0) + 1);
+          return objects.get(oid) ?? null;
+        },
+        readDeltaBase: async (oid) => (oid === DELTA_RESULT.oid ? DELTA_BASE.oid : null),
+        readDelta: async (oid) =>
+          oid === DELTA_RESULT.oid ? { baseOid: DELTA_BASE.oid, bytes: delta } : null,
+      },
+      new Set([DELTA_COMMIT.oid]),
+    );
+
+    await new Response(response).arrayBuffer();
+
+    expect(reads.get(DELTA_RESULT.oid)).toBeUndefined();
+  });
+
+  test("writes a full object when its persisted delta base is absent from client and pack", async () => {
+    const delta = buildDelta(DELTA_BASE.bytes.length, DELTA_RESULT.bytes.length, [
+      insertInstruction(DELTA_RESULT.bytes),
+    ]);
+    const root = tree([treeEntry("result.txt", DELTA_RESULT)]);
+    const tip = commit({ tree: root, parents: [FIRST], message: "Unreachable delta base" });
+    const pushed = buildPack([
+      { kind: "object", type: tip.type, bytes: tip.bytes },
+      { kind: "object", type: root.type, bytes: root.bytes },
+      { kind: "object", type: DELTA_BASE.type, bytes: DELTA_BASE.bytes },
+      { kind: "ref-delta", baseOid: DELTA_BASE.oid, delta },
+    ]).bytes;
+
+    await harness.app.request(
+      new Request("http://local.test/git/acme/demo.git/git-receive-pack", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${harness.repositoryToken}` },
+        body: pushBody({
+          commands: [{ oldOid: FIRST.oid, newOid: tip.oid, name: MAIN }],
+          pack: pushed,
+        }),
+      }),
+    );
+
+    const request = concat(
+      pktLine(`want ${tip.oid} thin-pack side-band-64k ofs-delta\n`),
+      flushPkt(),
+      pktLine("done\n"),
+    );
+    const response = await post(UPLOAD, request);
+    const pack = packFromSideband(new Uint8Array(await response.arrayBuffer()));
+    const held = new Map<string, PackBase>();
+    const received: PackObject[] = [];
+
+    await readPack(streamOf(pack), {
+      read: async (oid) => held.get(oid) ?? null,
+      write: async (object) => {
+        received.push(object);
+        held.set(object.oid, { type: object.type, bytes: object.bytes });
+      },
+    });
+
+    expect(received.some((object) => object.oid === DELTA_BASE.oid)).toBe(false);
+    expect(received.find((object) => object.oid === DELTA_RESULT.oid)?.delta).toBeNull();
+  });
+
+  test("compresses full objects instead of expanding them into stored deflate blocks", async () => {
+    const compressible = blob("Open Relic pack compression.\n".repeat(16_384));
+    const root = tree([treeEntry("large.txt", compressible)]);
+    const tip = commit({ tree: root, message: "Compress me" });
+    const objects = new Map(
+      [tip, root, compressible].map((object) => [
+        object.oid,
+        { type: object.type, bytes: object.bytes },
+      ]),
+    );
+    const request = concat(
+      pktLine(`want ${tip.oid} side-band-64k ofs-delta\n`),
+      flushPkt(),
+      pktLine("done\n"),
+    );
+    const response = uploadPackResultStream(
+      streamOf(request),
+      {
+        has: async (oid) => objects.has(oid),
+        read: async (oid) => objects.get(oid) ?? null,
+        readDeltaBase: async () => null,
+        readDelta: async () => null,
+      },
+      new Set([tip.oid]),
+    );
+    const pack = packFromSideband(new Uint8Array(await new Response(response).arrayBuffer()));
+
+    expect(pack.length).toBeLessThan(compressible.bytes.length / 10);
+
+    const held = new Map<string, PackBase>();
+    await readPack(streamOf(pack), {
+      read: async (oid) => held.get(oid) ?? null,
+      write: async (object) => {
+        held.set(object.oid, { type: object.type, bytes: object.bytes });
+      },
+    });
+    expect(held.get(compressible.oid)?.bytes).toEqual(compressible.bytes);
   });
 });

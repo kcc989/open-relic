@@ -93,6 +93,7 @@ describe("a real Git client", () => {
       expect(await readFile(join(checkout, "README.md"), "utf8")).toBe("Anvil firmware\n");
       expect(await run(["git", "-C", checkout, "rev-parse", "HEAD"])).toBe(FIRST.oid);
       expect(await run(["git", "-C", checkout, "rev-parse", "refs/tags/v1^{}"])).toBe(FIRST.oid);
+      expect(await run(["git", "-C", checkout, "fsck", "--full"])).toBe("");
     } finally {
       server.stop(true);
     }
