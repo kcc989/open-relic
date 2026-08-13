@@ -5,6 +5,7 @@ import { migrate } from "drizzle-orm/durable-sqlite/migrator";
 
 import migrations from "../drizzle/repository/migrations.js";
 import { fail } from "./envelope.ts";
+import type { UploadProtocolVersion } from "./git/advertisement.ts";
 import type { PackBase } from "./pack.ts";
 import {
   RepositoryStore,
@@ -48,6 +49,14 @@ export class RepositoryObject extends DurableObject {
 
   advertiseReceivePack(): Promise<ReadableStream<Uint8Array>> {
     return this.#store.advertiseReceivePack();
+  }
+
+  advertiseUploadPack(protocolVersion: UploadProtocolVersion): Promise<ReadableStream<Uint8Array>> {
+    return this.#store.advertiseUploadPack(protocolVersion);
+  }
+
+  uploadPack(body: ReadableStream<Uint8Array>): Promise<ReadableStream<Uint8Array>> {
+    return this.#store.uploadPack(body);
   }
 
   /**

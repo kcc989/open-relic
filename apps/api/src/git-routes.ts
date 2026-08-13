@@ -1,8 +1,4 @@
-import {
-  GIT_REPOSITORY_PATH,
-  repositoryNameFromPath,
-  type EndpointId,
-} from "@open-relic/contracts";
+import { GIT_REPOSITORY_PATH, repositoryNameFromPath } from "@open-relic/contracts";
 import type { Hono } from "hono";
 
 import type { ApiEnv } from "../../../alchemy.run.ts";
@@ -11,8 +7,12 @@ import { forbidden, gitAuthenticationRequired, invalidInput, notFound } from "./
 import {
   RECEIVE_PACK_ADVERTISEMENT_CONTENT_TYPE,
   RECEIVE_PACK_SERVICE,
+  UPLOAD_PACK_ADVERTISEMENT_CONTENT_TYPE,
+  UPLOAD_PACK_RESULT_CONTENT_TYPE,
+  UPLOAD_PACK_SERVICE,
 } from "./git/advertisement.ts";
 import type { AuthorizeGitRequest } from "./git/authorization.ts";
+import { GzipError, gunzip } from "./git/gzip.ts";
 import { RECEIVE_PACK_RESULT_CONTENT_TYPE } from "./git/receive-pack.ts";
 import type { RepositoryIndexClient, RepositoryPointer } from "./repository-index.ts";
 
@@ -21,8 +21,6 @@ type GitRouteContext = {
   readonly env: ApiEnv;
   readonly req: { readonly raw: Request; param(name: string): string };
 };
-
-export const UPLOAD_PACK_SERVICE = "git-upload-pack";
 
 /**
  * What Git's own server sends with an advertisement. A cached ref list would
@@ -38,13 +36,11 @@ export interface GitRouteDependencies {
   readonly repositoryIndex: (env: ApiEnv) => RepositoryIndexClient;
   readonly repositoryObjects: (env: ApiEnv) => RepositoryObjects;
   readonly authorize: AuthorizeGitRequest;
-  /** The stub the rest of the Git surface still answers with. */
-  readonly notImplemented: (operation: EndpointId) => Promise<Response>;
 }
 
 export const registerGitRoutes = (
   app: Hono<{ Bindings: ApiEnv }>,
-  { repositoryIndex, repositoryObjects, authorize, notImplemented }: GitRouteDependencies,
+  { repositoryIndex, repositoryObjects, authorize }: GitRouteDependencies,
 ): void => {
   /**
    * What every Git request does before it can do anything else: refuse the
@@ -81,7 +77,23 @@ export const registerGitRoutes = (
     const service = context.req.query("service");
 
     if (service === UPLOAD_PACK_SERVICE) {
-      return notImplemented("git.uploadPack.advertise");
+      const found = await resolve(context);
+      if (found instanceof Response) {
+        return found;
+      }
+
+      const advertisement = await repositoryObjects(context.env)
+        .get(found.durableObjectId)
+        .advertiseUploadPack(
+          context.req.header("Git-Protocol")?.split(":").includes("version=1") === true ? 1 : 0,
+        );
+
+      return new Response(advertisement, {
+        headers: {
+          "Content-Type": UPLOAD_PACK_ADVERTISEMENT_CONTENT_TYPE,
+          ...NO_CACHE_HEADERS,
+        },
+      });
     }
 
     if (service !== RECEIVE_PACK_SERVICE) {
@@ -158,6 +170,45 @@ export const registerGitRoutes = (
     return new Response(outcome.report, {
       headers: {
         "Content-Type": RECEIVE_PACK_RESULT_CONTENT_TYPE,
+        ...NO_CACHE_HEADERS,
+      },
+    });
+  });
+
+  app.post(`${GIT_REPOSITORY_PATH}/git-upload-pack`, async (context) => {
+    const found = await resolve(context);
+    if (found instanceof Response) {
+      return found;
+    }
+
+    const body = context.req.raw.body;
+    if (body === null) {
+      return invalidInput("A fetch must carry its wants and haves as a body.");
+    }
+
+    const contentEncoding = context.req.header("Content-Encoding")?.trim().toLowerCase();
+    let decoded: ReadableStream<Uint8Array> = body;
+
+    if (contentEncoding === "gzip") {
+      try {
+        decoded = await gunzip(body);
+      } catch (error) {
+        if (error instanceof GzipError) {
+          return invalidInput(error.message);
+        }
+        throw error;
+      }
+    } else if (contentEncoding !== undefined && contentEncoding !== "identity") {
+      return invalidInput(`The Content-Encoding "${contentEncoding}" is not supported.`);
+    }
+
+    const result = await repositoryObjects(context.env)
+      .get(found.durableObjectId)
+      .uploadPack(decoded);
+
+    return new Response(result, {
+      headers: {
+        "Content-Type": UPLOAD_PACK_RESULT_CONTENT_TYPE,
         ...NO_CACHE_HEADERS,
       },
     });

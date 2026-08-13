@@ -10,9 +10,9 @@ Artifacts should work against an installation with nothing changed but the host.
 [ADR-0001](./docs/adr/0001-wire-compatible-with-cloudflare-artifacts.md) records
 what that binds us to, and where the API below does not match yet.
 
-**`git push` works.** The namespace and repository APIs are implemented, and a
-Git client can create and fast-forward branches over authenticated Git Smart
-HTTP. Everything else — contents, forks, imports, and the fetch half of Git — is still a
+**`git push`, `git clone`, and `git fetch` work.** The namespace and repository
+APIs are implemented, and a Git client can round-trip branches over authenticated
+Git Smart HTTP. Everything else — contents, forks, and imports — is still a
 registered route that answers `501`:
 
 - Hono routes for every REST and Git Smart HTTP endpoint in the initial API
@@ -364,8 +364,32 @@ push is _not_ a fast-forward means reading every commit the new tip reaches, so
 it gives up after `FAST_FORWARD_COMMIT_BUDGET` commits and says so on the
 progress band rather than being killed mid-request.
 
-`git ls-remote` and `git clone` still answer `501`: they are upload-pack, and
-that is the fetch half.
+## Clone and fetch
+
+Upload-pack advertises `HEAD` and the repository's refs, then walks the closure
+of each `want` and subtracts the closure of the client's `have` lines. A clone
+therefore receives the full reachable repository, while an incremental fetch
+receives only the objects added since its common base.
+
+The response is generated as it is pulled: the pack header, one object or delta
+at a time, then the incremental SHA-1 trailer. It crosses the repository RPC
+boundary and the Worker as a `ReadableStream`; no complete pack is assembled in
+memory. Objects are currently zlib-framed with stored deflate blocks. That is a
+valid Git pack and keeps the writer runtime-portable; choosing a compression
+strategy is a later performance change rather than a wire change.
+
+When the requesting client has a persisted delta's base and negotiated
+`thin-pack`, upload-pack emits the stored delta as a `ref-delta` instead of
+inflating the full object onto the wire. If the base is not among the client's
+reachable `have` objects, the resolved object is sent whole.
+
+Protocol v1 is supported explicitly: a request carrying `Git-Protocol:
+version=1` receives the `version 1` marker before the advertisement. Protocol v2
+is deferred. A v2 request receives the truthful v0 advertisement, so Git
+automatically falls back instead of being promised `ls-refs` or v2 `fetch`.
+Shallow and deepen capabilities are likewise unadvertised until their graph
+boundaries are implemented. `filter` and `include-tag` remain unsupported,
+matching Artifacts.
 
 ## Objects and packs
 
@@ -378,8 +402,8 @@ Objects are stored inflated: metadata in the `objects` table, bytes in the
 object's synchronous KV storage under `o:<oid>:<n>`, split into 1.5 MiB chunks
 because Durable Object storage caps a key and its value together at 2 MB. When
 an object arrived as a **delta**, the raw delta goes under `d:<oid>:<n>` with its
-base's hash in `object_deltas` — nothing reads it until fetch lands, but the pack
-passes through our hands exactly once. See
+base's hash in `object_deltas`; upload-pack reuses it when the client already has
+that base. The incoming pack passes through our hands exactly once. See
 [ADR-0002](./docs/adr/0002-git-objects-are-chunked-rows-in-the-repository-object.md).
 
 The parse is a single streaming pass, and that is the whole point of storing
@@ -401,6 +425,7 @@ looks like this.
 | `src/delta.ts`            | Git's copy/insert delta encoding                                                                           |
 | `src/git/pkt-line.ts`     | Git's framing, written and read — and the hand-off from the commands to the pack behind them               |
 | `src/git/receive-pack.ts` | The push conversation: commands in, `report-status` out, and what this server accepts                      |
+| `src/git/upload-pack.ts`  | Fetch negotiation, reachability subtraction, and the streaming pack writer                                 |
 | `src/repository-store.ts` | The order all of it happens in, and the transaction at the end                                             |
 
 `DecompressionStream("deflate")` cannot do this job: a pack is a concatenation

@@ -105,8 +105,7 @@ export const createApp = ({
 
   for (const endpoint of GIT_HTTP_ENDPOINTS) {
     // Both advertisement operations share a path, so the Git routes own it and
-    // dispatch by the service Git names in the query string — including the
-    // upload-pack advertisement, which is still a stub.
+    // dispatch by the service Git names in the query string.
     if (endpoint.id.endsWith(".advertise") || isImplementedEndpoint(endpoint.id)) {
       continue;
     }
@@ -117,7 +116,6 @@ export const createApp = ({
     repositoryIndex,
     repositoryObjects,
     authorize: authorizeGit ?? authorizeRepoToken(tokenRegistry),
-    notImplemented: invokeStub,
   });
 
   app.notFound(() => notFound("No route matches this request."));

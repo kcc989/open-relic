@@ -3,6 +3,7 @@
  * the refs we hold with our capabilities attached to the first line.
  */
 
+import type { Head } from "../head.ts";
 import { ZERO_OID } from "../object.ts";
 import { flushPkt, pktLine, pktLineStream } from "./pkt-line.ts";
 
@@ -10,6 +11,16 @@ export const RECEIVE_PACK_SERVICE = "git-receive-pack";
 
 export const RECEIVE_PACK_ADVERTISEMENT_CONTENT_TYPE =
   `application/x-${RECEIVE_PACK_SERVICE}-advertisement` as const;
+
+export const UPLOAD_PACK_SERVICE = "git-upload-pack";
+
+export const UPLOAD_PACK_ADVERTISEMENT_CONTENT_TYPE =
+  `application/x-${UPLOAD_PACK_SERVICE}-advertisement` as const;
+
+export const UPLOAD_PACK_RESULT_CONTENT_TYPE =
+  `application/x-${UPLOAD_PACK_SERVICE}-result` as const;
+
+export type UploadProtocolVersion = 0 | 1;
 
 /** Bumped by hand; the `agent` capability is the only thing that reads it. */
 export const SERVICE_VERSION = "0.1.0";
@@ -82,3 +93,67 @@ export function* receivePackAdvertisement(refs: readonly AdvertisedRef[]): Gener
 export const receivePackAdvertisementStream = (
   refs: readonly AdvertisedRef[],
 ): ReadableStream<Uint8Array> => pktLineStream(receivePackAdvertisement(refs));
+
+export const uploadPackCapabilities = (head: Head | null): readonly string[] => [
+  "thin-pack",
+  "side-band-64k",
+  "ofs-delta",
+  "object-format=sha1",
+  `agent=open-relic/${SERVICE_VERSION}`,
+  ...(head?.kind === "symbolic" ? [`symref=HEAD:${head.ref}`] : []),
+];
+
+const uploadHeadRef = (
+  refs: readonly AdvertisedRef[],
+  head: Head | null,
+): AdvertisedRef | undefined => {
+  if (head === null) {
+    return undefined;
+  }
+
+  const oid =
+    head.kind === "detached"
+      ? head.oid
+      : refs.find((candidate) => candidate.name === head.ref)?.oid;
+
+  return oid === undefined ? undefined : { name: "HEAD", oid };
+};
+
+/**
+ * Protocol v1 adds only its version marker to the original advertisement.
+ * A v2 request deliberately receives v0 instead, truthfully declining commands
+ * we do not implement so Git can fall back automatically.
+ */
+export function* uploadPackAdvertisement(
+  refs: readonly AdvertisedRef[],
+  head: Head | null,
+  protocolVersion: UploadProtocolVersion,
+): Generator<Uint8Array> {
+  yield pktLine(`# service=${UPLOAD_PACK_SERVICE}\n`);
+  yield flushPkt();
+  if (protocolVersion === 1) {
+    yield pktLine("version 1\n");
+  }
+
+  const advertisedHead = uploadHeadRef(refs, head);
+  const [first, ...rest] = advertisedHead === undefined ? refs : [advertisedHead, ...refs];
+  const capabilities = uploadPackCapabilities(head);
+
+  if (first === undefined) {
+    yield refLine({ name: NO_REFS_REF_NAME, oid: ZERO_OID }, capabilities);
+  } else {
+    yield refLine(first, capabilities);
+    for (const ref of rest) {
+      yield refLine(ref);
+    }
+  }
+
+  yield flushPkt();
+}
+
+export const uploadPackAdvertisementStream = (
+  refs: readonly AdvertisedRef[],
+  head: Head | null,
+  protocolVersion: UploadProtocolVersion,
+): ReadableStream<Uint8Array> =>
+  pktLineStream(uploadPackAdvertisement(refs, head, protocolVersion));

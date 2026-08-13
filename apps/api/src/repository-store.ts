@@ -4,12 +4,18 @@ import {
   FAST_FORWARD_COMMIT_BUDGET,
   findAncestor,
   findMissingObject,
+  linksToFetch,
   type WalkOptions,
 } from "./connectivity.ts";
 import type { SyncSqliteDatabase } from "./db/database.ts";
 import type { SyncKv } from "./db/kv.ts";
 import { REPOSITORY_STATE_ID, refs, repositoryState } from "./db/repository-schema.ts";
-import { receivePackAdvertisementStream, type AdvertisedRef } from "./git/advertisement.ts";
+import {
+  receivePackAdvertisementStream,
+  uploadPackAdvertisementStream,
+  type AdvertisedRef,
+  type UploadProtocolVersion,
+} from "./git/advertisement.ts";
 import { PktLineError, PktLineReader } from "./git/pkt-line.ts";
 import {
   REJECTIONS,
@@ -26,6 +32,7 @@ import {
   type ReceivePackCommand,
   type RefStatus,
 } from "./git/receive-pack.ts";
+import { uploadPackResultStream } from "./git/upload-pack.ts";
 import {
   BRANCH_REF_PREFIX,
   HEAD_KEY,
@@ -33,6 +40,7 @@ import {
   headBranch,
   parseHead,
   symbolicHead,
+  type Head,
 } from "./head.ts";
 import { ObjectStore } from "./object-store.ts";
 import { PackError, readPack, type PackBase } from "./pack.ts";
@@ -72,6 +80,10 @@ export interface RepositoryObjectClient {
   readonly initialize: (init: RepositoryInit) => Promise<RepositorySnapshot>;
   readonly describe: () => Promise<RepositorySnapshot | null>;
   readonly advertiseReceivePack: () => Promise<ReadableStream<Uint8Array>>;
+  readonly advertiseUploadPack: (
+    protocolVersion: UploadProtocolVersion,
+  ) => Promise<ReadableStream<Uint8Array>>;
+  readonly uploadPack: (body: ReadableStream<Uint8Array>) => Promise<ReadableStream<Uint8Array>>;
   readonly receivePack: (body: ReadableStream<Uint8Array>) => Promise<ReceivePackOutcome>;
   readonly sweep: () => Promise<SweepProgress>;
   readonly destroy: () => Promise<void>;
@@ -162,6 +174,24 @@ export class RepositoryStore {
    */
   async advertiseReceivePack(): Promise<ReadableStream<Uint8Array>> {
     return receivePackAdvertisementStream(await this.#refs());
+  }
+
+  /** The fetch advertisement includes HEAD so a clone knows what to check out. */
+  async advertiseUploadPack(
+    protocolVersion: UploadProtocolVersion,
+  ): Promise<ReadableStream<Uint8Array>> {
+    return uploadPackAdvertisementStream(await this.#uploadRefs(), this.#head(), protocolVersion);
+  }
+
+  /** A fetch response is pulled object by object rather than assembled here. */
+  async uploadPack(body: ReadableStream<Uint8Array>): Promise<ReadableStream<Uint8Array>> {
+    const advertisedOids = new Set((await this.#uploadRefs()).map((ref) => ref.oid));
+    const head = this.#head();
+    if (head?.kind === "detached") {
+      advertisedOids.add(head.oid);
+    }
+
+    return uploadPackResultStream(body, this.#objects, advertisedOids);
   }
 
   /**
@@ -316,6 +346,51 @@ export class RepositoryStore {
     return new Map((await this.#refs()).map((ref) => [ref.name, ref.oid]));
   }
 
+  /** Upload-pack peels an annotated tag immediately after the tag ref itself. */
+  async #uploadRefs(): Promise<readonly AdvertisedRef[]> {
+    const advertised: AdvertisedRef[] = [];
+
+    for (const ref of await this.#refs()) {
+      advertised.push(ref);
+      if (!ref.name.startsWith("refs/tags/")) {
+        continue;
+      }
+
+      const peeled = await this.#peelTag(ref.oid);
+      if (peeled !== null) {
+        advertised.push({ name: `${ref.name}^{}`, oid: peeled });
+      }
+    }
+
+    return advertised;
+  }
+
+  async #peelTag(oid: string): Promise<string | null> {
+    const visited = new Set<string>();
+    let current = oid;
+    let annotated = false;
+
+    while (!visited.has(current)) {
+      visited.add(current);
+      const object = await this.#objects.read(current);
+      if (object === null) {
+        return null;
+      }
+      if (object.type !== "tag") {
+        return annotated ? current : null;
+      }
+
+      annotated = true;
+      const [target] = linksToFetch(object.type, object.bytes);
+      if (target === undefined) {
+        return null;
+      }
+      current = target.oid;
+    }
+
+    return null;
+  }
+
   /**
    * A push that moved nothing, because we could not read far enough into it to
    * say otherwise. `refs` is empty when the failure came before any ref was
@@ -464,12 +539,12 @@ export class RepositoryStore {
 
   /** Missing or unreadable contents read the same as a detached HEAD. */
   #defaultBranch(): string | null {
-    const contents = this.#kv.get(HEAD_KEY);
-    if (contents === undefined) {
-      return null;
-    }
-
-    const head = parseHead(contents);
+    const head = this.#head();
     return head === null ? null : headBranch(head);
+  }
+
+  #head(): Head | null {
+    const contents = this.#kv.get(HEAD_KEY);
+    return contents === undefined ? null : parseHead(contents);
   }
 }
