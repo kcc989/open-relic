@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import { DeltaError, applyDelta } from "../src/delta.ts";
+import { MAX_OBJECT_BYTES } from "../src/object.ts";
 import {
   buildDelta,
   copyInstruction,
@@ -54,6 +55,19 @@ test("the reserved instruction is rejected", () => {
   const delta = buildDelta(base.length, 1, [Uint8Array.from([0])]);
 
   expect(() => applyDelta(base, delta)).toThrow(/reserved instruction/);
+});
+
+test("a delta declaring a result larger than we will hold is rejected before allocating", () => {
+  const delta = buildDelta(base.length, MAX_OBJECT_BYTES + 1, [
+    copyInstruction(0, 4),
+  ]);
+
+  expect(() => applyDelta(base, delta)).toThrow(/past the/);
+  try {
+    applyDelta(base, delta);
+  } catch (error) {
+    expect((error as DeltaError).code).toBe("too-large");
+  }
 });
 
 test("a delta that stops mid-instruction is rejected", () => {

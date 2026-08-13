@@ -162,6 +162,15 @@ stream hides. `crypto.subtle.digest` is likewise whole-buffer only, and the
 pack's trailing checksum covers a stream we never buffer. Both are hand-written
 for that reason and for no other.
 
+Residency is bounded rather than merely small, because every size in a pack is a
+number the sender chose and is read before a byte of the object arrives. An
+entry declaring more than `MAX_OBJECT_BYTES`, and a delta declaring a result
+larger than that, are refused on the header — before the buffer is allocated, so
+the answer is an `object-too-large` rejection rather than the runtime killing
+the object. The limit is 32 MiB because resolving a delta holds three of these
+at once; lifting it means inflating whole objects straight into chunks instead
+of into one buffer, since only a delta's base genuinely has to be resident.
+
 Both delta encodings resolve, including chains several deep. Thin packs are out
 of scope — `no-thin` is advertised, so a delta whose base is nowhere is a
 `missing-base` error, distinguishable from `truncated`, `checksum-mismatch`, and

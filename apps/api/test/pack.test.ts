@@ -1,7 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
 
 import { CHUNK_BYTES, ObjectStore } from "../src/object-store.ts";
-import { hashObject, type ObjectType } from "../src/object.ts";
+import {
+  MAX_OBJECT_BYTES,
+  hashObject,
+  type ObjectType,
+} from "../src/object.ts";
 import { PackError, readPack } from "../src/pack.ts";
 import {
   buildDelta,
@@ -353,6 +357,45 @@ test("an ofs-delta pointing where no object began is rejected", async () => {
 
   expect(await packErrorCode(readPack(streamOf(pack.bytes), store()))).toBe(
     "missing-base",
+  );
+});
+
+test("an entry declaring more than we will hold is rejected before it is held", async () => {
+  const pack = buildPack([
+    {
+      kind: "object",
+      type: "blob",
+      bytes: utf8("a few bytes"),
+      // A pack of a few hundred bytes asking for 300 MB of buffer. The reader
+      // has to refuse on the header; refusing after allocating is the runtime
+      // killing the Durable Object, not an answer we can give the client.
+      declaredSize: 300 * 1_024 * 1_024,
+    },
+  ]);
+
+  expect(pack.bytes.length).toBeLessThan(1_024);
+  // Reaching this code rather than a size mismatch is what says the buffer was
+  // never allocated: nothing downstream of the header check ran.
+  expect(await packErrorCode(readPack(streamOf(pack.bytes), store()))).toBe(
+    "object-too-large",
+  );
+});
+
+test("a delta declaring a result larger than we will hold is rejected", async () => {
+  const base = utf8("a small base");
+  const pack = buildPack([
+    { kind: "object", type: "blob", bytes: base },
+    {
+      kind: "ofs-delta",
+      baseIndex: 0,
+      delta: buildDelta(base.length, MAX_OBJECT_BYTES + 1, [
+        copyInstruction(0, base.length),
+      ]),
+    },
+  ]);
+
+  expect(await packErrorCode(readPack(streamOf(pack.bytes), store()))).toBe(
+    "object-too-large",
   );
 });
 

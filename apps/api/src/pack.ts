@@ -15,7 +15,7 @@
 
 import { DeltaError, applyDelta } from "./delta.ts";
 import { InflateError, Inflater } from "./inflate.ts";
-import { hashObject, type ObjectType } from "./object.ts";
+import { MAX_OBJECT_BYTES, hashObject, type ObjectType } from "./object.ts";
 import { Sha1, toHex } from "./sha1.ts";
 
 export type PackErrorCode =
@@ -25,6 +25,7 @@ export type PackErrorCode =
   | "checksum-mismatch"
   | "trailing-bytes"
   | "missing-base"
+  | "object-too-large"
   | "corrupt";
 
 export class PackError extends Error {
@@ -240,6 +241,16 @@ const readEntryHeader = async (stream: PackStream): Promise<EntryHeader> => {
     }
   }
 
+  // The size arrives before the object does and is what the inflated buffer is
+  // allocated from, so it is checked here rather than on the way out: a pack of
+  // a few hundred kilobytes can otherwise ask for hundreds of megabytes.
+  if (size > MAX_OBJECT_BYTES) {
+    throw new PackError(
+      "object-too-large",
+      `A pack entry declares ${size} bytes, past the ${MAX_OBJECT_BYTES}-byte limit.`,
+    );
+  }
+
   return { kind, size };
 };
 
@@ -386,7 +397,10 @@ const resolve = async (
     bytes = applyDelta(base.bytes, delta);
   } catch (error) {
     if (error instanceof DeltaError) {
-      throw new PackError("corrupt", `A delta could not be applied: ${error.message}`);
+      throw new PackError(
+        error.code === "too-large" ? "object-too-large" : "corrupt",
+        `A delta could not be applied: ${error.message}`,
+      );
     }
     throw error;
   }

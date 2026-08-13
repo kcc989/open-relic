@@ -4,10 +4,17 @@
  * `Documentation/technical/pack-format.txt` in Git's own tree.
  */
 
+import { MAX_OBJECT_BYTES } from "./object.ts";
+
+export type DeltaErrorCode = "corrupt" | "too-large";
+
 export class DeltaError extends Error {
-  constructor(message: string) {
+  readonly code: DeltaErrorCode;
+
+  constructor(code: DeltaErrorCode, message: string) {
     super(message);
     this.name = "DeltaError";
+    this.code = code;
   }
 }
 
@@ -25,7 +32,7 @@ const readVarint = (delta: Uint8Array, at: number): Varint => {
   for (;;) {
     const byte = delta[cursor];
     if (byte === undefined) {
-      throw new DeltaError("A delta size ran past the end of the delta.");
+      throw new DeltaError("corrupt", "A delta size ran past the end of the delta.");
     }
 
     cursor += 1;
@@ -35,7 +42,7 @@ const readVarint = (delta: Uint8Array, at: number): Varint => {
     shift += 7;
 
     if (!Number.isSafeInteger(value)) {
-      throw new DeltaError("A delta size is larger than we can address.");
+      throw new DeltaError("corrupt", "A delta size is larger than we can address.");
     }
 
     if ((byte & 0x80) === 0) {
@@ -50,7 +57,17 @@ export const applyDelta = (base: Uint8Array, delta: Uint8Array): Uint8Array => {
 
   if (baseSize.value !== base.length) {
     throw new DeltaError(
+      "corrupt",
       `The delta expects a ${baseSize.value}-byte base, and the base is ${base.length} bytes.`,
+    );
+  }
+
+  // Checked before allocating, not after: the size is the sender's number, and
+  // a delta of a few bytes can name any result it likes.
+  if (resultSize.value > MAX_OBJECT_BYTES) {
+    throw new DeltaError(
+      "too-large",
+      `The delta declares a ${resultSize.value}-byte result, past the ${MAX_OBJECT_BYTES}-byte limit.`,
     );
   }
 
@@ -86,7 +103,7 @@ export const applyDelta = (base: Uint8Array, delta: Uint8Array): Uint8Array => {
       size = size === 0 ? 0x10000 : size;
 
       if (offset + size > base.length) {
-        throw new DeltaError("A copy instruction reaches past the base.");
+        throw new DeltaError("corrupt", "A copy instruction reaches past the base.");
       }
 
       write(result, written, base.subarray(offset, offset + size));
@@ -95,12 +112,12 @@ export const applyDelta = (base: Uint8Array, delta: Uint8Array): Uint8Array => {
     }
 
     if (opcode === 0) {
-      throw new DeltaError("A delta used the reserved instruction 0.");
+      throw new DeltaError("corrupt", "A delta used the reserved instruction 0.");
     }
 
     // Insert: the opcode is the count of literal bytes that follow.
     if (at + opcode > delta.length) {
-      throw new DeltaError("An insert instruction reaches past the delta.");
+      throw new DeltaError("corrupt", "An insert instruction reaches past the delta.");
     }
 
     write(result, written, delta.subarray(at, at + opcode));
@@ -110,6 +127,7 @@ export const applyDelta = (base: Uint8Array, delta: Uint8Array): Uint8Array => {
 
   if (written !== result.length) {
     throw new DeltaError(
+      "corrupt",
       `The delta produced ${written} bytes where ${result.length} were declared.`,
     );
   }
@@ -120,14 +138,14 @@ export const applyDelta = (base: Uint8Array, delta: Uint8Array): Uint8Array => {
 const readByte = (delta: Uint8Array, at: number): number => {
   const byte = delta[at];
   if (byte === undefined) {
-    throw new DeltaError("A delta instruction ran past the end of the delta.");
+    throw new DeltaError("corrupt", "A delta instruction ran past the end of the delta.");
   }
   return byte;
 };
 
 const write = (result: Uint8Array, at: number, bytes: Uint8Array): void => {
   if (at + bytes.length > result.length) {
-    throw new DeltaError("A delta produced more than it declared.");
+    throw new DeltaError("corrupt", "A delta produced more than it declared.");
   }
   result.set(bytes, at);
 };

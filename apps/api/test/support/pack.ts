@@ -115,7 +115,13 @@ export const buildDelta = (
   concat(deltaVarint(baseSize), deltaVarint(resultSize), ...instructions);
 
 export type PackEntry =
-  | { readonly kind: "object"; readonly type: ObjectType; readonly bytes: Uint8Array }
+  | {
+      readonly kind: "object";
+      readonly type: ObjectType;
+      readonly bytes: Uint8Array;
+      /** Overrides the header's size, for packs that lie about what follows. */
+      readonly declaredSize?: number;
+    }
   | { readonly kind: "ofs-delta"; readonly baseIndex: number; readonly delta: Uint8Array }
   | { readonly kind: "ref-delta"; readonly baseOid: string; readonly delta: Uint8Array };
 
@@ -148,7 +154,12 @@ export const buildPack = (
     offsets.push(at);
 
     if (entry.kind === "object") {
-      push(entryHeader(ENTRY_TYPES[entry.type], entry.bytes.length));
+      push(
+        entryHeader(
+          ENTRY_TYPES[entry.type],
+          entry.declaredSize ?? entry.bytes.length,
+        ),
+      );
       push(new Uint8Array(deflateSync(entry.bytes)));
       continue;
     }
