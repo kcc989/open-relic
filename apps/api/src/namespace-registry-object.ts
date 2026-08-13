@@ -22,6 +22,14 @@ import {
   type RepositoryPage,
   type RepositoryPointer,
 } from "./repository-index.ts";
+import {
+  TokenRegistry,
+  type AuthorizeTokenCommand,
+  type CreateTokenCommand,
+  type CreateTokenOutcome,
+  type ListTokensQuery,
+  type TokenPage,
+} from "./token-registry.ts";
 
 /**
  * Every namespace in the installation, and the index of every repository, in
@@ -34,6 +42,7 @@ export class NamespaceRegistryObject extends DurableObject {
   readonly #db: DrizzleSqliteDODatabase;
   readonly #registry: NamespaceRegistry;
   readonly #repositories: RepositoryIndex;
+  readonly #tokens: TokenRegistry;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -41,6 +50,7 @@ export class NamespaceRegistryObject extends DurableObject {
     this.#db = drizzle(ctx.storage);
     this.#registry = new NamespaceRegistry(this.#db);
     this.#repositories = new RepositoryIndex(this.#db);
+    this.#tokens = new TokenRegistry(this.#db);
 
     // Each object migrates its own storage — there is no network-connected
     // database to push to. Blocking means no request can reach a half-migrated
@@ -87,5 +97,25 @@ export class NamespaceRegistryObject extends DurableObject {
 
   recordPush(namespaceSlug: string, name: string, record: PushRecord): Promise<void> {
     return this.#repositories.recordPush(namespaceSlug, name, record);
+  }
+
+  createToken(command: CreateTokenCommand): Promise<CreateTokenOutcome> {
+    return this.#tokens.createToken(command);
+  }
+
+  listTokens(
+    namespaceSlug: string,
+    repositoryName: string,
+    query: ListTokensQuery,
+  ): Promise<TokenPage | null> {
+    return this.#tokens.listTokens(namespaceSlug, repositoryName, query);
+  }
+
+  revokeToken(namespaceSlug: string, id: string): Promise<boolean> {
+    return this.#tokens.revokeToken(namespaceSlug, id);
+  }
+
+  authorizeToken(command: AuthorizeTokenCommand): Promise<boolean> {
+    return this.#tokens.authorizeToken(command);
   }
 }

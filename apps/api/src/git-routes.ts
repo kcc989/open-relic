@@ -7,7 +7,7 @@ import type { Hono } from "hono";
 
 import type { ApiEnv } from "../../../alchemy.run.ts";
 import type { RepositoryObjects } from "./bindings.ts";
-import { forbidden, invalidInput, notFound } from "./envelope.ts";
+import { forbidden, gitAuthenticationRequired, invalidInput, notFound } from "./envelope.ts";
 import {
   RECEIVE_PACK_ADVERTISEMENT_CONTENT_TYPE,
   RECEIVE_PACK_SERVICE,
@@ -58,15 +58,16 @@ export const registerGitRoutes = (
     const namespace = context.req.param("namespace");
     const name = repositoryNameFromPath(context.req.param("repo"));
 
-    const decision = authorize({
+    const decision = await authorize({
       env: context.env,
       request: context.req.raw,
       namespace,
       repository: name,
+      requiredScope: "write",
     });
 
     if (!decision.allowed) {
-      return forbidden(decision.detail);
+      return gitAuthenticationRequired(decision.detail);
     }
 
     const found = await repositoryIndex(context.env).getRepository(namespace, name);

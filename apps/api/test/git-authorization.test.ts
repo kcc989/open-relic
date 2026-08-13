@@ -1,42 +1,37 @@
 import { describe, expect, test } from "bun:test";
 
-import type { ApiEnv } from "../../../alchemy.run.ts";
-import { ANONYMOUS_WRITE_VARIABLE, allowAnonymousWrite } from "../src/git/authorization.ts";
+import { tokenFromRequest } from "../src/git/authorization.ts";
 
-type TestEnv = ApiEnv | { readonly [ANONYMOUS_WRITE_VARIABLE]?: string };
+const TOKEN = "art_v1_0123456789abcdef0123456789abcdef01234567?expires=1760000000";
+const TOKEN_SECRET = TOKEN.split("?expires=")[0]!;
+const request = (authorization?: string) =>
+  new Request(
+    "http://local.test/git/acme/demo.git/info/refs",
+    authorization === undefined ? {} : { headers: { Authorization: authorization } },
+  );
 
-const authorize = (env: TestEnv | undefined) =>
-  allowAnonymousWrite({
-    // SAFETY: the seam under test must observe a missing or partial Worker env.
-    env: env as ApiEnv,
-    request: new Request("http://local.test/git/acme/demo.git/info/refs"),
-    namespace: "acme",
-    repository: "demo",
+describe("Git token presentation", () => {
+  test("reads a bearer token", () => {
+    expect(tokenFromRequest(request(`Bearer ${TOKEN}`))).toBe(TOKEN);
   });
 
-describe("the anonymous-write seam", () => {
-  test("allows the request when the installation has opted in", () => {
-    expect(authorize({ [ANONYMOUS_WRITE_VARIABLE]: "true" })).toEqual({
-      allowed: true,
-    });
+  test("reads the token as an HTTP Basic password", () => {
+    expect(tokenFromRequest(request(`Basic ${btoa(`x:${TOKEN_SECRET}`)}`))).toBe(TOKEN_SECRET);
   });
 
-  const refusals: ReadonlyArray<readonly [string, TestEnv | undefined]> = [
-    ["the variable is missing", {}],
-    ["the environment is missing entirely", undefined],
-    ["the variable is empty", { [ANONYMOUS_WRITE_VARIABLE]: "" }],
-    ["the variable says something else", { [ANONYMOUS_WRITE_VARIABLE]: "yes" }],
-    // Case matters: a near-miss is a configuration mistake, and reading it as
-    // consent would open the installation on a typo.
-    ["the variable is capitalized", { [ANONYMOUS_WRITE_VARIABLE]: "True" }],
-  ];
+  test("allows a different Basic username because the password is the credential", () => {
+    expect(tokenFromRequest(request(`Basic ${btoa(`git:${TOKEN_SECRET}`)}`))).toBe(TOKEN_SECRET);
+  });
 
-  for (const [label, env] of refusals) {
-    test(`refuses when ${label}`, () => {
-      const decision = authorize(env);
-
-      expect(decision.allowed).toBe(false);
-      expect(decision.allowed === false && decision.detail).toContain(ANONYMOUS_WRITE_VARIABLE);
+  for (const [label, authorization] of [
+    ["no authorization", undefined],
+    ["another scheme", `Digest ${TOKEN}`],
+    ["malformed Basic", "Basic not-base64!"],
+    ["Basic without a password", `Basic ${btoa("x")}`],
+    ["Basic without a username", `Basic ${btoa(`:${TOKEN_SECRET}`)}`],
+  ] as const) {
+    test(`refuses ${label}`, () => {
+      expect(tokenFromRequest(request(authorization))).toBeNull();
     });
   }
 });

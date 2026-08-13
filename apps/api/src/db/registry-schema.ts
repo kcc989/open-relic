@@ -1,4 +1,11 @@
-import { integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import {
+  foreignKey,
+  integer,
+  primaryKey,
+  sqliteTable,
+  text,
+  uniqueIndex,
+} from "drizzle-orm/sqlite-core";
 
 /**
  * The slug is the primary key, which is what makes claiming one a single
@@ -66,3 +73,34 @@ export const repositories = sqliteTable(
 
 export type RepositoryRow = typeof repositories.$inferSelect;
 export type NewRepositoryRow = typeof repositories.$inferInsert;
+
+/**
+ * Repo-scoped Git tokens live with the registry because authorization happens
+ * before a repository object is resolved. Only a SHA-256 digest of the secret
+ * is stored; the plaintext exists long enough to cross the creation response
+ * once and cannot be recovered by list or revoke.
+ */
+export const tokens = sqliteTable(
+  "tokens",
+  {
+    id: text("id").primaryKey(),
+    namespaceSlug: text("namespace_slug").notNull(),
+    repositoryName: text("repository_name").notNull(),
+    secretHash: text("secret_hash").notNull(),
+    scope: text("scope", { enum: ["read", "write"] }).notNull(),
+    createdAt: text("created_at").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    expiresAtUnix: integer("expires_at_unix").notNull(),
+    revokedAt: text("revoked_at"),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.namespaceSlug, table.repositoryName],
+      foreignColumns: [repositories.namespaceSlug, repositories.name],
+      name: "tokens_repository_fk",
+    }).onDelete("cascade"),
+    uniqueIndex("tokens_secret_hash_unique").on(table.secretHash),
+  ],
+);
+
+export type TokenRow = typeof tokens.$inferSelect;

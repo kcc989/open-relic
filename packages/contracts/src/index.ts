@@ -224,6 +224,9 @@ export const IMPLEMENTED_ENDPOINT_IDS = [
   "repositories.list",
   "repositories.get",
   "repositories.delete",
+  "tokens.create",
+  "tokens.list",
+  "tokens.delete",
   "git.receivePack.advertise",
   "git.receivePack",
 ] as const satisfies readonly EndpointId[];
@@ -548,6 +551,33 @@ export interface TokenInfo {
   readonly expires_at: string;
 }
 
+export interface CreateTokenRequest {
+  readonly repo: string;
+  readonly scope?: TokenScope;
+  readonly ttl?: number;
+}
+
+/** The only response that carries the plaintext token. */
+export interface CreateTokenResult {
+  readonly id: string;
+  readonly plaintext: string;
+  readonly scope: TokenScope;
+  readonly expires_at: string;
+}
+
+export interface DeleteTokenResult {
+  readonly id: string;
+}
+
+export const TOKEN_LIST_STATES = ["active", "expired", "revoked", "all"] as const;
+
+export type TokenListState = (typeof TOKEN_LIST_STATES)[number];
+
+export const TOKEN_LIST_DEFAULT_STATE: TokenListState = "active";
+export const TOKEN_LIST_DEFAULT_PER_PAGE = 30;
+export const TOKEN_LIST_MAX_PER_PAGE = 100;
+export const TOKEN_LIST_DEFAULT_PAGE = 1;
+
 export const TOKEN_TTL_MIN_SECONDS = 60;
 export const TOKEN_TTL_MAX_SECONDS = 31_536_000;
 export const TOKEN_TTL_DEFAULT_SECONDS = 86_400;
@@ -556,6 +586,9 @@ export const ARTIFACT_TOKEN_PREFIX = "art_v1_" as const;
 
 /** Hex characters in the secret half of a token, not bytes of entropy. */
 export const ARTIFACT_TOKEN_SECRET_LENGTH = 40;
+
+/** Artifacts exposes a 16-hex opaque id separately from the 40-hex secret. */
+export const ARTIFACT_TOKEN_ID_LENGTH = 16;
 
 export const ARTIFACT_TOKEN_PATTERN = /^art_v1_[0-9a-f]{40}\?expires=\d+$/;
 

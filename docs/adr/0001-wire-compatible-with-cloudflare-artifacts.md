@@ -17,7 +17,9 @@ Two surfaces, both documented:
 - **REST API** — Artifacts' own paths (`/namespaces/:namespace/repos/…`, served
   at the root; see "The base path" below), the Cloudflare v4 envelope
   (`{result, success, errors, messages}`, `result_info` for pagination), and
-  v4-shaped errors (`{code, message}`), not RFC 9457.
+  v4-shaped errors (`{code, message}`), not RFC 9457. The installation verifies
+  the request's Bearer value against its configured installation API token,
+  standing in for Cloudflare's account-level API token check.
 - **Git Smart HTTP** — `https://<host>/git/:namespace/:repo.git`. Fetch negotiates
   protocol v1 or v2; push is v1 only, matching Artifacts, which does not support
   receive-pack over v2. `filter` and `include-tag` are unsupported there, so they
@@ -37,18 +39,19 @@ The API implemented so far predated this decision and did not match. Most of the
 gap is now closed — the shape of the wire is Artifacts' — and what remains is
 behavior that has not been built at all rather than behavior built differently:
 
-|              | Open Relic today                                                | Artifacts                                                 |
-| ------------ | --------------------------------------------------------------- | --------------------------------------------------------- |
-| Namespaces   | created and deleted explicitly                                  | created implicitly with the first repo; list and get only |
-| Tokens       | route registered, answers `501`; create mints an unstored token | issued, listed, and revoked for real                      |
-| Contents     | routes registered, answer `501`                                 | serve refs, log, objects, and files                       |
-| Fork, import | routes registered, answer `501`                                 | copy and mirror repositories                              |
-| `source`     | always `null` — nothing writes it yet                           | set by import                                             |
+|              | Open Relic today                      | Artifacts                                                 |
+| ------------ | ------------------------------------- | --------------------------------------------------------- |
+| Namespaces   | created and deleted explicitly        | created implicitly with the first repo; list and get only |
+| Contents     | routes registered, answer `501`       | serve refs, log, objects, and files                       |
+| Fork, import | routes registered, answer `501`       | copy and mirror repositories                              |
+| `source`     | always `null` — nothing writes it yet | set by import                                             |
 
-These closed with the reshaping of the REST surface: the path shape, the v4
-envelope, `result_info` pagination, `errors[]` in place of RFC 9457 problem
+These closed with the reshaping of the REST surface and repo-scoped token
+authorization: the path shape, the v4 envelope, `result_info` pagination,
+`errors[]` in place of RFC 9457 problem
 documents, the contents path spellings, token creation on the namespace, `202`
-with `{id}` on repository delete, and the `id`/`read_only` repository fields.
+with `{id}` on repository delete, the `id`/`read_only` repository fields, and
+real token issue, list, revoke, expiry, scope, and Git credential checks.
 
 `refs` and `archive/*` are ours, not theirs. Extensions are allowed — an
 installation may serve more than Artifacts does — but never at the cost of a

@@ -1,49 +1,67 @@
-/**
- * The seam every Git request passes through before it reaches a repository.
- * Repo-scoped tokens replace the implementation below; the shape is what a
- * token check needs — the credential on the request, and the repository it is
- * being spent against.
- */
+import type { TokenScope } from "@open-relic/contracts";
 
 import type { ApiEnv } from "../../../../alchemy.run.ts";
+import type { TokenRegistryClient } from "../token-registry.ts";
 
 export interface GitAuthorizationRequest {
   readonly env: ApiEnv;
   readonly request: Request;
   readonly namespace: string;
   readonly repository: string;
+  readonly requiredScope: TokenScope;
 }
 
 export type AuthorizationDecision =
   | { readonly allowed: true }
   | { readonly allowed: false; readonly detail: string };
 
-export type AuthorizeGitRequest = (request: GitAuthorizationRequest) => AuthorizationDecision;
+export type AuthorizeGitRequest = (
+  request: GitAuthorizationRequest,
+) => Promise<AuthorizationDecision>;
 
-/**
- * The installation's blanket opt-in to unauthenticated pushes. A `string`
- * rather than a boolean because it is a Worker environment variable, and its
- * absence is the case that matters.
- */
-export const ANONYMOUS_WRITE_VARIABLE = "ALLOW_ANONYMOUS_WRITE";
-
-const ANONYMOUS_WRITE_ENABLED = "true";
-
-/**
- * Allows everyone, but only where the installation has said so. Absent
- * configuration is a refusal rather than a default, so an installation that has
- * never heard of this variable is closed rather than open to the world.
- */
-export const allowAnonymousWrite: AuthorizeGitRequest = ({ env }) => {
-  // `env` is typed as always present, but a Worker deployed without the
-  // variable is exactly the case this exists to refuse.
-  // SAFETY: a Worker env may omit this binding at runtime even though ApiEnv names it.
-  const configured = (env as Partial<ApiEnv> | undefined)?.[ANONYMOUS_WRITE_VARIABLE];
-
-  return configured === ANONYMOUS_WRITE_ENABLED
-    ? { allowed: true }
-    : {
-        allowed: false,
-        detail: `This installation does not allow unauthenticated writes. Set ${ANONYMOUS_WRITE_VARIABLE}="${ANONYMOUS_WRITE_ENABLED}" to enable them.`,
-      };
+const bearerToken = (authorization: string): string | null => {
+  const match = /^Bearer\s+(.+)$/i.exec(authorization);
+  return match?.[1] ?? null;
 };
+
+const basicToken = (authorization: string): string | null => {
+  const match = /^Basic\s+(.+)$/i.exec(authorization);
+  if (match === null) {
+    return null;
+  }
+
+  try {
+    const decoded = atob(match[1]!);
+    const separator = decoded.indexOf(":");
+    return separator <= 0 ? null : decoded.slice(separator + 1);
+  } catch {
+    return null;
+  }
+};
+
+/** Both credential spellings Artifacts documents for Git Smart HTTP. */
+export const tokenFromRequest = (request: Request): string | null => {
+  const authorization = request.headers.get("Authorization");
+  return authorization === null ? null : (bearerToken(authorization) ?? basicToken(authorization));
+};
+
+const REFUSAL = "A valid token with the required scope is needed for this Git operation.";
+
+/** Builds the authorization seam over the same registry the REST routes write. */
+export const authorizeRepoToken =
+  (resolveTokens: (env: ApiEnv) => TokenRegistryClient): AuthorizeGitRequest =>
+  async ({ env, request, namespace, repository, requiredScope }) => {
+    const presentedToken = tokenFromRequest(request);
+    if (presentedToken === null) {
+      return { allowed: false, detail: REFUSAL };
+    }
+
+    const allowed = await resolveTokens(env).authorizeToken({
+      presentedToken,
+      namespaceSlug: namespace,
+      repositoryName: repository,
+      requiredScope,
+    });
+
+    return allowed ? { allowed: true } : { allowed: false, detail: REFUSAL };
+  };

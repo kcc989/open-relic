@@ -30,6 +30,11 @@ A repo-scoped credential presented to the Git protocol, carrying a read or write
 scope and an expiry.
 _Avoid_: key, secret, credential
 
+**Installation API token**:
+The installation-wide Bearer value that protects the REST control plane. It is
+operator-configured and is never a repo-scoped Token.
+_Avoid_: admin token, Token
+
 ## Git data
 
 **Object**:

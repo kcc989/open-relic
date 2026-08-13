@@ -9,6 +9,7 @@ import {
   REPO_LIST_DEFAULT_SORT,
   REPO_SORT_FIELDS,
   SORT_DIRECTIONS,
+  TOKEN_TTL_DEFAULT_SECONDS,
   describeBranchNameViolation,
   describeRepositoryNameViolation,
   validateBranchName,
@@ -35,7 +36,7 @@ import {
   parseLimit,
   parseSearch,
 } from "./query.ts";
-import { gitRemoteUrl, mintArtifactToken } from "./remote.ts";
+import { gitRemoteUrl } from "./remote.ts";
 import type {
   CreateRepositoryCommand,
   RepositoryCursor,
@@ -48,6 +49,7 @@ import {
   type Json,
   type Rejected,
 } from "./request-body.ts";
+import type { TokenRegistryClient } from "./token-registry.ts";
 
 type NewRepository = Omit<CreateRepositoryCommand, "durableObjectId">;
 
@@ -139,6 +141,7 @@ export const registerRepositoryRoutes = (
   app: Hono<{ Bindings: ApiEnv }>,
   resolveIndex: (env: ApiEnv) => RepositoryIndexClient,
   resolveObjects: (env: ApiEnv) => RepositoryObjects,
+  resolveTokens: (env: ApiEnv) => TokenRegistryClient,
 ): void => {
   const REPOS = `${NAMESPACES_PATH}/:namespace/repos` as const;
   const REPO = `${REPOS}/:repo` as const;
@@ -195,6 +198,18 @@ export const registerRepositoryRoutes = (
       createdAt: outcome.repository.created_at,
     });
 
+    const issued = await resolveTokens(context.env).createToken({
+      namespaceSlug,
+      repositoryName: outcome.repository.name,
+      scope: "write",
+      ttlSeconds: TOKEN_TTL_DEFAULT_SECONDS,
+    });
+    if (!issued.created) {
+      // The row was just created. Only a concurrent delete can make it vanish
+      // before its initial token is issued, in which case it is truthfully gone.
+      return notFound(noSuchRepository(namespaceSlug, outcome.repository.name));
+    }
+
     // Narrower than the list and get shape on purpose: Artifacts answers a
     // create with the identity, the remote, and the one token it will not show
     // again.
@@ -204,7 +219,7 @@ export const registerRepositoryRoutes = (
       description: outcome.repository.description,
       default_branch: outcome.repository.default_branch,
       remote: gitRemoteUrl(context.req.url, namespaceSlug, outcome.repository.name),
-      token: mintArtifactToken(),
+      token: issued.token.plaintext,
     } satisfies CreateRepoResult);
   });
 
