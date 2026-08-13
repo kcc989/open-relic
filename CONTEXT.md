@@ -71,6 +71,11 @@ The server's opening reply to a Git client, listing the refs it holds and the
 capabilities it supports.
 _Avoid_: ref discovery, handshake
 
+**Capability**:
+One named protocol feature the server tells the client it supports. Advertising
+one is a promise to honor it.
+_Avoid_: feature, option, extension
+
 **Receive-pack**:
 The server side of a push: read the client's ref update commands and pack, then
 accept or reject each command.

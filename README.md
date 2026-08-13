@@ -10,9 +10,10 @@ Artifacts should work against an installation with nothing changed but the host.
 [ADR-0001](./docs/adr/0001-wire-compatible-with-cloudflare-artifacts.md) records
 what that binds us to, and where the API below does not match yet.
 
-The namespace and repository APIs are implemented. Everything else — tokens,
-contents, forks, imports, and Git Smart HTTP — is still a registered route that
-answers `501`:
+The namespace and repository APIs are implemented, and a Git client can now get
+a ref advertisement for `git-receive-pack`. Everything else — tokens, contents,
+forks, imports, and the rest of Git Smart HTTP — is still a registered route
+that answers `501`:
 
 - Hono routes for every REST and Git Smart HTTP endpoint in the initial API
 - Effect v4 as the typed stub service boundary
@@ -195,8 +196,66 @@ curl -X POST http://localhost:1337/namespaces/acme/repos \
   -d '{"name":"demo","description":"Anvil firmware"}'
 ```
 
-Git Smart HTTP is still unimplemented, so `RepositoryObject`'s `fetch` handler
-answers `501`; the REST API reaches it over RPC.
+## Git Smart HTTP
+
+A repository's remote is `/git/:namespace/:repo.git`, and the first thing any
+Git client asks it for is an **advertisement**: the refs the server holds and
+the capabilities it supports. The push side of that is implemented.
+
+```sh
+curl 'http://localhost:1337/git/acme/demo.git/info/refs?service=git-receive-pack'
+```
+
+```text
+001f# service=git-receive-pack
+0000
+00950000000000000000000000000000000000000000 capabilities^{}\0report-status side-band-64k …
+0000
+```
+
+A repository with no refs answers with the zero-id `capabilities^{}` line rather
+than an empty body, which is how a client tells a fresh repository from a server
+that failed to answer. Refs are advertised in byte order by full name, with the
+capabilities hung off the first line. `HEAD` is not advertised and annotated
+tags are not peeled — both belong to the upload-pack advertisement.
+
+| Capability | Why |
+| --- | --- |
+| `report-status` | Per-ref accept or reject, which is how a push reports anything at all |
+| `side-band-64k` | Progress and errors alongside the response |
+| `ofs-delta` | Offset deltas in the pack |
+| `no-thin` | Never send a delta whose base is not in the pack |
+| `object-format=sha1` | The only hash we store |
+| `agent=open-relic/<version>` | Identifies the server in a client's trace |
+
+`delete-refs`, `atomic`, `push-options`, and `report-status-v2` are deliberately
+absent: an unadvertised capability is how a client learns not to use one, and
+advertising something we do not honor is worse than not advertising it.
+
+An advertisement is Git's protocol rather than JSON, so it is the one response
+that is not a v4 envelope. Failures on this path still are — a Git client reads
+the status code and little else, and there is no reason for a second error
+shape.
+
+The path from a request to a repository is: the Worker resolves
+`namespace/repo` in the registry, passes an authorization seam, and calls a
+named RPC method on the repository object, which returns a stream of pkt-lines.
+`RepositoryObject`'s `fetch` handler is not part of that path and answers `501`.
+See [ADR-0004](./docs/adr/0004-git-reaches-a-repository-over-rpc.md).
+
+There are no credentials yet, so pushes are refused unless the installation sets
+`ALLOW_ANONYMOUS_WRITE="true"`. An unset variable is a refusal rather than a
+default — an installation that has never heard of it is closed, not open to the
+world. Repo-scoped tokens replace it.
+
+```sh
+ALLOW_ANONYMOUS_WRITE=true bun run deploy
+```
+
+Refs live in a `refs` table in the repository object rather than as Git's loose
+files plus `packed-refs`: that split exists because of a filesystem, and a push
+has to move several refs in one transaction. Nothing writes to it yet — the
+advertisement is a read of an empty ref store until push lands.
 
 ## Database
 
@@ -302,7 +361,7 @@ Subdomain:Edit, Workers Observability:Edit, and Account Settings:Read.
 { "service": "open-relic", "status": "ok" }
 ```
 
-Alongside the namespace and repository endpoints above, routes for forks,
-imports, tokens, repository contents, archives, and Git upload/receive pack are
+Alongside the endpoints above, routes for forks, imports, tokens, repository
+contents, archives, the upload-pack advertisement, and both pack transfers are
 registered from the manifest in `packages/contracts/src/index.ts`, answer `501`,
 and are covered by tests.

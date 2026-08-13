@@ -165,29 +165,43 @@ export const REST_ENDPOINTS = [
   },
 ] as const satisfies readonly EndpointContract[];
 
+/** A clone URL carries the suffix; a stored repository name never does. */
+export const GIT_REPOSITORY_SUFFIX = ".git";
+
+/**
+ * The `.git` suffix is a constraint on the parameter rather than text after it:
+ * a router reads `/git/:namespace/:repo.git/…` as a parameter *named* `repo.git`
+ * that matches a suffix-less URL just as happily.
+ */
+export const GIT_REPOSITORY_PATH = "/git/:namespace/:repo{.+\\.git}" as const;
+
+/** `demo.git` as it arrives from the router, back to the name `demo`. */
+export const repositoryNameFromPath = (parameter: string): string =>
+  parameter.slice(0, -GIT_REPOSITORY_SUFFIX.length);
+
 export const GIT_HTTP_ENDPOINTS = [
   {
     id: "git.uploadPack.advertise",
     method: "GET",
-    path: "/git/:namespace/:repo.git/info/refs",
+    path: `${GIT_REPOSITORY_PATH}/info/refs`,
     samplePath: "/git/acme/demo.git/info/refs?service=git-upload-pack",
   },
   {
     id: "git.uploadPack",
     method: "POST",
-    path: "/git/:namespace/:repo.git/git-upload-pack",
+    path: `${GIT_REPOSITORY_PATH}/git-upload-pack`,
     samplePath: "/git/acme/demo.git/git-upload-pack",
   },
   {
     id: "git.receivePack.advertise",
     method: "GET",
-    path: "/git/:namespace/:repo.git/info/refs",
+    path: `${GIT_REPOSITORY_PATH}/info/refs`,
     samplePath: "/git/acme/demo.git/info/refs?service=git-receive-pack",
   },
   {
     id: "git.receivePack",
     method: "POST",
-    path: "/git/:namespace/:repo.git/git-receive-pack",
+    path: `${GIT_REPOSITORY_PATH}/git-receive-pack`,
     samplePath: "/git/acme/demo.git/git-receive-pack",
   },
 ] as const satisfies readonly EndpointContract[];
@@ -213,6 +227,7 @@ export const IMPLEMENTED_ENDPOINT_IDS = [
   "repositories.list",
   "repositories.get",
   "repositories.delete",
+  "git.receivePack.advertise",
 ] as const satisfies readonly EndpointId[];
 
 export type ImplementedEndpointId = (typeof IMPLEMENTED_ENDPOINT_IDS)[number];
@@ -271,9 +286,11 @@ export interface ApiEnvelope<T> {
 }
 
 /**
- * Artifacts' documented codes. `notImplemented` is ours — Artifacts publishes
- * no code for an unimplemented route because it has none — and is deliberately
- * outside the ranges Cloudflare has used.
+ * Artifacts' documented codes. `notImplemented` and `forbidden` are ours —
+ * Artifacts publishes no code for an unimplemented route because it has none,
+ * and none for a refused Git request because that surface answers in Git's
+ * protocol rather than in this envelope — and both are deliberately outside the
+ * ranges Cloudflare has used.
  */
 export const ERROR_CODES = {
   invalidInput: 10100,
@@ -289,6 +306,7 @@ export const ERROR_CODES = {
   upstreamUnavailable: 10401,
   memoryLimit: 10402,
   notImplemented: 10900,
+  forbidden: 10901,
 } as const;
 
 // ---------------------------------------------------------------------------

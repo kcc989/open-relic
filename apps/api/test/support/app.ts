@@ -10,6 +10,7 @@ import {
 import {
   createTestDatabase,
   createTestRepositoryStorage,
+  seedRefs,
   type TestRepositoryStorage,
 } from "./database.ts";
 
@@ -38,6 +39,7 @@ export class FakeRepositoryObjects implements RepositoryObjects {
     return {
       initialize: (init) => store.initialize(init),
       describe: () => store.describe(),
+      advertiseReceivePack: () => store.advertiseReceivePack(),
       destroy: async () => {
         this.#destroyed.push(durableObjectId);
         this.#storages.get(durableObjectId)?.close();
@@ -62,6 +64,14 @@ export class FakeRepositoryObjects implements RepositoryObjects {
 
   describe(durableObjectId: string): Promise<RepositorySnapshot | null> {
     return this.get(durableObjectId).describe();
+  }
+
+  /** Stands in for the push that will write them once receive-pack lands. */
+  seedRefs(
+    durableObjectId: string,
+    entries: Readonly<Record<string, string>>,
+  ): Promise<void> {
+    return seedRefs(this.#storageFor(durableObjectId).db, entries);
   }
 
   close(): void {

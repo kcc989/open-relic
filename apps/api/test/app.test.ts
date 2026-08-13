@@ -50,7 +50,9 @@ describe("REST API stubs", () => {
 });
 
 describe("Git Smart HTTP stubs", () => {
-  for (const endpoint of GIT_HTTP_ENDPOINTS) {
+  for (const endpoint of GIT_HTTP_ENDPOINTS.filter(
+    (candidate) => !isImplementedEndpoint(candidate.id),
+  )) {
     test(`${endpoint.method} ${endpoint.samplePath}`, async () => {
       const response = await app.request(
         new Request(`http://local.test${endpoint.samplePath}`, {

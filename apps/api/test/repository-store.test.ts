@@ -4,6 +4,7 @@ import { HEAD_KEY } from "../src/head.ts";
 import { RepositoryStore } from "../src/repository-store.ts";
 import {
   createTestRepositoryStorage,
+  seedRefs,
   type TestRepositoryStorage,
 } from "./support/database.ts";
 
@@ -88,6 +89,40 @@ test("a detached HEAD leaves the repository with no default branch", async () =>
     defaultBranch: null,
     createdAt: init.createdAt,
   });
+});
+
+test("a repository with no refs advertises the zero-id capabilities line", async () => {
+  const repository = store();
+  await repository.initialize(init);
+
+  const advertisement = await new Response(
+    await repository.advertiseReceivePack(),
+  ).text();
+
+  expect(advertisement).toContain(`${"0".repeat(40)} capabilities^{}\0`);
+});
+
+test("the advertisement names the refs the repository holds", async () => {
+  const opened = storage();
+  const repository = new RepositoryStore(opened.db, opened.kv);
+  await repository.initialize(init);
+  await seedRefs(opened.db, {
+    "refs/tags/v1": "abcdef0123456789abcdef0123456789abcdef01",
+    "refs/heads/main": "1a2b3c4d5e6f708192a3b4c5d6e7f80912345678",
+  });
+
+  const advertisement = await new Response(
+    await repository.advertiseReceivePack(),
+  ).text();
+
+  // Byte order by full ref name, which is the order Git advertises in, so the
+  // branch carries the capabilities and the tag follows it.
+  expect(advertisement).toContain(
+    "1a2b3c4d5e6f708192a3b4c5d6e7f80912345678 refs/heads/main\0",
+  );
+  expect(advertisement).toEndWith(
+    "abcdef0123456789abcdef0123456789abcdef01 refs/tags/v1\n0000",
+  );
 });
 
 test("an unreadable HEAD leaves the repository with no default branch", async () => {

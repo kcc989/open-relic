@@ -58,6 +58,13 @@ export const invalidRepoName = (message: string): Response =>
 export const notFound = (message: string): Response =>
   fail(404, { code: ERROR_CODES.notFound, message });
 
+/**
+ * Not `401`: the Git surface has no credential to ask for yet, so challenging
+ * the client would send it round a loop it cannot finish.
+ */
+export const forbidden = (message: string): Response =>
+  fail(403, { code: ERROR_CODES.forbidden, message });
+
 export const alreadyExists = (message: string): Response =>
   fail(409, { code: ERROR_CODES.alreadyExists, message });
 
