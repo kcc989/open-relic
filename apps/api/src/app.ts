@@ -7,6 +7,7 @@ import {
 import { Effect } from "effect";
 import { Hono } from "hono";
 
+import type { ApiEnv } from "../../../alchemy.run.ts";
 import {
   EndpointNotImplemented,
   GitServiceStub,
@@ -28,7 +29,9 @@ const notImplemented = (
 });
 
 export const createApp = (service: GitService = GitServiceStub) => {
-  const app = new Hono();
+  // Bindings come from the Alchemy stack, so `context.env.REPOSITORIES` is the
+  // same Durable Object namespace that `alchemy.run.ts` provisions.
+  const app = new Hono<{ Bindings: ApiEnv }>();
 
   app.get("/healthz", (context) =>
     context.json({ service: "open-relic", status: "ok" }),
