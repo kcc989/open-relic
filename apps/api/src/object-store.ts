@@ -117,6 +117,17 @@ export class ObjectStore implements PackSink {
   }
 
   /** `null` when the object arrived whole rather than as a delta. */
+  async readDeltaBase(oid: string): Promise<string | null> {
+    const rows = await this.#db
+      .select({ baseOid: objectDeltas.baseOid })
+      .from(objectDeltas)
+      .where(eq(objectDeltas.oid, oid))
+      .limit(1);
+
+    return rows[0]?.baseOid ?? null;
+  }
+
+  /** `null` when the object arrived whole rather than as a delta. */
   async readDelta(oid: string): Promise<PackDelta | null> {
     const rows = await this.#db
       .select()

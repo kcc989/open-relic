@@ -1,5 +1,7 @@
 /** Protocol v0/v1 upload-pack negotiation and streaming pack generation. */
 
+import { createDeflate } from "node:zlib";
+
 import { linksToFetch } from "../connectivity.ts";
 import type { PackBase, PackDelta } from "../pack.ts";
 import { isObjectId, type ObjectType } from "../object.ts";
@@ -40,6 +42,7 @@ interface UploadPackRequest {
 export interface UploadPackObjectSource {
   readonly has: (oid: string) => Promise<boolean>;
   readonly read: (oid: string) => Promise<PackBase | null>;
+  readonly readDeltaBase: (oid: string) => Promise<string | null>;
   readonly readDelta: (oid: string) => Promise<PackDelta | null>;
 }
 
@@ -156,12 +159,6 @@ const reachable = async (
   return { objects, held };
 };
 
-const uint32 = (value: number): Uint8Array => {
-  const bytes = new Uint8Array(4);
-  new DataView(bytes.buffer).setUint32(0, value);
-  return bytes;
-};
-
 const packHeader = (count: number): Uint8Array => {
   const bytes = new Uint8Array(12);
   bytes.set(encoder.encode("PACK"));
@@ -195,49 +192,82 @@ const entryHeader = (kind: number, size: number): Uint8Array => {
   return Uint8Array.from(bytes);
 };
 
-const ADLER_MODULUS = 65_521;
+/** Compress one object without ever assembling its encoded form in memory. */
+async function* deflate(bytes: Uint8Array): AsyncGenerator<Uint8Array> {
+  const compressor = createDeflate();
+  compressor.end(bytes);
 
-const adler32 = (bytes: Uint8Array): number => {
-  let low = 1;
-  let high = 0;
-
-  for (let at = 0; at < bytes.length; at += 5_552) {
-    const end = Math.min(at + 5_552, bytes.length);
-    for (let index = at; index < end; index += 1) {
-      low += bytes[index]!;
-      high += low;
-    }
-    low %= ADLER_MODULUS;
-    high %= ADLER_MODULUS;
+  for await (const chunk of compressor) {
+    yield new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
   }
-
-  return ((high << 16) | low) >>> 0;
-};
-
-// Leaves room for a stored-block header when the bytes are side-band framed.
-const DEFLATE_BLOCK_BYTES = PKT_LINE_MAX_PAYLOAD_BYTES - 6;
-
-function* storedDeflate(bytes: Uint8Array): Generator<Uint8Array> {
-  yield Uint8Array.of(0x78, 0x01);
-
-  if (bytes.length === 0) {
-    yield Uint8Array.of(0x01, 0x00, 0x00, 0xff, 0xff);
-  }
-
-  for (let at = 0; at < bytes.length; at += DEFLATE_BLOCK_BYTES) {
-    const chunk = bytes.slice(at, at + DEFLATE_BLOCK_BYTES);
-    const final = at + chunk.length === bytes.length;
-    const header = new Uint8Array(5);
-    const view = new DataView(header.buffer);
-    header[0] = final ? 1 : 0;
-    view.setUint16(1, chunk.length, true);
-    view.setUint16(3, ~chunk.length & 0xffff, true);
-    yield header;
-    yield chunk;
-  }
-
-  yield uint32(adler32(bytes));
 }
+
+interface PackOrder {
+  readonly oids: readonly string[];
+  readonly deltaBases: ReadonlyMap<string, string>;
+}
+
+/**
+ * Put every in-pack delta base before the object that depends on it. Planning
+ * retains only object ids: resolved objects and delta bodies remain in storage
+ * until the writer reaches their one entry.
+ */
+const orderPack = async (
+  oids: readonly string[],
+  source: UploadPackObjectSource,
+): Promise<PackOrder> => {
+  const included = new Set(oids);
+  const deltaBases = new Map<string, string>();
+  const dependents = new Map<string, string[]>();
+  const dependentOids = new Set<string>();
+
+  for (const oid of oids) {
+    const baseOid = await source.readDeltaBase(oid);
+    if (baseOid === null) {
+      continue;
+    }
+
+    deltaBases.set(oid, baseOid);
+    if (!included.has(baseOid) || baseOid === oid) {
+      continue;
+    }
+
+    dependentOids.add(oid);
+    const existing = dependents.get(baseOid);
+    if (existing === undefined) {
+      dependents.set(baseOid, [oid]);
+    } else {
+      existing.push(oid);
+    }
+  }
+
+  const ordered: string[] = [];
+  const queued = new Set<string>();
+  const ready = oids.filter((oid) => !dependentOids.has(oid));
+  ready.forEach((oid) => queued.add(oid));
+
+  for (let at = 0; at < ready.length; at += 1) {
+    const oid = ready[at]!;
+    ordered.push(oid);
+
+    for (const dependent of dependents.get(oid) ?? []) {
+      if (!queued.has(dependent)) {
+        queued.add(dependent);
+        ready.push(dependent);
+      }
+    }
+  }
+
+  // Cyclic persisted relationships cannot come from a valid pack, but falling
+  // back to full objects is safer than failing a fetch over corrupted metadata.
+  for (const oid of oids) {
+    if (!queued.has(oid)) {
+      ordered.push(oid);
+    }
+  }
+
+  return { oids: ordered, deltaBases };
+};
 
 async function* packBytes(
   oids: readonly string[],
@@ -251,30 +281,43 @@ async function* packBytes(
     yield bytes;
   };
 
-  yield* emit(packHeader(oids.length));
+  const order = await orderPack(oids, source);
+  const emitted = new Set<string>();
 
-  for (const oid of oids) {
-    const object = await source.read(oid);
-    if (object === null) {
-      throw new UploadPackError(`Object ${oid} vanished while its pack was being written.`);
+  yield* emit(packHeader(order.oids.length));
+
+  for (const oid of order.oids) {
+    const plannedBase = order.deltaBases.get(oid);
+    const baseIsAvailable =
+      plannedBase !== undefined &&
+      (emitted.has(plannedBase) || (thin && clientObjects.has(plannedBase)));
+    const storedDelta = baseIsAvailable ? await source.readDelta(oid) : null;
+    const delta = storedDelta !== null && storedDelta.baseOid === plannedBase ? storedDelta : null;
+    let header: Uint8Array;
+    let bytes: Uint8Array;
+
+    if (delta === null) {
+      const object = await source.read(oid);
+      if (object === null) {
+        throw new UploadPackError(`Object ${oid} vanished while its pack was being written.`);
+      }
+      header = entryHeader(PACK_KINDS[object.type], object.bytes.length);
+      bytes = object.bytes;
+    } else {
+      header = entryHeader(REF_DELTA, delta.bytes.length);
+      bytes = delta.bytes;
     }
-
-    const storedDelta = thin ? await source.readDelta(oid) : null;
-    const delta =
-      storedDelta !== null && clientObjects.has(storedDelta.baseOid) ? storedDelta : null;
-    const header =
-      delta === null
-        ? entryHeader(PACK_KINDS[object.type], object.bytes.length)
-        : entryHeader(REF_DELTA, delta.bytes.length);
 
     yield* emit(header);
     if (delta !== null) {
       yield* emit(fromHex(delta.baseOid));
     }
 
-    for (const chunk of storedDeflate(delta?.bytes ?? object.bytes)) {
+    for await (const chunk of deflate(bytes)) {
       yield* emit(chunk);
     }
+
+    emitted.add(oid);
   }
 
   yield hash.digest();

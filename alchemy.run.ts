@@ -11,7 +11,7 @@ export const ApiWorker = Cloudflare.Worker("Api", {
   // Keep this at or below the newest date the workerd binary bundled with
   // Alchemy supports, otherwise `bun run dev` refuses to start the Worker even
   // though a remote deploy would accept it.
-  compatibility: { date: "2026-07-11" },
+  compatibility: { date: "2026-07-11", flags: ["nodejs_compat"] },
   // A push reads a whole pack, hashes every object in it, and then walks the
   // commits and trees it carried, all inside one request. The default 30
   // seconds is a first push of any real repository; five minutes is the
