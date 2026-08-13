@@ -2,6 +2,7 @@ import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
 import * as Effect from "effect/Effect";
 
+import type { NamespaceRegistryObject } from "./apps/api/src/namespace-registry-object.ts";
 import type { RepositoryObject } from "./apps/api/src/repository-object.ts";
 
 export const ApiWorker = Cloudflare.Worker("Api", {
@@ -11,6 +12,11 @@ export const ApiWorker = Cloudflare.Worker("Api", {
   // though a remote deploy would accept it.
   compatibility: { date: "2026-07-11" },
   env: {
+    // Alchemy creates new Durable Object classes as `new_sqlite_classes`, so
+    // this namespace comes with the SQLite storage the registry queries.
+    NAMESPACES: Cloudflare.DurableObject<NamespaceRegistryObject>("Namespaces", {
+      className: "NamespaceRegistryObject",
+    }),
     REPOSITORIES: Cloudflare.DurableObject<RepositoryObject>("Repositories", {
       className: "RepositoryObject",
     }),

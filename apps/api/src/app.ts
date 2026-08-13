@@ -1,35 +1,41 @@
 import {
   GIT_HTTP_ENDPOINTS,
+  PROBLEM_TYPES,
   REST_ENDPOINTS,
+  isImplementedEndpoint,
   type EndpointId,
-  type ProblemDetails,
 } from "@open-relic/contracts";
 import { Effect } from "effect";
 import { Hono } from "hono";
 
 import type { ApiEnv } from "../../../alchemy.run.ts";
+import type { NamespaceRegistryClient } from "./namespace-registry.ts";
+import {
+  namespaceRegistryFromEnv,
+  registerNamespaceRoutes,
+} from "./namespace-routes.ts";
+import { notImplemented, problemResponse } from "./problems.ts";
 import {
   EndpointNotImplemented,
   GitServiceStub,
   type GitService,
 } from "./stub-service.ts";
 
-const NOT_IMPLEMENTED_TYPE =
-  "https://open-relic.dev/problems/not-implemented";
-const NOT_FOUND_TYPE = "https://open-relic.dev/problems/not-found";
+export interface AppDependencies {
+  /** Stub boundary for every endpoint the Git engine has yet to implement. */
+  readonly gitService?: GitService;
+  /**
+   * Resolves the namespace registry for a request. Defaults to the Durable
+   * Object bound as `NAMESPACES`; tests substitute a local one.
+   */
+  readonly namespaceRegistry?: (env: ApiEnv) => NamespaceRegistryClient;
+}
 
-const notImplemented = (
-  operation: EndpointId,
-): ProblemDetails => ({
-  type: NOT_IMPLEMENTED_TYPE,
-  title: "Not Implemented",
-  status: 501,
-  detail: `The ${operation} endpoint is registered, but its behavior has not been implemented.`,
-  operation,
-});
-
-export const createApp = (service: GitService = GitServiceStub) => {
-  // Bindings come from the Alchemy stack, so `context.env.REPOSITORIES` is the
+export const createApp = ({
+  gitService = GitServiceStub,
+  namespaceRegistry = namespaceRegistryFromEnv,
+}: AppDependencies = {}) => {
+  // Bindings come from the Alchemy stack, so `context.env.NAMESPACES` is the
   // same Durable Object namespace that `alchemy.run.ts` provisions.
   const app = new Hono<{ Bindings: ApiEnv }>();
 
@@ -37,32 +43,37 @@ export const createApp = (service: GitService = GitServiceStub) => {
     context.json({ service: "open-relic", status: "ok" }),
   );
 
+  registerNamespaceRoutes(app, namespaceRegistry);
+
+  const invokeStub = async (operation: EndpointId): Promise<Response> => {
+    const failure = await Effect.runPromise(
+      gitService.invoke(operation).pipe(
+        Effect.match({
+          onFailure: (error) => error,
+          onSuccess: () => undefined,
+        }),
+      ),
+    );
+
+    return failure instanceof EndpointNotImplemented
+      ? problemResponse(notImplemented(failure.operation))
+      : new Response(null, { status: 204 });
+  };
+
   const registerStub = (
     method: "DELETE" | "GET" | "PATCH" | "POST",
     path: string,
     operation: EndpointId,
   ) => {
-    app.on(method, path, async (context) => {
-      const response = await Effect.runPromise(
-        service.invoke(operation).pipe(
-          Effect.match({
-            onFailure: (error) => error,
-            onSuccess: () => undefined,
-          }),
-        ),
-      );
-
-      if (response instanceof EndpointNotImplemented) {
-        return context.json(notImplemented(response.operation), 501, {
-          "Content-Type": "application/problem+json",
-        });
-      }
-
-      return context.body(null, 204);
-    });
+    app.on(method, path, () => invokeStub(operation));
   };
 
   for (const endpoint of REST_ENDPOINTS) {
+    // Implemented endpoints are already registered above; registering a stub
+    // for them would only shadow a live route with a `501`.
+    if (isImplementedEndpoint(endpoint.id)) {
+      continue;
+    }
     registerStub(endpoint.method, endpoint.path, endpoint.id);
   }
 
@@ -75,42 +86,21 @@ export const createApp = (service: GitService = GitServiceStub) => {
     registerStub(endpoint.method, endpoint.path, endpoint.id);
   }
 
-  app.get("/git/:namespace/:repo.git/info/refs", async (context) => {
-    const serviceName = context.req.query("service");
-    const operation =
-      serviceName === "git-upload-pack"
+  app.get("/git/:namespace/:repo.git/info/refs", (context) =>
+    invokeStub(
+      context.req.query("service") === "git-upload-pack"
         ? "git.uploadPack.advertise"
-        : "git.receivePack.advertise";
-
-    const response = await Effect.runPromise(
-      service.invoke(operation).pipe(
-        Effect.match({
-          onFailure: (error) => error,
-          onSuccess: () => undefined,
-        }),
-      ),
-    );
-
-    if (response instanceof EndpointNotImplemented) {
-      return context.json(notImplemented(response.operation), 501, {
-        "Content-Type": "application/problem+json",
-      });
-    }
-
-    return context.body(null, 204);
-  });
-
-  app.notFound((context) =>
-    context.json(
-      {
-        type: NOT_FOUND_TYPE,
-        title: "Not Found",
-        status: 404,
-        detail: "No route matches this request.",
-      } satisfies ProblemDetails,
-      404,
-      { "Content-Type": "application/problem+json" },
+        : "git.receivePack.advertise",
     ),
+  );
+
+  app.notFound(() =>
+    problemResponse({
+      type: PROBLEM_TYPES.notFound,
+      title: "Not Found",
+      status: 404,
+      detail: "No route matches this request.",
+    }),
   );
 
   return app;

@@ -8,6 +8,7 @@
   ],
   "scripts": {
     "check": "bun run typecheck && bun test",
+    "db:generate": "drizzle-kit generate",
     "deploy": "bun alchemy deploy",
     "deploy:prod": "bun alchemy deploy --stage prod",
     "dev": "bun alchemy dev",
@@ -24,6 +25,7 @@
     "@effect/platform-node": "4.0.0-rc.108",
     "@types/bun": "^1.2.7",
     "alchemy": "2.0.0-beta.72",
+    "drizzle-kit": "1.0.0-rc.4",
     "effect": "4.0.0-rc.108",
     "typescript": "^5.9.2"
   },
