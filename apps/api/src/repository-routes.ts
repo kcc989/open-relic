@@ -17,7 +17,9 @@ import {
   type CreateRepoResult,
   type DeleteRepoResult,
   type RepoInfo,
+  type RepoSortField,
   type RepoWithRemote,
+  type SortDirection,
 } from "@open-relic/contracts";
 import type { Hono } from "hono";
 
@@ -31,10 +33,19 @@ import {
   ok,
   okList,
 } from "./envelope.ts";
-import { parseChoice, parseCursor, parseLimit, parseSearch } from "./query.ts";
+import { encodeCursor } from "./pagination.ts";
+import {
+  CURSOR_QUERY_MISMATCH,
+  cursorMatchesQuery,
+  parseChoice,
+  parseCursorKey,
+  parseLimit,
+  parseSearch,
+} from "./query.ts";
 import { gitRemoteUrl, mintArtifactToken } from "./remote.ts";
 import type {
   CreateRepositoryCommand,
+  RepositoryCursor,
   RepositoryIndexClient,
 } from "./repository-index.ts";
 import {
@@ -124,6 +135,18 @@ const parseCreateBody = (
 
 const noSuchRepository = (namespaceSlug: string, name: string): string =>
   `No repository named "${namespaceSlug}/${name}" exists.`;
+
+/**
+ * The query a cursor was minted under, carried inside the cursor so a later
+ * page can be checked against it. `v` and `n` name a position in one ordering
+ * of one filtered set; replaying them under a different one would compare a
+ * value against a column it never came from.
+ */
+const cursorBinding = (
+  sort: RepoSortField,
+  direction: SortDirection,
+  search: string | null,
+): Record<string, string> => ({ s: sort, d: direction, q: search ?? "" });
 
 export const registerRepositoryRoutes = (
   app: Hono<{ Bindings: ApiEnv }>,
@@ -243,11 +266,30 @@ export const registerRepositoryRoutes = (
       return invalidInput(search.detail);
     }
 
+    const binding = cursorBinding(sort.value, direction.value, search.value);
+
+    const cursor = parseCursorKey(context.req.query("cursor"));
+    if (!cursor.ok) {
+      return invalidInput(cursor.detail);
+    }
+
+    let position: RepositoryCursor | null = null;
+    if (cursor.value !== null) {
+      const key = cursor.value;
+      if (key.v === undefined || key.n === undefined) {
+        return invalidInput(`"cursor" is not a cursor this service issued.`);
+      }
+      if (!cursorMatchesQuery(key, binding)) {
+        return invalidInput(CURSOR_QUERY_MISMATCH);
+      }
+      position = { value: key.v, name: key.n };
+    }
+
     const page = await resolveIndex(context.env).listRepositories(
       namespaceSlug,
       {
         limit: limit.value,
-        cursor: parseCursor(context.req.query("cursor")),
+        cursor: position,
         search: search.value,
         sort: sort.value,
         direction: direction.value,
@@ -263,7 +305,14 @@ export const registerRepositoryRoutes = (
         withRemote(context, namespaceSlug, repository),
       ),
       {
-        cursor: page.cursor,
+        cursor:
+          page.next === null
+            ? ""
+            : encodeCursor({
+                v: page.next.value,
+                n: page.next.name,
+                ...binding,
+              }),
         per_page: limit.value,
         count: page.repositories.length,
       },

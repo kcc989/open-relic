@@ -24,7 +24,7 @@ const command = (slug: string, description: string | null = null) => ({
 });
 
 /** The whole list, for assertions that are not about paging. */
-const page = (limit = 50, cursor: string | null = null) => ({ limit, cursor });
+const page = (limit = 50, after: string | null = null) => ({ limit, after });
 
 describe("createNamespace", () => {
   test("stores a namespace and stamps its creation time", async () => {
@@ -76,7 +76,7 @@ describe("reads", () => {
       "zeta",
     ]);
     // Everything fit, so there is nothing to resume from.
-    expect(listed.cursor).toBe("");
+    expect(listed.next).toBeNull();
   });
 
   test("returns null for an unknown slug", async () => {
@@ -97,30 +97,30 @@ describe("paging", () => {
     const store = await seeded("acme", "beta", "delta", "gamma", "zeta");
 
     const seen: string[] = [];
-    let cursor: string | null = null;
+    let after: string | null = null;
     do {
-      const listed = await store.listNamespaces(page(2, cursor));
+      const listed = await store.listNamespaces(page(2, after));
       seen.push(...listed.namespaces.map((namespace) => namespace.slug));
-      cursor = listed.cursor === "" ? null : listed.cursor;
-    } while (cursor !== null);
+      after = listed.next;
+    } while (after !== null);
 
     expect(seen).toEqual(["acme", "beta", "delta", "gamma", "zeta"]);
   });
 
-  test("does not hand back a cursor on an exactly-full last page", async () => {
+  test("does not hand back a position on an exactly-full last page", async () => {
     const store = await seeded("acme", "beta");
 
-    expect((await store.listNamespaces(page(2))).cursor).toBe("");
+    expect((await store.listNamespaces(page(2))).next).toBeNull();
   });
 
-  test("skips a namespace inserted behind the cursor", async () => {
+  test("skips a namespace inserted behind the position", async () => {
     const store = await seeded("beta", "delta");
     const first = await store.listNamespaces(page(1));
 
-    // `acme` sorts before the cursor, so the walk cannot see it — the price of
-    // a keyset cursor, and the reason a page never shifts under the client.
+    // `acme` sorts before the position, so the walk cannot see it — the price
+    // of a keyset cursor, and the reason a page never shifts under the client.
     await store.createNamespace(command("acme"));
-    const second = await store.listNamespaces(page(10, first.cursor));
+    const second = await store.listNamespaces(page(10, first.next));
 
     expect(first.namespaces.map((namespace) => namespace.slug)).toEqual([
       "beta",
@@ -128,15 +128,6 @@ describe("paging", () => {
     expect(second.namespaces.map((namespace) => namespace.slug)).toEqual([
       "delta",
     ]);
-  });
-
-  test("answers an unreadable cursor with an empty page", async () => {
-    const store = await seeded("acme");
-
-    expect(await store.listNamespaces(page(10, "not-a-cursor"))).toEqual({
-      namespaces: [],
-      cursor: "",
-    });
   });
 });
 

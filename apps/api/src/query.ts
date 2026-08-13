@@ -1,3 +1,4 @@
+import { decodeCursor, type CursorKey } from "./pagination.ts";
 import type { Rejected } from "./request-body.ts";
 
 export type Parsed<T> = { readonly ok: true; readonly value: T } | Rejected;
@@ -65,5 +66,37 @@ export const parseSearch = (
   return { ok: true, value: trimmed.length === 0 ? null : trimmed };
 };
 
-export const parseCursor = (raw: string | undefined): string | null =>
-  raw === undefined || raw.length === 0 ? null : raw;
+/**
+ * Absent and blank both mean "start at the beginning". Anything else has to
+ * decode, and a cursor that does not is rejected rather than treated as the end
+ * of the walk — a client that garbled one should be told so, not handed an
+ * empty page it cannot tell apart from a finished list.
+ */
+export const parseCursorKey = (
+  raw: string | undefined,
+): Parsed<CursorKey | null> => {
+  if (raw === undefined || raw.length === 0) {
+    return { ok: true, value: null };
+  }
+
+  const key = decodeCursor(raw);
+  return key === null
+    ? { ok: false, detail: `"cursor" is not a cursor this service issued.` }
+    : { ok: true, value: key };
+};
+
+/**
+ * A cursor names a position in one ordering of one filtered set, so it is only
+ * meaningful against the query that minted it. Replaying it under a different
+ * sort would compare a value against a column it never came from — an ISO
+ * timestamp against a name, say, where digits sort before letters and every row
+ * qualifies — and hand back page one again under a fresh cursor, forever.
+ */
+export const cursorMatchesQuery = (
+  key: CursorKey,
+  fields: Readonly<Record<string, string>>,
+): boolean =>
+  Object.entries(fields).every(([field, value]) => key[field] === value);
+
+export const CURSOR_QUERY_MISMATCH =
+  `"cursor" was issued for a different sort, direction, or search. Start the walk again without it.` as const;

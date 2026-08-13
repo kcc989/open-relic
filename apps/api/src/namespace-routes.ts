@@ -19,7 +19,8 @@ import type {
   CreateNamespaceCommand,
   NamespaceRegistryClient,
 } from "./namespace-registry.ts";
-import { parseCursor, parseLimit } from "./query.ts";
+import { encodeCursor } from "./pagination.ts";
+import { parseCursorKey, parseLimit } from "./query.ts";
 import {
   parseJsonObject,
   parseOptionalText,
@@ -133,13 +134,23 @@ export const registerNamespaceRoutes = (
       return invalidInput(limit.detail);
     }
 
+    const cursor = parseCursorKey(context.req.query("cursor"));
+    if (!cursor.ok) {
+      return invalidInput(cursor.detail);
+    }
+    // Namespaces list in one fixed order, so the cursor carries only the slug
+    // it resumes after; there is no sort for it to disagree with.
+    if (cursor.value !== null && cursor.value.n === undefined) {
+      return invalidInput(`"cursor" is not a cursor this service issued.`);
+    }
+
     const page = await resolveRegistry(context.env).listNamespaces({
       limit: limit.value,
-      cursor: parseCursor(context.req.query("cursor")),
+      after: cursor.value?.n ?? null,
     });
 
     return okList(page.namespaces, {
-      cursor: page.cursor,
+      cursor: page.next === null ? "" : encodeCursor({ n: page.next }),
       per_page: limit.value,
       count: page.namespaces.length,
     });

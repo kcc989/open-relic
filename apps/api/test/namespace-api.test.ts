@@ -171,6 +171,30 @@ describe("GET /namespaces", () => {
     expect(secondBody.result_info).toMatchObject({ cursor: "", count: 1 });
   });
 
+  test("rejects a cursor it did not issue rather than ending the walk", async () => {
+    await create({ slug: "acme" });
+
+    const response = await app.request(`${NAMESPACES}?cursor=garbage`);
+
+    // An empty page here would be indistinguishable from a finished list, so a
+    // client that garbled its cursor would silently lose the rest of it.
+    expect(response.status).toBe(400);
+    expect(await errorCode(response)).toBe(ERROR_CODES.invalidInput);
+  });
+
+  test("rejects a cursor that decodes but carries the wrong keys", async () => {
+    // Well-formed base64url JSON, but not a namespace position.
+    const cursor = btoa(JSON.stringify({ nonsense: "x" }))
+      .replaceAll("+", "-")
+      .replaceAll("/", "_")
+      .replace(/=+$/, "");
+
+    const response = await app.request(`${NAMESPACES}?cursor=${cursor}`);
+
+    expect(response.status).toBe(400);
+    expect(await errorCode(response)).toBe(ERROR_CODES.invalidInput);
+  });
+
   const invalidLimits = ["0", "-1", "abc", "201"];
 
   for (const limit of invalidLimits) {

@@ -58,6 +58,14 @@ of the last row handed out — so a repository created mid-walk cannot shift row
 onto a page the client has already seen. `cursor` is empty once the last page has
 been handed out.
 
+A cursor names a position in one ordering of one filtered set, so it also
+carries the `sort`, `direction`, and `search` it was issued under. Replaying it
+against a different query is a `400`, not a quietly different page: comparing a
+stored `created_at` against a name would let every row through and hand back
+page one again under a fresh cursor. A cursor the service did not issue is a
+`400` for the same reason — an empty page would be indistinguishable from a
+finished list.
+
 ```json
 { "result_info": { "cursor": "eyJ2IjoiLi4uIn0", "per_page": 20, "count": 20 } }
 ```

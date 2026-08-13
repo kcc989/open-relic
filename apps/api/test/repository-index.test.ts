@@ -10,6 +10,7 @@ import { NamespaceRegistry } from "../src/namespace-registry.ts";
 import {
   RepositoryIndex,
   type ListRepositoriesQuery,
+  type RepositoryCursor,
 } from "../src/repository-index.ts";
 import { createTestDatabase } from "./support/database.ts";
 
@@ -217,7 +218,7 @@ describe("reads", () => {
 
     expect(
       await store.repositories.listRepositories("acme", query()),
-    ).toEqual({ repositories: [], cursor: "" });
+    ).toEqual({ repositories: [], next: null });
     expect(
       await store.repositories.listRepositories("nope", query()),
     ).toBeNull();
@@ -325,14 +326,14 @@ describe("paging", () => {
     const store = await seeded("alpha", "beta", "delta", "gamma", "zeta");
 
     const seen: string[] = [];
-    let cursor: string | null = null;
+    let cursor: RepositoryCursor | null = null;
     do {
       const page = await store.repositories.listRepositories(
         "acme",
         query({ limit: 2, cursor, sort: "name", direction: "asc" }),
       );
       seen.push(...(page?.repositories ?? []).map((repo) => repo.name));
-      cursor = page?.cursor === "" ? null : (page?.cursor ?? null);
+      cursor = page?.next ?? null;
     } while (cursor !== null);
 
     expect(seen).toEqual(["alpha", "beta", "delta", "gamma", "zeta"]);
@@ -345,20 +346,20 @@ describe("paging", () => {
     const store = await seeded("alpha", "beta", "gamma");
 
     const seen: string[] = [];
-    let cursor: string | null = null;
+    let cursor: RepositoryCursor | null = null;
     do {
       const page = await store.repositories.listRepositories(
         "acme",
         query({ limit: 1, cursor, sort: "last_push_at", direction: "asc" }),
       );
       seen.push(...(page?.repositories ?? []).map((repo) => repo.name));
-      cursor = page?.cursor === "" ? null : (page?.cursor ?? null);
+      cursor = page?.next ?? null;
     } while (cursor !== null);
 
     expect([...seen].sort()).toEqual(["alpha", "beta", "gamma"]);
   });
 
-  test("does not hand back a cursor on an exactly-full last page", async () => {
+  test("does not hand back a position on an exactly-full last page", async () => {
     const store = await seeded("alpha", "beta");
 
     const page = await store.repositories.listRepositories(
@@ -366,18 +367,7 @@ describe("paging", () => {
       query({ limit: 2 }),
     );
 
-    expect(page?.cursor).toBe("");
-  });
-
-  test("answers an unreadable cursor with an empty page", async () => {
-    const store = await seeded("alpha");
-
-    expect(
-      await store.repositories.listRepositories(
-        "acme",
-        query({ cursor: "not-a-cursor" }),
-      ),
-    ).toEqual({ repositories: [], cursor: "" });
+    expect(page?.next).toBeNull();
   });
 
   test("carries the search filter across a page boundary", async () => {
@@ -391,7 +381,7 @@ describe("paging", () => {
       "acme",
       query({
         limit: 2,
-        cursor: first?.cursor ?? null,
+        cursor: first?.next ?? null,
         search: "api",
         sort: "name",
         direction: "asc",

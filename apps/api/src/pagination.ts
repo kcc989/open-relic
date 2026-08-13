@@ -3,6 +3,10 @@
  * row handed out, so a page is a range scan and a repository created mid-walk
  * cannot shift rows onto a page the client has already seen.
  *
+ * The encoding lives at the route rather than in the store, because a cursor is
+ * a wire format: the store deals in the position a page resumes from, and the
+ * route is what turns that into a string a client can hold and hand back.
+ *
  * The payload is opaque on purpose — it is base64url so it survives a query
  * string, and clients are expected to echo it back rather than read it.
  */
@@ -20,9 +24,10 @@ export const encodeCursor = (key: CursorKey): string =>
   toBase64Url(JSON.stringify(key));
 
 /**
- * `null` for anything that is not a cursor this service minted. A caller that
- * tampers with one gets a rejected request rather than a silently different
- * page.
+ * `null` for anything that is not a cursor this service minted. Callers turn
+ * that into a rejected request rather than an empty page: a cursor that cannot
+ * be read is a caller error, and answering it with "the list ended" would be
+ * indistinguishable from the list actually having ended.
  */
 export const decodeCursor = (cursor: string): CursorKey | null => {
   let parsed: unknown;

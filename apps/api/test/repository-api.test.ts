@@ -318,6 +318,61 @@ describe("GET /namespaces/:namespace/repos", () => {
     expect(await names(second)).toEqual(["delta"]);
   });
 
+  describe("a cursor is bound to the query that issued it", () => {
+    /** Three repositories, and the cursor after the first page of one. */
+    const firstPage = async (query: string) => {
+      for (const name of ["alpha", "beta", "delta"]) {
+        await create({ name });
+      }
+
+      const body = await envelope<RepoWithRemote[]>(
+        await harness.app.request(`${REPOS}?limit=2&${query}`),
+      );
+      return (body.result_info as { cursor: string }).cursor;
+    };
+
+    test("replaying it under the same query walks forward", async () => {
+      const cursor = await firstPage("sort=name&direction=asc");
+
+      const second = await harness.app.request(
+        `${REPOS}?limit=2&sort=name&direction=asc&cursor=${encodeURIComponent(cursor)}`,
+      );
+
+      expect(await names(second)).toEqual(["delta"]);
+    });
+
+    // Each of these would otherwise compare the stored sort value against a
+    // column it never came from. Under the default `created_at desc`, an ISO
+    // timestamp measured against a name lets every row through — so the client
+    // silently receives page one again, under a fresh cursor, forever.
+    const mismatches: ReadonlyArray<readonly [string, string, string]> = [
+      ["a different sort", "", "sort=name&direction=asc"],
+      ["a different direction", "sort=name&direction=asc", "sort=name&direction=desc"],
+      ["a search that was not applied", "sort=name&direction=asc", "sort=name&direction=asc&search=alpha"],
+      ["a dropped search", "sort=name&direction=asc&search=a", "sort=name&direction=asc"],
+    ];
+
+    for (const [label, minted, replayed] of mismatches) {
+      test(`rejects it under ${label}`, async () => {
+        const cursor = await firstPage(minted);
+
+        const response = await harness.app.request(
+          `${REPOS}?limit=2&${replayed}&cursor=${encodeURIComponent(cursor)}`,
+        );
+
+        expect(response.status).toBe(400);
+        expect(await errorCode(response)).toBe(ERROR_CODES.invalidInput);
+      });
+    }
+
+    test("rejects a cursor it did not issue rather than ending the walk", async () => {
+      const response = await harness.app.request(`${REPOS}?cursor=garbage`);
+
+      expect(response.status).toBe(400);
+      expect(await errorCode(response)).toBe(ERROR_CODES.invalidInput);
+    });
+  });
+
   const invalidQueries = [
     "limit=0",
     "limit=201",

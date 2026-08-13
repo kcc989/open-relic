@@ -1,5 +1,5 @@
 import type { NamespaceInfo } from "@open-relic/contracts";
-import { and, asc, eq, gt, type SQL } from "drizzle-orm";
+import { asc, eq, gt } from "drizzle-orm";
 
 import type { SyncSqliteDatabase } from "./db/database.ts";
 import {
@@ -7,7 +7,6 @@ import {
   repositories,
   type NamespaceRow,
 } from "./db/registry-schema.ts";
-import { decodeCursor, encodeCursor } from "./pagination.ts";
 
 export interface CreateNamespaceCommand {
   readonly slug: string;
@@ -25,13 +24,17 @@ export type CreateNamespaceOutcome =
 
 export interface ListNamespacesQuery {
   readonly limit: number;
-  readonly cursor: string | null;
+  /**
+   * The slug to resume after — the position, not a wire cursor. The route is
+   * what encodes this into a string a client can hold.
+   */
+  readonly after: string | null;
 }
 
 export interface NamespacePage {
   readonly namespaces: readonly NamespaceInfo[];
-  /** Empty once the last page has been handed out. */
-  readonly cursor: string;
+  /** The slug the next page resumes after; `null` once the walk has finished. */
+  readonly next: string | null;
 }
 
 /**
@@ -102,20 +105,10 @@ export class NamespaceRegistry {
    * beyond the limit is read to decide whether there is a next cursor.
    */
   async listNamespaces(query: ListNamespacesQuery): Promise<NamespacePage> {
-    const filters: SQL[] = [];
-
-    if (query.cursor !== null) {
-      const key = decodeCursor(query.cursor);
-      if (key === null || key.n === undefined) {
-        return { namespaces: [], cursor: "" };
-      }
-      filters.push(gt(namespaces.slug, key.n));
-    }
-
     const rows = await this.#db
       .select()
       .from(namespaces)
-      .where(filters.length === 0 ? undefined : and(...filters))
+      .where(query.after === null ? undefined : gt(namespaces.slug, query.after))
       .orderBy(asc(namespaces.slug))
       .limit(query.limit + 1);
 
@@ -124,10 +117,8 @@ export class NamespaceRegistry {
 
     return {
       namespaces: page.map(toNamespace),
-      cursor:
-        rows.length > query.limit && last !== undefined
-          ? encodeCursor({ n: last.slug })
-          : "",
+      next:
+        rows.length > query.limit && last !== undefined ? last.slug : null,
     };
   }
 

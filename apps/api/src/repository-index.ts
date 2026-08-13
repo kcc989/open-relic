@@ -11,7 +11,7 @@ import {
   repositories,
   type RepositoryRow,
 } from "./db/registry-schema.ts";
-import { decodeCursor, encodeCursor, escapeLikePattern } from "./pagination.ts";
+import { escapeLikePattern } from "./pagination.ts";
 
 export interface CreateRepositoryCommand {
   readonly namespaceSlug: string;
@@ -37,9 +37,19 @@ export type CreateRepositoryOutcome =
       readonly reason: "name-taken" | "namespace-missing";
     };
 
+/**
+ * The position a page resumes from: the sort key of the last row handed out,
+ * and its name to break a tie. Not a wire cursor — the route is what encodes
+ * this into a string, and what binds it to the query that produced it.
+ */
+export interface RepositoryCursor {
+  readonly value: string;
+  readonly name: string;
+}
+
 export interface ListRepositoriesQuery {
   readonly limit: number;
-  readonly cursor: string | null;
+  readonly cursor: RepositoryCursor | null;
   readonly search: string | null;
   readonly sort: RepoSortField;
   readonly direction: SortDirection;
@@ -47,8 +57,8 @@ export interface ListRepositoriesQuery {
 
 export interface RepositoryPage {
   readonly repositories: readonly RepoInfo[];
-  /** Empty once the last page has been handed out. */
-  readonly cursor: string;
+  /** Where the next page resumes; `null` once the walk has finished. */
+  readonly next: RepositoryCursor | null;
 }
 
 export interface RepositoryPointer {
@@ -225,17 +235,14 @@ export class RepositoryIndex {
     }
 
     if (query.cursor !== null) {
-      const key = decodeCursor(query.cursor);
-      if (key === null || key.v === undefined || key.n === undefined) {
-        return { repositories: [], cursor: "" };
-      }
+      const { value, name } = query.cursor;
 
       // A row-value comparison, so the sort key and the name tiebreak resume
       // together — two repositories sharing a timestamp cannot hide each other.
       filters.push(
         ascending
-          ? sql`(${expression}, ${repositories.name}) > (${key.v}, ${key.n})`
-          : sql`(${expression}, ${repositories.name}) < (${key.v}, ${key.n})`,
+          ? sql`(${expression}, ${repositories.name}) > (${value}, ${name})`
+          : sql`(${expression}, ${repositories.name}) < (${value}, ${name})`,
       );
     }
 
@@ -254,10 +261,10 @@ export class RepositoryIndex {
 
     return {
       repositories: page.map(toRepository),
-      cursor:
+      next:
         rows.length > query.limit && last !== undefined
-          ? encodeCursor({ v: sortValue(last, query.sort), n: last.name })
-          : "",
+          ? { value: sortValue(last, query.sort), name: last.name }
+          : null,
     };
   }
 
