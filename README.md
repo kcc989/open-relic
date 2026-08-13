@@ -1,7 +1,14 @@
 # Open Relic
 
-An API-only starting point for an open-source, self-hostable Git service built
-on Cloudflare Durable Objects.
+An open-source, self-hostable implementation of
+[Cloudflare Artifacts](https://developers.cloudflare.com/artifacts/) — versioned,
+Git-speaking storage — built on Cloudflare Durable Objects and running on your
+own Cloudflare account, with no access to the Artifacts product.
+
+Compatibility is the specification, not a feature: a client written against
+Artifacts should work against an installation with nothing changed but the host.
+[ADR-0001](./docs/adr/0001-wire-compatible-with-cloudflare-artifacts.md) records
+what that binds us to, and where the API below does not match yet.
 
 The namespace and repository APIs are implemented. Everything else — tokens,
 contents, forks, imports, and Git Smart HTTP — is still a registered route that
