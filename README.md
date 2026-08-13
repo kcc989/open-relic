@@ -3,8 +3,9 @@
 An API-only starting point for an open-source, self-hostable Git service built
 on Cloudflare Durable Objects.
 
-The namespace API is implemented. Everything else — repositories, tokens,
-contents, and Git Smart HTTP — is still a registered route that answers `501`:
+The namespace and repository APIs are implemented. Everything else — tokens,
+contents, forks, imports, and Git Smart HTTP — is still a registered route that
+answers `501`:
 
 - Hono routes for every REST and Git Smart HTTP endpoint in the initial API
 - Effect v4 as the typed stub service boundary
@@ -18,10 +19,12 @@ contents, and Git Smart HTTP — is still a registered route that answers `501`:
 ```text
 .
 ├── alchemy.run.ts                 # Cloudflare deployment stack
-├── drizzle.config.ts              # drizzle-kit output for the Durable Object
+├── drizzle.config.ts              # drizzle-kit output for the registry object
+├── drizzle.repository.config.ts   # drizzle-kit output for a repository object
 ├── apps/api
-│   ├── drizzle/                   # Generated migrations (committed)
-│   └── src/db/schema.ts           # Drizzle schema
+│   ├── drizzle/registry/          # Generated migrations (committed)
+│   ├── drizzle/repository/
+│   └── src/db/                    # Drizzle schema, one per Durable Object
 └── packages/contracts             # Shared endpoint manifest and response types
 ```
 
@@ -29,10 +32,6 @@ contents, and Git Smart HTTP — is still a registered route that answers `501`:
 `IMPLEMENTED_ENDPOINT_IDS`. The router skips stub registration for those ids and
 the test suite asserts `501` for the complement, so the manifest, the router,
 and the tests cannot drift apart.
-
-The deployed `RepositoryObject` is still only a reserved Durable Object
-namespace. It does not read or write storage, and its direct `fetch` handler
-returns `501` until the Git engine is implemented.
 
 ## Namespaces
 
@@ -49,7 +48,7 @@ insert one statement.
 | `POST /api/v1/namespaces` | `201` with a `Location` header, `409` if the slug is taken, `400` if the body is invalid |
 | `GET /api/v1/namespaces` | `200` with `{ "namespaces": [...] }`, ordered by slug |
 | `GET /api/v1/namespaces/:namespace` | `200` or `404` |
-| `DELETE /api/v1/namespaces/:namespace` | `204` or `404` |
+| `DELETE /api/v1/namespaces/:namespace` | `204` or `404`; takes the namespace's repositories with it |
 
 A slug is lowercase alphanumerics with interior hyphens, at most 39 characters,
 and may not be one of the reserved segments of the HTTP surface (`api`, `git`,
@@ -62,29 +61,84 @@ curl -X POST http://localhost:1337/api/v1/namespaces \
   -d '{"slug":"acme","displayName":"Acme, Inc."}'
 ```
 
-## Database
+## Repositories
 
-Drizzle is the ORM. The schema lives in `apps/api/src/db/schema.ts`, and
-`drizzle.config.ts` points drizzle-kit at it with the `durable-sqlite` driver:
+A repository gets a Durable Object of its own, `RepositoryObject`, bound as
+`REPOSITORIES`. A repository is what Git operations serialize on — a push has to
+apply against one consistent view of the refs — and what grows without bound, so
+it gets an object rather than a share of the registry.
+
+Nothing addresses a repository object by name. Creating one mints a Durable
+Object id, and the registry stores that id in a `repositories` row keyed by
+`(namespace, name)`: the namespace object points at the repository object, and
+resolving `acme/demo` is one lookup in the registry followed by a stub. Naming
+therefore lives entirely in the registry, so a future rename or transfer moves a
+row and not a byte of Git data.
+
+The split is metadata against contents. The registry row holds what the API
+answers with, which keeps listing a namespace one query instead of a fan-out of
+RPCs. The repository object holds what Git owns — today that is only the branch
+`HEAD` points at, because a bare repository has one from `git init` and before
+its first ref. Both are written when the repository is created.
+
+| Endpoint | Behavior |
+| --- | --- |
+| `POST /api/v1/namespaces/:namespace/repos` | `201` with a `Location` header, `404` if the namespace is unknown, `409` if the name is taken, `400` if the body is invalid |
+| `GET /api/v1/namespaces/:namespace/repos` | `200` with `{ "repositories": [...] }`, ordered by name, `404` if the namespace is unknown |
+| `GET /api/v1/namespaces/:namespace/repos/:repo` | `200` or `404` |
+| `DELETE /api/v1/namespaces/:namespace/repos/:repo` | `204` or `404`; discards the repository object's storage |
+
+A name is lowercase alphanumerics with interior dots, underscores, and hyphens,
+at most 100 characters, and may not end in `.git` — `/git/:namespace/:repo.git`
+appends that suffix itself. `defaultBranch` defaults to `main` and is checked
+against a conservative subset of `git check-ref-format`.
+
+Deleting a namespace deletes its repositories in the same transaction and hands
+back the object ids, which the route then discards; an index row and the object
+it points at are never removed by the same layer.
 
 ```sh
-bun run db:generate    # drizzle-kit generate
+curl -X POST http://localhost:1337/api/v1/namespaces/acme/repos \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"demo","description":"Anvil firmware"}'
 ```
 
-That writes `apps/api/drizzle/` — the SQL, a snapshot, and a `migrations.js`
-bundle — which is **committed**. There is no network-connected database to push
-to, so the Durable Object applies its own migrations: it builds
-`drizzle(ctx.storage)` and calls the `durable-sqlite` migrator inside
-`blockConcurrencyWhile`, so no request can reach a half-migrated schema, on
-first start or after an eviction. `migrations.js` imports each `.sql` file
-directly; Alchemy's bundler maps `.sql` to a text module for exactly this case,
-so no wrangler-style `rules` config or codegen step is needed.
+Git Smart HTTP is still unimplemented, so `RepositoryObject`'s `fetch` handler
+answers `501`; the REST API reaches it over RPC.
 
-The Durable Object is a thin RPC shell over `NamespaceRegistry`, which takes any
-synchronous drizzle SQLite database. Tests construct one over `bun:sqlite` and
-migrate it from the same `apps/api/drizzle/` folder, so the queries and the
-generated schema run for real without a Workers runtime — the only thing the
-tests skip is the RPC hop.
+## Database
+
+Drizzle is the ORM. Each Durable Object class has its own storage, so each has
+its own schema, its own drizzle-kit config, and its own migrations folder:
+
+| Object | Schema | Migrations |
+| --- | --- | --- |
+| `NamespaceRegistryObject` | `apps/api/src/db/registry-schema.ts` | `apps/api/drizzle/registry/` |
+| `RepositoryObject` | `apps/api/src/db/repository-schema.ts` | `apps/api/drizzle/repository/` |
+
+```sh
+bun run db:generate    # drizzle-kit generate, once per config
+```
+
+That writes the SQL, a snapshot, and a `migrations.js` bundle — all **committed**.
+There is no network-connected database to push to, so each Durable Object applies
+its own migrations: it builds `drizzle(ctx.storage)` and calls the
+`durable-sqlite` migrator inside `blockConcurrencyWhile`, so no request can reach
+a half-migrated schema, on first start or after an eviction. `migrations.js`
+imports each `.sql` file directly; Alchemy's bundler maps `.sql` to a text module
+for exactly this case, so no wrangler-style `rules` config or codegen step is
+needed.
+
+Both objects are thin RPC shells over plain classes — `NamespaceRegistry` and
+`RepositoryIndex` over the registry's database, `RepositoryStore` over a
+repository's — each of which takes any synchronous drizzle SQLite database.
+Tests construct one over `bun:sqlite` and migrate it from the same `drizzle/`
+folder, so the queries and the generated schema run for real without a Workers
+runtime — the only thing the tests skip is the RPC hop.
+
+The registry's transactions run synchronously (`.all()` rather than `await`)
+because the driver is synchronous: a transaction body that yielded would commit
+before it finished.
 
 ## Infrastructure
 
@@ -93,8 +147,8 @@ tests skip is the RPC hop.
 `Repositories` Durable Object namespaces bound to it as `NAMESPACES` and
 `REPOSITORIES`, and Workers Observability. There is no `wrangler.toml`; Alchemy
 owns the Worker script, bindings, migrations, and `workers.dev` subdomain. It
-creates new Durable Object classes as `new_sqlite_classes`, which is where the
-registry's SQLite storage comes from.
+creates new Durable Object classes as `new_sqlite_classes`, which is where both
+objects' SQLite storage comes from.
 
 Bindings flow back into the application as types. The stack exports
 
@@ -150,7 +204,7 @@ Subdomain:Edit, Workers Observability:Edit, and Account Settings:Read.
 { "service": "open-relic", "status": "ok" }
 ```
 
-Alongside the namespace endpoints above, routes for repositories, tokens,
-repository contents, archives, and Git upload/receive pack are registered from
-the manifest in `packages/contracts/src/index.ts`, answer `501`, and are covered
-by tests.
+Alongside the namespace and repository endpoints above, routes for forks,
+imports, tokens, repository contents, archives, and Git upload/receive pack are
+registered from the manifest in `packages/contracts/src/index.ts`, answer `501`,
+and are covered by tests.

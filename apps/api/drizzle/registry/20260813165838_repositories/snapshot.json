@@ -1,0 +1,153 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "id": "664412d3-7a6e-4fd8-9e6f-cc5c6b23cd5d",
+  "prevIds": [
+    "91e0e5c7-2e53-496a-a800-1c6e526bfee8"
+  ],
+  "ddl": [
+    {
+      "name": "namespaces",
+      "entityType": "tables"
+    },
+    {
+      "name": "repositories",
+      "entityType": "tables"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "slug",
+      "entityType": "columns",
+      "table": "namespaces"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "display_name",
+      "entityType": "columns",
+      "table": "namespaces"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "description",
+      "entityType": "columns",
+      "table": "namespaces"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "namespaces"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "namespace_slug",
+      "entityType": "columns",
+      "table": "repositories"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "name",
+      "entityType": "columns",
+      "table": "repositories"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "durable_object_id",
+      "entityType": "columns",
+      "table": "repositories"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "description",
+      "entityType": "columns",
+      "table": "repositories"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "default_branch",
+      "entityType": "columns",
+      "table": "repositories"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "repositories"
+    },
+    {
+      "columns": [
+        "namespace_slug"
+      ],
+      "tableTo": "namespaces",
+      "columnsTo": [
+        "slug"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_repositories_namespace_slug_namespaces_slug_fk",
+      "entityType": "fks",
+      "table": "repositories"
+    },
+    {
+      "columns": [
+        "namespace_slug",
+        "name"
+      ],
+      "nameExplicit": false,
+      "name": "repositories_pk",
+      "entityType": "pks",
+      "table": "repositories"
+    },
+    {
+      "columns": [
+        "slug"
+      ],
+      "nameExplicit": false,
+      "name": "namespaces_pk",
+      "table": "namespaces",
+      "entityType": "pks"
+    }
+  ],
+  "renames": []
+}

@@ -84,13 +84,19 @@ describe("deleteNamespace", () => {
     const store = registry();
     await store.createNamespace(command("acme"));
 
-    expect(await store.deleteNamespace("acme")).toBe(true);
+    expect(await store.deleteNamespace("acme")).toEqual({
+      deleted: true,
+      repositoryObjectIds: [],
+    });
     expect(await store.getNamespace("acme")).toBeNull();
     expect(await store.listNamespaces()).toEqual([]);
   });
 
   test("reports that an unknown slug was not removed", async () => {
-    expect(await registry().deleteNamespace("nope")).toBe(false);
+    expect(await registry().deleteNamespace("nope")).toEqual({
+      deleted: false,
+      repositoryObjectIds: [],
+    });
   });
 });
 

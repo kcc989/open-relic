@@ -9,12 +9,17 @@ import { Effect } from "effect";
 import { Hono } from "hono";
 
 import type { ApiEnv } from "../../../alchemy.run.ts";
-import type { NamespaceRegistryClient } from "./namespace-registry.ts";
 import {
   namespaceRegistryFromEnv,
-  registerNamespaceRoutes,
-} from "./namespace-routes.ts";
+  repositoryIndexFromEnv,
+  repositoryObjectsFromEnv,
+  type RepositoryObjects,
+} from "./bindings.ts";
+import type { NamespaceRegistryClient } from "./namespace-registry.ts";
+import { registerNamespaceRoutes } from "./namespace-routes.ts";
 import { notImplemented, problemResponse } from "./problems.ts";
+import type { RepositoryIndexClient } from "./repository-index.ts";
+import { registerRepositoryRoutes } from "./repository-routes.ts";
 import {
   EndpointNotImplemented,
   GitServiceStub,
@@ -29,11 +34,19 @@ export interface AppDependencies {
    * Object bound as `NAMESPACES`; tests substitute a local one.
    */
   readonly namespaceRegistry?: (env: ApiEnv) => NamespaceRegistryClient;
+  /** Resolves the repository index, which shares the registry's object. */
+  readonly repositoryIndex?: (env: ApiEnv) => RepositoryIndexClient;
+  /**
+   * Resolves the per-repository Durable Objects bound as `REPOSITORIES`.
+   */
+  readonly repositoryObjects?: (env: ApiEnv) => RepositoryObjects;
 }
 
 export const createApp = ({
   gitService = GitServiceStub,
   namespaceRegistry = namespaceRegistryFromEnv,
+  repositoryIndex = repositoryIndexFromEnv,
+  repositoryObjects = repositoryObjectsFromEnv,
 }: AppDependencies = {}) => {
   // Bindings come from the Alchemy stack, so `context.env.NAMESPACES` is the
   // same Durable Object namespace that `alchemy.run.ts` provisions.
@@ -43,7 +56,8 @@ export const createApp = ({
     context.json({ service: "open-relic", status: "ok" }),
   );
 
-  registerNamespaceRoutes(app, namespaceRegistry);
+  registerNamespaceRoutes(app, namespaceRegistry, repositoryObjects);
+  registerRepositoryRoutes(app, repositoryIndex, repositoryObjects);
 
   const invokeStub = async (operation: EndpointId): Promise<Response> => {
     const failure = await Effect.runPromise(

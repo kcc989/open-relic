@@ -54,3 +54,19 @@ export const notFound = (
   detail,
   operation,
 });
+
+/**
+ * A name that is already taken. The `type` is the caller's, because a client
+ * distinguishes a taken namespace slug from a taken repository name by it.
+ */
+export const conflict = (
+  operation: EndpointId,
+  type: string,
+  detail: string,
+): ProblemInit => ({
+  type,
+  title: "Conflict",
+  status: 409,
+  detail,
+  operation,
+});
