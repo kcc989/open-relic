@@ -1,0 +1,8 @@
+node_modules/
+.alchemy/
+dist/
+*.tsbuildinfo
+.dev.vars
+.env
+.env.*
+!.env.example
