@@ -8,6 +8,7 @@ import { migrate } from "drizzle-orm/durable-sqlite/migrator";
 
 import migrations from "../drizzle/repository/migrations.js";
 import { fail } from "./envelope.ts";
+import type { PackBase, PackSummary } from "./pack.ts";
 import {
   RepositoryStore,
   type RepositoryInit,
@@ -48,6 +49,14 @@ export class RepositoryObject extends DurableObject {
 
   advertiseReceivePack(): Promise<ReadableStream<Uint8Array>> {
     return this.#store.advertiseReceivePack();
+  }
+
+  readPack(pack: ReadableStream<Uint8Array>): Promise<PackSummary> {
+    return this.#store.readPack(pack);
+  }
+
+  readObject(oid: string): Promise<PackBase | null> {
+    return this.#store.readObject(oid);
   }
 
   /**

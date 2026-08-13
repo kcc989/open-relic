@@ -1,10 +1,14 @@
 /**
- * The synchronous key-value half of a Durable Object's storage, narrowed to the
- * `string` values Git files are. `ctx.storage.kv` satisfies it structurally,
- * and so does the `Map` the tests use.
+ * The synchronous key-value half of a Durable Object's storage. `ctx.storage.kv`
+ * satisfies it structurally, and so does the `Map` the tests use.
+ *
+ * Most of what goes in here is a Git file, so `string` is the reading without
+ * asking. Object chunks are raw bytes, and name what they want.
  */
 export interface SyncKv {
-  readonly get: (key: string) => string | undefined;
-  readonly put: (key: string, value: string) => void;
-  readonly delete: (key: string) => void;
+  get(key: string): string | undefined;
+  get<T>(key: string): T | undefined;
+  put(key: string, value: string): void;
+  put<T>(key: string, value: T): void;
+  delete(key: string): void;
 }

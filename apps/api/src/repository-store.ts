@@ -18,6 +18,8 @@ import {
   parseHead,
   symbolicHead,
 } from "./head.ts";
+import { ObjectStore } from "./object-store.ts";
+import { readPack, type PackBase, type PackSummary } from "./pack.ts";
 
 /** The Git side of a `git init --bare`; the registry owns naming. */
 export interface RepositoryInit {
@@ -51,10 +53,12 @@ export interface RepositoryObjectClient {
 export class RepositoryStore {
   readonly #db: SyncSqliteDatabase;
   readonly #kv: SyncKv;
+  readonly #objects: ObjectStore;
 
   constructor(db: SyncSqliteDatabase, kv: SyncKv) {
     this.#db = db;
     this.#kv = kv;
+    this.#objects = new ObjectStore(db, kv);
   }
 
   /**
@@ -114,6 +118,25 @@ export class RepositoryStore {
     const rows = await this.#db.select().from(refs).orderBy(asc(refs.name));
 
     return rows.map((row) => ({ name: row.name, oid: row.objectId }));
+  }
+
+  /**
+   * Reads a pack into the repository's objects, leaving them unreachable until
+   * a ref names them — which is what the advertisement above will list once
+   * push lands. The stream is consumed as it arrives rather than buffered, so a
+   * pack far larger than the object's memory is fine.
+   */
+  readPack(pack: ReadableStream<Uint8Array>): Promise<PackSummary> {
+    return readPack(pack, this.#objects);
+  }
+
+  /** `null` when the repository does not hold that object. */
+  readObject(oid: string): Promise<PackBase | null> {
+    return this.#objects.read(oid);
+  }
+
+  hasObject(oid: string): Promise<boolean> {
+    return this.#objects.has(oid);
   }
 
   /** Missing or unreadable contents read the same as a detached HEAD. */

@@ -1,4 +1,6 @@
-import { sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+
+import { OBJECT_TYPES } from "../object.ts";
 
 /**
  * Deliberately no namespace or name: the registry owns naming. Nor HEAD — that
@@ -36,3 +38,33 @@ export const refs = sqliteTable("refs", {
 });
 
 export type RefRow = typeof refs.$inferSelect;
+
+/**
+ * One row per Git object, with the bytes themselves in the KV half under
+ * `o:<oid>:<n>` (ADR-0002). `chunk_count` is what tells a read how many keys to
+ * ask for, so the row and the chunks are only meaningful together.
+ */
+export const objects = sqliteTable("objects", {
+  oid: text("oid").primaryKey(),
+  type: text("type", { enum: OBJECT_TYPES }).notNull(),
+  size: integer("size").notNull(),
+  chunkCount: integer("chunk_count").notNull(),
+});
+
+export type ObjectRow = typeof objects.$inferSelect;
+
+/**
+ * The delta an object arrived as, when it arrived as one, chunked under
+ * `d:<oid>:<n>`. Nothing reads it until fetch lands; it is here because the
+ * pack passes through our hands exactly once (ADR-0002).
+ */
+export const objectDeltas = sqliteTable("object_deltas", {
+  oid: text("oid")
+    .primaryKey()
+    .references(() => objects.oid, { onDelete: "cascade" }),
+  baseOid: text("base_oid").notNull(),
+  size: integer("size").notNull(),
+  chunkCount: integer("chunk_count").notNull(),
+});
+
+export type ObjectDeltaRow = typeof objectDeltas.$inferSelect;

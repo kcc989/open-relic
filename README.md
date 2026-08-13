@@ -257,6 +257,80 @@ files plus `packed-refs`: that split exists because of a filesystem, and a push
 has to move several refs in one transaction. Nothing writes to it yet — the
 advertisement is a read of an empty ref store until push lands.
 
+## Objects and packs
+
+`readPack` is the next of the named RPC methods
+[ADR-0004](./docs/adr/0004-git-reaches-a-repository-over-rpc.md) calls for, one
+per Git operation: it takes the byte stream of a Git pack and leaves the
+repository holding every object the pack carried, named by SHA-1. Streams cross
+the RPC boundary, so a pack reaches the object without the Worker buffering it.
+Nothing calls it over HTTP yet — receive-pack lands with push, alongside the ref
+updates that make these objects reachable — but the storage and the parse are
+what everything Git-shaped is built on.
+
+Objects are stored inflated: metadata in the `objects` table, bytes in the
+object's synchronous KV storage under `o:<oid>:<n>`, split into 1.5 MiB chunks
+because Durable Object storage caps a key and its value together at 2 MB. When
+an object arrived as a **delta**, the raw delta goes under `d:<oid>:<n>` with its
+base's hash in `object_deltas` — nothing reads it until fetch lands, but the pack
+passes through our hands exactly once. See
+[ADR-0002](./docs/adr/0002-git-objects-are-chunked-rows-in-the-repository-object.md).
+
+The parse is a single streaming pass, and that is the whole point of storing
+objects this way. Each resolved object is written the moment it is complete, so
+a delta resolves by reading its base back out of storage rather than by holding
+the pack in memory: peak residency is one object, one base, and one stream
+chunk, independent of pack size. `apps/api/test/pack.test.ts` measures that
+directly — a pack four times longer is read with no more in flight. A rewrite
+that buffered the pack would pass every other test and lose the reason the store
+looks like this.
+
+| Module | What it is |
+| --- | --- |
+| `src/pack.ts` | The pack reader: entry headers, `ofs-delta` and `ref-delta` resolution, the trailing checksum |
+| `src/object-store.ts` | Objects as chunked rows, and the sink the pack is read into |
+| `src/inflate.ts` | A resumable zlib decompressor |
+| `src/sha1.ts` | Incremental SHA-1 |
+| `src/delta.ts` | Git's copy/insert delta encoding |
+
+`DecompressionStream("deflate")` cannot do this job: a pack is a concatenation
+of zlib streams with no length prefix, so the next object can only be found by
+being told how many input bytes the last stream consumed, which the platform
+stream hides. `crypto.subtle.digest` is likewise whole-buffer only, and the
+pack's trailing checksum covers a stream we never buffer. Both are hand-written
+for that reason and for no other.
+
+Residency is bounded rather than merely small, because every size in a pack is a
+number the sender chose and is read before a byte of the object arrives. An
+entry declaring more than `MAX_OBJECT_BYTES`, and a delta declaring a result
+larger than that, are refused on the header — before the buffer is allocated, so
+the answer is an `object-too-large` rejection rather than the runtime killing
+the object. The limit is 32 MiB because resolving a delta holds three of these
+at once; lifting it means inflating whole objects straight into chunks instead
+of into one buffer, since only a delta's base genuinely has to be resident.
+
+Both delta encodings resolve, including chains several deep. Thin packs are out
+of scope, which is what advertising `no-thin` promises the client: a delta whose
+base is nowhere is a `missing-base` error rather than a case to handle.
+
+Failures are a `PackError` with a code, and the code is a Git fact rather than
+an HTTP one — the object owns Git and the Worker owns the envelope, so push maps
+these onto Artifacts' documented codes when it lands:
+
+| `PackError.code` | Artifacts code |
+| --- | --- |
+| `object-too-large` | `memoryLimit` (10402) |
+| `not-a-pack`, `unsupported-version`, `truncated`, `checksum-mismatch`, `trailing-bytes`, `missing-base`, `corrupt` | `invalidInput` (10100) |
+
+That `memoryLimit` exists in Artifacts' own list is the corroboration for the
+ceiling above: refusing an object too big to hold is a documented answer, not an
+invention of ours.
+
+`apps/api/test/fixtures` holds packs written by a real Git client, alongside the
+object ids that client reported; `fixtures/generate.sh` rebuilds them. Agreeing
+with Git about what its own objects are called is the only test that matters
+here, so it runs against both delta encodings.
+
 ## Database
 
 Drizzle is the ORM. Each Durable Object class has its own storage, so each has
@@ -287,11 +361,12 @@ Tests construct one over `bun:sqlite` and migrate it from the same `drizzle/`
 folder, so the queries and the generated schema run for real without a Workers
 runtime — the only thing the tests skip is the RPC hop.
 
-Git files are the exception to the schema. `RepositoryStore` also takes the
+Git bytes are the exception to the schema. `RepositoryStore` also takes the
 synchronous KV half of the same storage, because `HEAD` is stored as the file
-Git writes rather than as columns; the tests hand it a `Map`. KV and SQL are one
-SQLite database inside the object, so a row and a file written in the same
-storage turn commit together.
+Git writes rather than as columns, and because an object's bytes are chunks
+rather than a column; the tests hand it a `Map` that structured-clones the way
+the real thing does. KV and SQL are one SQLite database inside the object, so a
+row and a file written in the same storage turn commit together.
 
 The registry's transactions run synchronously (`.all()` rather than `await`)
 because the driver is synchronous: a transaction body that yielded would commit
