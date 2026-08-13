@@ -11,8 +11,8 @@ Artifacts should work against an installation with nothing changed but the host.
 what that binds us to, and where the API below does not match yet.
 
 **`git push` works.** The namespace and repository APIs are implemented, and a
-Git client can create and fast-forward branches over Git Smart HTTP. Everything
-else — tokens, contents, forks, imports, and the fetch half of Git — is still a
+Git client can create and fast-forward branches over authenticated Git Smart
+HTTP. Everything else — contents, forks, imports, and the fetch half of Git — is still a
 registered route that answers `501`:
 
 - Hono routes for every REST and Git Smart HTTP endpoint in the initial API
@@ -38,6 +38,12 @@ Every JSON response is the v4 envelope:
 ```json
 { "result": {}, "success": true, "errors": [], "messages": [] }
 ```
+
+Every route rooted at `/namespaces` is the installation's control plane and
+requires `Authorization: Bearer $OPEN_RELIC_API_TOKEN`. Configure the same long,
+random value on the Worker and in the client. This installation API token is
+distinct from the short-lived, repo-scoped `art_v1_…` tokens used by Git; an
+unset installation token closes the control plane rather than opening it.
 
 A failure keeps the shape and moves into `errors`, using
 [Artifacts' documented codes](https://developers.cloudflare.com/artifacts/api/errors/):
@@ -122,6 +128,7 @@ and may not be one of the reserved segments of the HTTP surface (`api`, `git`,
 
 ```sh
 curl -X POST http://localhost:1337/namespaces \
+  -H "Authorization: Bearer $OPEN_RELIC_API_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"slug":"acme","display_name":"Acme, Inc."}'
 ```
@@ -175,11 +182,10 @@ defaulting to `created_at` descending. `search` filters on an infix of the name.
 `limit` defaults to 50 and caps at 200.
 
 The remote is built from the host the request arrived on, so an installation
-advertises whatever host the client actually reached it at. The token is a
-correctly shaped `art_v1_<40 hex>?expires=<unix seconds>` secret — **nothing
-stores or verifies it yet**, because the token API is still a stub and the Git
-surface answers `501`. Persisting it belongs with the work that makes tokens
-checkable.
+advertises whatever host the client actually reached it at. The returned token
+is a persisted, write-scoped `art_v1_<40 hex>?expires=<unix seconds>` token for
+that repository. Only its SHA-256 digest is stored; its plaintext is returned
+once in the create response and cannot be recovered later.
 
 A name is lowercase alphanumerics with interior dots, underscores, and hyphens,
 at most 100 characters, and may not end in `.git` — `/git/:namespace/:repo.git`
@@ -192,8 +198,29 @@ it points at are never removed by the same layer.
 
 ```sh
 curl -X POST http://localhost:1337/namespaces/acme/repos \
+  -H "Authorization: Bearer $OPEN_RELIC_API_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"name":"demo","description":"Anvil firmware"}'
+```
+
+## Tokens
+
+Tokens are repo-scoped Git credentials with `read` or `write` scope and an
+expiry. They live in the registry so a Git request can be refused before the
+repository is resolved. Revocation is retained as state for token listings;
+deleting a repository or namespace cascades to its tokens.
+
+| Endpoint                                                               | Behavior                                                               |
+| ---------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `POST /namespaces/:namespace/tokens`                                   | Mints for the body’s `repo`; defaults to write scope and a 24-hour TTL |
+| `GET /namespaces/:namespace/repos/:repo/tokens?state=&per_page=&page=` | Lists metadata and offset pagination; never returns plaintext          |
+| `DELETE /namespaces/:namespace/tokens/:id`                             | Revokes the token and returns `{ "id": … }`                            |
+
+```sh
+curl -X POST http://localhost:1337/namespaces/acme/tokens \
+  -H "Authorization: Bearer $OPEN_RELIC_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"repo":"demo","scope":"write","ttl":3600}'
 ```
 
 ## Git Smart HTTP
@@ -204,7 +231,8 @@ the capabilities it supports. The push side of the protocol is implemented, from
 that advertisement through to the refs a push moves.
 
 ```sh
-curl 'http://localhost:1337/git/acme/demo.git/info/refs?service=git-receive-pack'
+curl 'http://localhost:1337/git/acme/demo.git/info/refs?service=git-receive-pack' \
+  -H "Authorization: Bearer $OPEN_RELIC_TOKEN"
 ```
 
 ```text
@@ -238,19 +266,21 @@ that is not a v4 envelope. Failures on this path still are — a Git client read
 the status code and little else, and there is no reason for a second error
 shape.
 
-The path from a request to a repository is: the Worker resolves
-`namespace/repo` in the registry, passes an authorization seam, and calls a
-named RPC method on the repository object, which returns a stream of pkt-lines.
+The path from a request to a repository is: the Worker authorizes the token for
+`namespace/repo`, resolves that name in the registry, and calls a named RPC
+method on the repository object, which returns a stream of pkt-lines.
 `RepositoryObject`'s `fetch` handler is not part of that path and answers `501`.
 See [ADR-0004](./docs/adr/0004-git-reaches-a-repository-over-rpc.md).
 
-There are no credentials yet, so pushes are refused unless the installation sets
-`ALLOW_ANONYMOUS_WRITE="true"`. An unset variable is a refusal rather than a
-default — an installation that has never heard of it is closed, not open to the
-world. Repo-scoped tokens replace it.
+Bearer authentication uses the full token returned by the REST API. HTTP Basic
+uses any non-empty username and the token secret — the `art_v1_…` half before
+`?expires=` — as its password. A push requires write scope; missing, expired,
+revoked, read-scoped, or differently repo-scoped tokens are refused before the
+repository lookup.
 
 ```sh
-ALLOW_ANONYMOUS_WRITE=true bun run deploy
+git -c http.extraHeader="Authorization: Bearer $OPEN_RELIC_TOKEN" \
+  push "$OPEN_RELIC_REMOTE" HEAD:main
 ```
 
 Refs live in a `refs` table in the repository object rather than as Git's loose
@@ -524,9 +554,10 @@ bun run destroy        # tear down the current stage
 ```
 
 CI deploys the `prod` stage from `main` via `.github/workflows/deploy.yml`. It
-needs `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` as repository secrets in
-a `prod` environment; the token needs Workers Scripts:Edit, Workers
-Subdomain:Edit, Workers Observability:Edit, and Account Settings:Read.
+needs `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, and a long random
+`OPEN_RELIC_API_TOKEN` as repository secrets in a `prod` environment. The
+Cloudflare token needs Workers Scripts:Edit, Workers Subdomain:Edit, Workers
+Observability:Edit, and Account Settings:Read.
 
 `GET /healthz` reports liveness:
 
@@ -534,7 +565,7 @@ Subdomain:Edit, Workers Observability:Edit, and Account Settings:Read.
 { "service": "open-relic", "status": "ok" }
 ```
 
-Alongside the endpoints above, routes for forks, imports, tokens, repository
+Alongside the endpoints above, routes for forks, imports, repository
 contents, archives, and both halves of upload-pack are registered from the
 manifest in `packages/contracts/src/index.ts`, answer `501`, and are covered by
 tests.

@@ -1,6 +1,7 @@
 import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
 import * as Effect from "effect/Effect";
+import * as Redacted from "effect/Redacted";
 
 import type { NamespaceRegistryObject } from "./apps/api/src/namespace-registry-object.ts";
 import type { RepositoryObject } from "./apps/api/src/repository-object.ts";
@@ -25,11 +26,9 @@ export const ApiWorker = Cloudflare.Worker("Api", {
     REPOSITORIES: Cloudflare.DurableObject<RepositoryObject>("Repositories", {
       className: "RepositoryObject",
     }),
-    // The Git protocol has no credentials yet, so an installation opts in to
-    // unauthenticated pushes explicitly. Anything but `"true"` — including the
-    // empty string this deploys when the variable is unset — refuses them.
-    // Repo-scoped tokens replace this.
-    ALLOW_ANONYMOUS_WRITE: process.env.ALLOW_ANONYMOUS_WRITE ?? "",
+    // A secret-text binding: Alchemy redacts it from plans and state, while an
+    // empty or absent value makes the entire REST control plane fail closed.
+    OPEN_RELIC_API_TOKEN: Redacted.make(process.env.OPEN_RELIC_API_TOKEN ?? ""),
   },
   observability: {
     enabled: true,

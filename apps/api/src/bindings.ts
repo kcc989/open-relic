@@ -2,6 +2,7 @@ import type { ApiEnv } from "../../../alchemy.run.ts";
 import type { NamespaceRegistryClient } from "./namespace-registry.ts";
 import type { RepositoryIndexClient } from "./repository-index.ts";
 import type { RepositoryObjectClient } from "./repository-store.ts";
+import type { TokenRegistryClient } from "./token-registry.ts";
 
 /**
  * Every request resolves the same id, so allocating a namespace slug or a
@@ -17,6 +18,10 @@ export const namespaceRegistryFromEnv = (env: ApiEnv): NamespaceRegistryClient =
  * same stub through a narrower interface.
  */
 export const repositoryIndexFromEnv = (env: ApiEnv): RepositoryIndexClient =>
+  env.NAMESPACES.getByName(NAMESPACE_REGISTRY_KEY);
+
+/** Token lookup shares the registry object so it can precede repository resolution. */
+export const tokenRegistryFromEnv = (env: ApiEnv): TokenRegistryClient =>
   env.NAMESPACES.getByName(NAMESPACE_REGISTRY_KEY);
 
 /** The repository objects themselves, addressed by the ids the index stores. */

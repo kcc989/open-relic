@@ -46,22 +46,45 @@ export const invalidInput = (message: string, pointer?: string): Response => {
   return fail(400, error);
 };
 
-export const invalidRepoName = (message: string): Response =>
+export const invalidRepoName = (message: string, pointer = "/name"): Response =>
   fail(400, {
     code: ERROR_CODES.invalidRepoName,
     message,
-    source: { pointer: "/name" },
+    source: { pointer },
+  });
+
+export const invalidTtl = (message: string): Response =>
+  fail(400, {
+    code: ERROR_CODES.invalidTtl,
+    message,
+    source: { pointer: "/ttl" },
   });
 
 export const notFound = (message: string): Response =>
   fail(404, { code: ERROR_CODES.notFound, message });
 
-/**
- * Not `401`: the Git surface has no credential to ask for yet, so challenging
- * the client would send it round a loop it cannot finish.
- */
+/** A credential was absent or did not grant the requested Git operation. */
 export const forbidden = (message: string): Response =>
   fail(403, { code: ERROR_CODES.forbidden, message });
+
+const authenticationRequired = (message: string, challenge: string): Response =>
+  envelope(
+    {
+      result: null,
+      success: false,
+      errors: [{ code: ERROR_CODES.forbidden, message }],
+    },
+    { status: 401, headers: { "WWW-Authenticate": challenge } },
+  );
+
+export const controlPlaneAuthenticationRequired = (): Response =>
+  authenticationRequired(
+    "A valid installation API token is required.",
+    'Bearer realm="Open Relic control plane"',
+  );
+
+export const gitAuthenticationRequired = (message: string): Response =>
+  authenticationRequired(message, 'Basic realm="Open Relic Git"');
 
 export const alreadyExists = (message: string): Response =>
   fail(409, { code: ERROR_CODES.alreadyExists, message });

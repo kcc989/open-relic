@@ -34,17 +34,13 @@ Every Git request passes `AuthorizeGitRequest` before the repository is
 resolved, carrying the credential-bearing request and the `namespace/repository`
 it is being spent against — the two things a token check needs.
 
-Today the only implementation allows everyone, gated on the installation setting
-`ALLOW_ANONYMOUS_WRITE="true"`. Absent or unrecognized configuration is a
-refusal, not a default: an installation deployed without ever hearing of the
-variable is closed rather than open to the world, and a typo in the value fails
-the same way.
+The implementation hashes the presented token secret and checks the registry's
+repo-scoped token row for namespace, repository, scope, revocation, and expiry.
+The Bearer spelling carries the full token; HTTP Basic carries its secret half
+as the password and ignores the username, matching Artifacts.
 
 The refusal comes _before_ the registry lookup, so whether a repository exists
 is not something an unauthorized client can learn.
-
-Repo-scoped tokens replace the implementation and remove the variable. The seam
-is what makes that a one-file change.
 
 ## Consequences
 
@@ -53,6 +49,11 @@ lets the tests drive real queries against real migrations without a Workers
 runtime — including the advertisement, since the encoding lives in the store
 rather than in the shell.
 
-Until tokens land, an installation that wants to accept pushes is one that
-accepts them from anyone who can reach it. That is why the variable is spelled
-out in full rather than defaulted, and why it is a deploy-time decision.
+There is no anonymous-write mode. A missing, malformed, expired, revoked,
+read-scoped, or differently scoped token is refused before the repository
+lookup, so it cannot reveal whether another repository exists.
+
+The REST control plane is separately protected by the installation API token.
+Without that boundary, an anonymous caller could mint its own write Token and
+make this Git check ceremonial; token issue, list, and revoke never sit outside
+the control-plane gate.

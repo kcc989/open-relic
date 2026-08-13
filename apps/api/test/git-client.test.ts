@@ -3,8 +3,6 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { ApiEnv } from "../../../alchemy.run.ts";
-import { ANONYMOUS_WRITE_VARIABLE } from "../src/git/authorization.ts";
 import { createGitTestApp, type TestApp } from "./support/app.ts";
 
 const git = Bun.which("git");
@@ -12,9 +10,6 @@ const git = Bun.which("git");
 if (git === null) {
   throw new Error("Real Git compatibility tests require a git executable on PATH.");
 }
-
-// SAFETY: the in-process installation has no other Worker bindings to supply.
-const ENV = { [ANONYMOUS_WRITE_VARIABLE]: "true" } as ApiEnv;
 
 interface GitResult {
   readonly exitCode: number;
@@ -88,11 +83,19 @@ beforeEach(async () => {
   server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
-    fetch: (request) => harness.app.fetch(request, ENV),
+    fetch: (request) => harness.app.fetch(request),
   });
 
   workingTree = mkdtempSync(join(tmpdir(), "open-relic-git-client-"));
-  remote = new URL("/git/acme/demo.git", server.url).toString();
+  const repositoryToken = harness.repositoryToken;
+  if (repositoryToken === null) {
+    throw new Error("The Git test repository did not return a credential.");
+  }
+
+  const remoteUrl = new URL("/git/acme/demo.git", server.url);
+  remoteUrl.username = "x";
+  remoteUrl.password = repositoryToken.split("?expires=")[0]!;
+  remote = remoteUrl.toString();
 
   await gitSucceeds("init", "--quiet", "--initial-branch=main");
   await gitSucceeds("config", "user.name", "Open Relic Test");

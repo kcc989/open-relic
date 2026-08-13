@@ -1,26 +1,21 @@
 import { ERROR_CODES } from "@open-relic/contracts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
-import type { ApiEnv } from "../../../alchemy.run.ts";
-import { ANONYMOUS_WRITE_VARIABLE } from "../src/git/authorization.ts";
 import { createGitTestApp, type TestApp } from "./support/app.ts";
 import { errorCode } from "./support/envelope.ts";
 
 const INFO_REFS = "http://local.test/git/acme/demo.git/info/refs";
 const ADVERTISE = `${INFO_REFS}?service=git-receive-pack`;
 
-// SAFETY: these tests only read ALLOW_ANONYMOUS_WRITE from the Worker env.
-const ANONYMOUS_WRITE_ALLOWED = {
-  [ANONYMOUS_WRITE_VARIABLE]: "true",
-} as ApiEnv;
-
 const MAIN = "1a2b3c4d5e6f708192a3b4c5d6e7f80912345678";
 const NEXT = "abcdef0123456789abcdef0123456789abcdef01";
 
 let harness: TestApp;
 
-const advertise = (url = ADVERTISE, env: ApiEnv = ANONYMOUS_WRITE_ALLOWED) =>
-  harness.app.request(url, undefined, env);
+const advertise = (url = ADVERTISE, token: string | null = harness.repositoryToken) =>
+  harness.app.request(
+    new Request(url, token === null ? {} : { headers: { Authorization: `Bearer ${token}` } }),
+  );
 
 beforeEach(async () => {
   harness = await createGitTestApp();
@@ -70,26 +65,26 @@ describe("GET /git/:namespace/:repo.git/info/refs?service=git-receive-pack", () 
     );
   });
 
-  test("404s an unknown repository without waking a repository object", async () => {
+  test("does not let a token for one repository probe another", async () => {
     const live = [...harness.objects.liveIds];
 
     const response = await advertise(
       "http://local.test/git/acme/nope.git/info/refs?service=git-receive-pack",
     );
 
-    expect(response.status).toBe(404);
-    expect(await errorCode(response)).toBe(ERROR_CODES.notFound);
+    expect(response.status).toBe(401);
+    expect(await errorCode(response)).toBe(ERROR_CODES.forbidden);
     expect(harness.objects.liveIds).toEqual(live);
   });
 
-  test("404s an unknown namespace without waking a repository object", async () => {
+  test("does not let a token for one namespace probe another", async () => {
     const live = [...harness.objects.liveIds];
 
     const response = await advertise(
       "http://local.test/git/nope/demo.git/info/refs?service=git-receive-pack",
     );
 
-    expect(response.status).toBe(404);
+    expect(response.status).toBe(401);
     expect(harness.objects.liveIds).toEqual(live);
   });
 
@@ -105,24 +100,22 @@ describe("GET /git/:namespace/:repo.git/info/refs?service=git-receive-pack", () 
   });
 });
 
-describe("without the anonymous-write configuration", () => {
-  // SAFETY: a Worker deployed without the binding has an empty env object at runtime.
-  const unconfigured = {} as ApiEnv;
-
+describe("without a token", () => {
   test("refuses the request outright", async () => {
-    const response = await advertise(ADVERTISE, unconfigured);
+    const response = await advertise(ADVERTISE, null);
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(401);
+    expect(response.headers.get("www-authenticate")).toBe('Basic realm="Open Relic Git"');
     expect(await errorCode(response)).toBe(ERROR_CODES.forbidden);
   });
 
   test("refuses before the repository is resolved, so nothing leaks whether it exists", async () => {
     const response = await advertise(
       "http://local.test/git/acme/nope.git/info/refs?service=git-receive-pack",
-      unconfigured,
+      null,
     );
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(401);
   });
 });
 

@@ -7,9 +7,10 @@ import {
 import { describe, expect, test } from "bun:test";
 
 import { createApp } from "../src/app.ts";
+import { allowControlPlane } from "../src/control-plane-authorization.ts";
 import { envelope, errorCode } from "./support/envelope.ts";
 
-const app = createApp();
+const app = createApp({ authorizeControlPlane: allowControlPlane });
 
 describe("health", () => {
   test("reports that the worker is running", async () => {

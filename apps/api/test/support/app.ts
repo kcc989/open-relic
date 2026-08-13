@@ -2,10 +2,15 @@ import {
   NAMESPACES_PATH,
   type CreateNamespaceRequest,
   type CreateRepoRequest,
+  type CreateRepoResult,
 } from "@open-relic/contracts";
 
 import type { RepositoryObjects } from "../../src/bindings.ts";
 import { createApp } from "../../src/app.ts";
+import {
+  allowControlPlane,
+  type AuthorizeControlPlaneRequest,
+} from "../../src/control-plane-authorization.ts";
 import { NamespaceRegistry } from "../../src/namespace-registry.ts";
 import { RepositoryIndex } from "../../src/repository-index.ts";
 import {
@@ -13,12 +18,14 @@ import {
   type RepositoryObjectClient,
   type RepositorySnapshot,
 } from "../../src/repository-store.ts";
+import { TokenRegistry } from "../../src/token-registry.ts";
 import {
   createTestDatabase,
   createTestRepositoryStorage,
   seedRefs,
   type TestRepositoryStorage,
 } from "./database.ts";
+import { result } from "./envelope.ts";
 
 /**
  * The `REPOSITORIES` binding, standing in for the Durable Object namespace.
@@ -101,6 +108,8 @@ export class FakeRepositoryObjects implements RepositoryObjects {
 export interface TestApp {
   readonly app: ReturnType<typeof createApp>;
   readonly objects: FakeRepositoryObjects;
+  /** The write token returned once when `createGitTestApp` creates its repository. */
+  readonly repositoryToken: string | null;
   readonly close: () => void;
 }
 
@@ -112,8 +121,9 @@ export interface TestApp {
  */
 export const createGitTestApp = async (
   repository: Partial<CreateRepoRequest> = {},
+  now: () => Date = () => new Date(),
 ): Promise<TestApp> => {
-  const harness = createTestApp();
+  const harness = createTestApp(now);
 
   const post = (path: string, body: CreateNamespaceRequest | CreateRepoRequest) =>
     harness.app.request(
@@ -125,26 +135,35 @@ export const createGitTestApp = async (
     );
 
   await post(NAMESPACES_PATH, { slug: "acme" });
-  await post(`${NAMESPACES_PATH}/acme/repos`, { name: "demo", ...repository });
+  const created = await result<CreateRepoResult>(
+    await post(`${NAMESPACES_PATH}/acme/repos`, { name: "demo", ...repository }),
+  );
 
-  return harness;
+  return { ...harness, repositoryToken: created.token };
 };
 
-export const createTestApp = (): TestApp => {
+export const createTestApp = (
+  now: () => Date = () => new Date(),
+  authorizeControlPlane: AuthorizeControlPlaneRequest = allowControlPlane,
+): TestApp => {
   const registryDatabase = createTestDatabase();
   const registry = new NamespaceRegistry(registryDatabase.db);
   const index = new RepositoryIndex(registryDatabase.db);
+  const tokenRegistry = new TokenRegistry(registryDatabase.db, now);
   const objects = new FakeRepositoryObjects();
 
   const app = createApp({
     namespaceRegistry: () => registry,
     repositoryIndex: () => index,
     repositoryObjects: () => objects,
+    tokenRegistry: () => tokenRegistry,
+    authorizeControlPlane,
   });
 
   return {
     app,
     objects,
+    repositoryToken: null,
     close: () => {
       objects.close();
       registryDatabase.close();
