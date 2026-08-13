@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import type { SyncSqliteDatabase } from "../../src/db/database.ts";
 import type { SyncKv } from "../../src/db/kv.ts";
+import { refs } from "../../src/db/repository-schema.ts";
 
 const migrationsFolder = (durableObject: "registry" | "repository"): string =>
   fileURLToPath(new URL(`../../drizzle/${durableObject}`, import.meta.url));
@@ -71,3 +72,22 @@ export const createTestRepositoryStorage = (): TestRepositoryStorage => ({
   ...createDatabase("repository"),
   kv: createTestKv(),
 });
+
+/**
+ * Refs written straight into a repository's storage. A push is what will put
+ * them there; until it can, this is how a test gets a repository that holds
+ * something to advertise.
+ */
+export const seedRefs = async (
+  db: SyncSqliteDatabase,
+  entries: Readonly<Record<string, string>>,
+): Promise<void> => {
+  const rows = Object.entries(entries).map(([name, objectId]) => ({
+    name,
+    objectId,
+  }));
+
+  if (rows.length > 0) {
+    await db.insert(refs).values(rows);
+  }
+};

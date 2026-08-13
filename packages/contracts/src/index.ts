@@ -1,4 +1,12 @@
-export const API_BASE_PATH = "/api/v1" as const;
+/**
+ * Artifacts documents its routes relative to `/accounts/$ACCOUNT_ID`, hung off
+ * `https://api.cloudflare.com/client/v4`. An installation is single-tenant and
+ * is nothing but Artifacts, so it serves the same endpoints at the root: every
+ * segment from `/namespaces` rightward matches Artifacts exactly, and the base
+ * URL is the one thing a client changes — the same thing it already changes for
+ * the host.
+ */
+export const NAMESPACES_PATH = "/namespaces" as const;
 
 export type HttpMethod = "DELETE" | "GET" | "PATCH" | "POST";
 
@@ -9,158 +17,191 @@ export interface EndpointContract {
   readonly samplePath: string;
 }
 
+const NAMESPACE = `${NAMESPACES_PATH}/:namespace` as const;
+const REPO = `${NAMESPACE}/repos/:repo` as const;
+const SAMPLE_NAMESPACE = `${NAMESPACES_PATH}/acme` as const;
+const SAMPLE_REPO = `${SAMPLE_NAMESPACE}/repos/demo` as const;
+
 export const REST_ENDPOINTS = [
+  // Artifacts creates a namespace implicitly with its first repository and
+  // documents only list and get. Explicit create and delete are ours; they sit
+  // on methods Artifacts has not spoken for.
   {
     id: "namespaces.create",
     method: "POST",
-    path: `${API_BASE_PATH}/namespaces`,
-    samplePath: `${API_BASE_PATH}/namespaces`,
+    path: NAMESPACES_PATH,
+    samplePath: NAMESPACES_PATH,
   },
   {
     id: "namespaces.list",
     method: "GET",
-    path: `${API_BASE_PATH}/namespaces`,
-    samplePath: `${API_BASE_PATH}/namespaces`,
+    path: NAMESPACES_PATH,
+    samplePath: `${NAMESPACES_PATH}?limit=20`,
   },
   {
     id: "namespaces.get",
     method: "GET",
-    path: `${API_BASE_PATH}/namespaces/:namespace`,
-    samplePath: `${API_BASE_PATH}/namespaces/acme`,
+    path: NAMESPACE,
+    samplePath: SAMPLE_NAMESPACE,
   },
   {
     id: "namespaces.delete",
     method: "DELETE",
-    path: `${API_BASE_PATH}/namespaces/:namespace`,
-    samplePath: `${API_BASE_PATH}/namespaces/acme`,
+    path: NAMESPACE,
+    samplePath: SAMPLE_NAMESPACE,
   },
   {
     id: "repositories.create",
     method: "POST",
-    path: `${API_BASE_PATH}/namespaces/:namespace/repos`,
-    samplePath: `${API_BASE_PATH}/namespaces/acme/repos`,
+    path: `${NAMESPACE}/repos`,
+    samplePath: `${SAMPLE_NAMESPACE}/repos`,
   },
   {
     id: "repositories.list",
     method: "GET",
-    path: `${API_BASE_PATH}/namespaces/:namespace/repos`,
-    samplePath: `${API_BASE_PATH}/namespaces/acme/repos`,
+    path: `${NAMESPACE}/repos`,
+    samplePath: `${SAMPLE_NAMESPACE}/repos?limit=20&sort=updated_at&direction=desc`,
   },
   {
     id: "repositories.get",
     method: "GET",
-    path: `${API_BASE_PATH}/namespaces/:namespace/repos/:repo`,
-    samplePath: `${API_BASE_PATH}/namespaces/acme/repos/demo`,
+    path: REPO,
+    samplePath: SAMPLE_REPO,
   },
   {
     id: "repositories.update",
     method: "PATCH",
-    path: `${API_BASE_PATH}/namespaces/:namespace/repos/:repo`,
-    samplePath: `${API_BASE_PATH}/namespaces/acme/repos/demo`,
+    path: REPO,
+    samplePath: SAMPLE_REPO,
   },
   {
     id: "repositories.delete",
     method: "DELETE",
-    path: `${API_BASE_PATH}/namespaces/:namespace/repos/:repo`,
-    samplePath: `${API_BASE_PATH}/namespaces/acme/repos/demo`,
+    path: REPO,
+    samplePath: SAMPLE_REPO,
   },
   {
     id: "repositories.fork",
     method: "POST",
-    path: `${API_BASE_PATH}/namespaces/:namespace/repos/:repo/fork`,
-    samplePath: `${API_BASE_PATH}/namespaces/acme/repos/demo/fork`,
+    path: `${REPO}/fork`,
+    samplePath: `${SAMPLE_REPO}/fork`,
   },
   {
     id: "repositories.import",
     method: "POST",
-    path: `${API_BASE_PATH}/namespaces/:namespace/repos/:repo/import`,
-    samplePath: `${API_BASE_PATH}/namespaces/acme/repos/demo/import`,
+    path: `${REPO}/import`,
+    samplePath: `${SAMPLE_REPO}/import`,
   },
+  // A token is minted for a repository but issued by the namespace: the request
+  // body names the repo, so one namespace-scoped route mints for all of them.
   {
     id: "tokens.create",
     method: "POST",
-    path: `${API_BASE_PATH}/namespaces/:namespace/repos/:repo/tokens`,
-    samplePath: `${API_BASE_PATH}/namespaces/acme/repos/demo/tokens`,
+    path: `${NAMESPACE}/tokens`,
+    samplePath: `${SAMPLE_NAMESPACE}/tokens`,
   },
   {
     id: "tokens.list",
     method: "GET",
-    path: `${API_BASE_PATH}/namespaces/:namespace/repos/:repo/tokens`,
-    samplePath: `${API_BASE_PATH}/namespaces/acme/repos/demo/tokens`,
+    path: `${REPO}/tokens`,
+    samplePath: `${SAMPLE_REPO}/tokens?state=all&per_page=30&page=1`,
   },
   {
     id: "tokens.delete",
     method: "DELETE",
-    path: `${API_BASE_PATH}/namespaces/:namespace/repos/:repo/tokens/:tokenId`,
-    samplePath: `${API_BASE_PATH}/namespaces/acme/repos/demo/tokens/token-1`,
+    path: `${NAMESPACE}/tokens/:tokenId`,
+    samplePath: `${SAMPLE_NAMESPACE}/tokens/0123456789abcdef`,
   },
+  // `refs` and `archive` are ours; the rest are Artifacts' own spellings.
   {
     id: "contents.refs",
     method: "GET",
-    path: `${API_BASE_PATH}/namespaces/:namespace/repos/:repo/refs`,
-    samplePath: `${API_BASE_PATH}/namespaces/acme/repos/demo/refs`,
+    path: `${REPO}/refs`,
+    samplePath: `${SAMPLE_REPO}/refs`,
   },
   {
     id: "contents.log",
     method: "GET",
-    path: `${API_BASE_PATH}/namespaces/:namespace/repos/:repo/log`,
-    samplePath: `${API_BASE_PATH}/namespaces/acme/repos/demo/log`,
+    path: `${REPO}/log`,
+    samplePath: `${SAMPLE_REPO}/log?ref=main&limit=10`,
   },
   {
     id: "contents.commit",
     method: "GET",
-    path: `${API_BASE_PATH}/namespaces/:namespace/repos/:repo/commits/:hash`,
-    samplePath: `${API_BASE_PATH}/namespaces/acme/repos/demo/commits/deadbeef`,
+    path: `${REPO}/commit/:hash`,
+    samplePath: `${SAMPLE_REPO}/commit/deadbeef`,
   },
   {
     id: "contents.tree",
     method: "GET",
-    path: `${API_BASE_PATH}/namespaces/:namespace/repos/:repo/trees/:hash`,
-    samplePath: `${API_BASE_PATH}/namespaces/acme/repos/demo/trees/deadbeef`,
+    path: `${REPO}/tree/:hash`,
+    samplePath: `${SAMPLE_REPO}/tree/deadbeef`,
   },
   {
     id: "contents.blob",
     method: "GET",
-    path: `${API_BASE_PATH}/namespaces/:namespace/repos/:repo/blobs/:hash`,
-    samplePath: `${API_BASE_PATH}/namespaces/acme/repos/demo/blobs/deadbeef`,
+    path: `${REPO}/blob/:hash`,
+    samplePath: `${SAMPLE_REPO}/blob/deadbeef`,
   },
   {
     id: "contents.file",
     method: "GET",
-    path: `${API_BASE_PATH}/namespaces/:namespace/repos/:repo/files/*`,
-    samplePath: `${API_BASE_PATH}/namespaces/acme/repos/demo/files/src/index.ts?ref=main`,
+    path: `${REPO}/file`,
+    samplePath: `${SAMPLE_REPO}/file?ref=main&path=README.md`,
+  },
+  // The ref and the path are both slash-bearing, so the ref takes the first
+  // segment and the wildcard takes the rest.
+  {
+    id: "contents.raw",
+    method: "GET",
+    path: `${REPO}/raw/:ref/*`,
+    samplePath: `${SAMPLE_REPO}/raw/main/README.md`,
   },
   {
     id: "contents.archive",
     method: "GET",
-    path: `${API_BASE_PATH}/namespaces/:namespace/repos/:repo/archive/*`,
-    samplePath: `${API_BASE_PATH}/namespaces/acme/repos/demo/archive/main.tar.gz`,
+    path: `${REPO}/archive/*`,
+    samplePath: `${SAMPLE_REPO}/archive/main.tar.gz`,
   },
 ] as const satisfies readonly EndpointContract[];
+
+/** A clone URL carries the suffix; a stored repository name never does. */
+export const GIT_REPOSITORY_SUFFIX = ".git";
+
+/**
+ * The `.git` suffix is a constraint on the parameter rather than text after it:
+ * a router reads `/git/:namespace/:repo.git/…` as a parameter *named* `repo.git`
+ * that matches a suffix-less URL just as happily.
+ */
+export const GIT_REPOSITORY_PATH = "/git/:namespace/:repo{.+\\.git}" as const;
+
+/** `demo.git` as it arrives from the router, back to the name `demo`. */
+export const repositoryNameFromPath = (parameter: string): string =>
+  parameter.slice(0, -GIT_REPOSITORY_SUFFIX.length);
 
 export const GIT_HTTP_ENDPOINTS = [
   {
     id: "git.uploadPack.advertise",
     method: "GET",
-    path: "/git/:namespace/:repo.git/info/refs",
+    path: `${GIT_REPOSITORY_PATH}/info/refs`,
     samplePath: "/git/acme/demo.git/info/refs?service=git-upload-pack",
   },
   {
     id: "git.uploadPack",
     method: "POST",
-    path: "/git/:namespace/:repo.git/git-upload-pack",
+    path: `${GIT_REPOSITORY_PATH}/git-upload-pack`,
     samplePath: "/git/acme/demo.git/git-upload-pack",
   },
   {
     id: "git.receivePack.advertise",
     method: "GET",
-    path: "/git/:namespace/:repo.git/info/refs",
+    path: `${GIT_REPOSITORY_PATH}/info/refs`,
     samplePath: "/git/acme/demo.git/info/refs?service=git-receive-pack",
   },
   {
     id: "git.receivePack",
     method: "POST",
-    path: "/git/:namespace/:repo.git/git-receive-pack",
+    path: `${GIT_REPOSITORY_PATH}/git-receive-pack`,
     samplePath: "/git/acme/demo.git/git-receive-pack",
   },
 ] as const satisfies readonly EndpointContract[];
@@ -186,6 +227,7 @@ export const IMPLEMENTED_ENDPOINT_IDS = [
   "repositories.list",
   "repositories.get",
   "repositories.delete",
+  "git.receivePack.advertise",
 ] as const satisfies readonly EndpointId[];
 
 export type ImplementedEndpointId = (typeof IMPLEMENTED_ENDPOINT_IDS)[number];
@@ -195,39 +237,102 @@ export const isImplementedEndpoint = (
 ): id is ImplementedEndpointId =>
   (IMPLEMENTED_ENDPOINT_IDS as readonly EndpointId[]).includes(id);
 
-export interface ProblemDetails {
-  readonly type: string;
-  readonly title: string;
-  readonly status: number;
-  readonly detail: string;
-  readonly operation?: EndpointId;
+/** The Git remote handed back on create; only the path shape has to match. */
+export const gitRemotePath = (namespaceSlug: string, name: string): string =>
+  `/git/${namespaceSlug}/${name}.git`;
+
+// ---------------------------------------------------------------------------
+// The Cloudflare v4 envelope
+// ---------------------------------------------------------------------------
+
+export interface ApiError {
+  readonly code: number;
+  readonly message: string;
+  readonly documentation_url?: string;
+  readonly source?: { readonly pointer?: string };
 }
 
-export const PROBLEM_BASE_URI = "https://open-relic.dev/problems" as const;
+/** Keyset pagination: `cursor` is empty once the last page has been handed out. */
+export interface CursorResultInfo {
+  readonly cursor: string;
+  readonly per_page: number;
+  readonly count: number;
+}
 
-export const PROBLEM_TYPES = {
-  invalidRequest: `${PROBLEM_BASE_URI}/invalid-request`,
-  namespaceExists: `${PROBLEM_BASE_URI}/namespace-exists`,
-  notFound: `${PROBLEM_BASE_URI}/not-found`,
-  notImplemented: `${PROBLEM_BASE_URI}/not-implemented`,
-  repositoryExists: `${PROBLEM_BASE_URI}/repository-exists`,
+export interface OffsetResultInfo {
+  readonly page: number;
+  readonly per_page: number;
+  readonly total_pages: number;
+  readonly count: number;
+  readonly total_count: number;
+}
+
+export type ResultInfo = CursorResultInfo | OffsetResultInfo;
+
+/**
+ * Artifacts documents these for the repository list. Namespaces list with the
+ * same `limit`/`cursor` pair and no documented bounds of their own, so they
+ * borrow these rather than inventing a second pair a client would have to learn.
+ */
+export const LIST_DEFAULT_LIMIT = 50;
+export const LIST_MAX_LIMIT = 200;
+
+export interface ApiEnvelope<T> {
+  readonly result: T | null;
+  readonly success: boolean;
+  readonly errors: readonly ApiError[];
+  readonly messages: readonly ApiError[];
+  readonly result_info?: ResultInfo;
+}
+
+/**
+ * Artifacts' documented codes. `notImplemented` and `forbidden` are ours —
+ * Artifacts publishes no code for an unimplemented route because it has none,
+ * and none for a refused Git request because that surface answers in Git's
+ * protocol rather than in this envelope — and both are deliberately outside the
+ * ranges Cloudflare has used.
+ */
+export const ERROR_CODES = {
+  invalidInput: 10100,
+  invalidRepoName: 10101,
+  invalidTtl: 10103,
+  invalidUrl: 10104,
+  remoteAuthRequired: 10106,
+  notFound: 10200,
+  alreadyExists: 10201,
+  importInProgress: 10302,
+  forkInProgress: 10303,
+  internalError: 10400,
+  upstreamUnavailable: 10401,
+  memoryLimit: 10402,
+  notImplemented: 10900,
+  forbidden: 10901,
 } as const;
 
-export interface Namespace {
+// ---------------------------------------------------------------------------
+// Namespaces
+// ---------------------------------------------------------------------------
+
+/**
+ * Artifacts documents `NamespaceName` as a bare string and never the namespace
+ * object, so this shape is ours. `slug` is the vocabulary a namespace is
+ * identified by; the rest follows the v4 surface's snake_case.
+ */
+export interface NamespaceInfo {
   readonly slug: string;
-  readonly displayName: string;
+  readonly display_name: string;
   readonly description: string | null;
-  readonly createdAt: string;
+  readonly created_at: string;
 }
 
-export interface CreateNamespaceBody {
+export interface CreateNamespaceRequest {
   readonly slug: string;
-  readonly displayName?: string;
+  readonly display_name?: string;
   readonly description?: string;
 }
 
-export interface NamespaceListBody {
-  readonly namespaces: readonly Namespace[];
+export interface DeleteNamespaceResult {
+  readonly slug: string;
 }
 
 export const NAMESPACE_SLUG_MAX_LENGTH = 39;
@@ -288,23 +393,50 @@ export const describeNamespaceSlugViolation = (
   }
 };
 
-/** `defaultBranch` is what a fresh clone checks out: the target of `HEAD`. */
-export interface Repository {
-  readonly namespace: string;
+// ---------------------------------------------------------------------------
+// Repositories
+// ---------------------------------------------------------------------------
+
+/** `default_branch` is what a fresh clone checks out: the target of `HEAD`. */
+export interface RepoInfo {
+  readonly id: string;
   readonly name: string;
   readonly description: string | null;
-  readonly defaultBranch: string;
-  readonly createdAt: string;
+  readonly default_branch: string;
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly last_push_at: string | null;
+  /** The URL an imported repository came from; `null` when it was created here. */
+  readonly source: string | null;
+  readonly read_only: boolean;
 }
 
-export interface CreateRepositoryBody {
+export interface RepoWithRemote extends RepoInfo {
+  readonly remote: string;
+}
+
+export interface CreateRepoRequest {
   readonly name: string;
   readonly description?: string;
-  readonly defaultBranch?: string;
+  readonly default_branch?: string;
+  readonly read_only?: boolean;
 }
 
-export interface RepositoryListBody {
-  readonly repositories: readonly Repository[];
+/**
+ * Deliberately narrower than {@link RepoInfo}: Artifacts answers a create with
+ * the identity, the remote, and the one token it will never show again.
+ */
+export interface CreateRepoResult {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string | null;
+  readonly default_branch: string;
+  readonly remote: string;
+  readonly token: string;
+}
+
+export interface DeleteRepoResult {
+  readonly id: string;
 }
 
 export const REPOSITORY_NAME_MAX_LENGTH = 100;
@@ -312,6 +444,22 @@ export const REPOSITORY_DESCRIPTION_MAX_LENGTH = 500;
 export const BRANCH_NAME_MAX_LENGTH = 255;
 
 export const DEFAULT_BRANCH = "main";
+
+export const REPO_SORT_FIELDS = [
+  "created_at",
+  "updated_at",
+  "last_push_at",
+  "name",
+] as const;
+
+export type RepoSortField = (typeof REPO_SORT_FIELDS)[number];
+
+export const SORT_DIRECTIONS = ["asc", "desc"] as const;
+
+export type SortDirection = (typeof SORT_DIRECTIONS)[number];
+
+export const REPO_LIST_DEFAULT_SORT: RepoSortField = "created_at";
+export const REPO_LIST_DEFAULT_DIRECTION: SortDirection = "desc";
 
 /**
  * Wider than {@link NAMESPACE_SLUG_PATTERN} because repository names carry
@@ -412,3 +560,42 @@ export const describeBranchNameViolation = (
       return "That branch name is not a valid Git branch name.";
   }
 };
+
+// ---------------------------------------------------------------------------
+// Tokens
+// ---------------------------------------------------------------------------
+
+export const TOKEN_SCOPES = ["read", "write"] as const;
+
+export type TokenScope = (typeof TOKEN_SCOPES)[number];
+
+export type TokenState = "active" | "expired" | "revoked";
+
+export interface TokenInfo {
+  readonly id: string;
+  readonly scope: TokenScope;
+  readonly state: TokenState;
+  readonly created_at: string;
+  readonly expires_at: string;
+}
+
+export const TOKEN_TTL_MIN_SECONDS = 60;
+export const TOKEN_TTL_MAX_SECONDS = 31_536_000;
+export const TOKEN_TTL_DEFAULT_SECONDS = 86_400;
+
+export const ARTIFACT_TOKEN_PREFIX = "art_v1_" as const;
+
+/** Hex characters in the secret half of a token, not bytes of entropy. */
+export const ARTIFACT_TOKEN_SECRET_LENGTH = 40;
+
+export const ARTIFACT_TOKEN_PATTERN = /^art_v1_[0-9a-f]{40}\?expires=\d+$/;
+
+/**
+ * The expiry travels in the token rather than beside it, so a client that only
+ * ever holds the string can still tell when it has to ask for another.
+ */
+export const formatArtifactToken = (
+  secret: string,
+  expiresAt: Date,
+): string =>
+  `${ARTIFACT_TOKEN_PREFIX}${secret}?expires=${Math.floor(expiresAt.getTime() / 1000)}`;

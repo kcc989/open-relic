@@ -10,16 +10,66 @@ Artifacts should work against an installation with nothing changed but the host.
 [ADR-0001](./docs/adr/0001-wire-compatible-with-cloudflare-artifacts.md) records
 what that binds us to, and where the API below does not match yet.
 
-The namespace and repository APIs are implemented. Everything else — tokens,
-contents, forks, imports, and Git Smart HTTP — is still a registered route that
-answers `501`:
+The namespace and repository APIs are implemented, and a Git client can now get
+a ref advertisement for `git-receive-pack`. Everything else — tokens, contents,
+forks, imports, and the rest of Git Smart HTTP — is still a registered route
+that answers `501`:
 
 - Hono routes for every REST and Git Smart HTTP endpoint in the initial API
 - Effect v4 as the typed stub service boundary
 - Drizzle as the ORM over Durable Object SQLite, with generated migrations
 - Alchemy v2 for the Cloudflare Worker and SQLite-backed Durable Objects
 - Bun workspaces for the API app and shared endpoint contracts
-- RFC 9457-style problem documents for every failure
+- The Cloudflare v4 envelope on every response, success or failure
+
+## The wire
+
+Artifacts documents its REST routes relative to `/accounts/$ACCOUNT_ID`, hung off
+`https://api.cloudflare.com/client/v4`. An installation is single-tenant and is
+nothing but Artifacts, so it serves the same endpoints at the root — `POST
+/namespaces/:namespace/repos`, not `POST
+/client/v4/accounts/:id/artifacts/namespaces/:namespace/repos`. Everything from
+`/namespaces` rightward matches Artifacts exactly, as does every body, field
+name, status code, and error shape. The base URL is the one thing a client
+changes, which is the same thing it already changes for the host.
+
+Every JSON response is the v4 envelope:
+
+```json
+{ "result": {}, "success": true, "errors": [], "messages": [] }
+```
+
+A failure keeps the shape and moves into `errors`, using
+[Artifacts' documented codes](https://developers.cloudflare.com/artifacts/api/errors/):
+
+```json
+{
+  "result": null,
+  "success": false,
+  "errors": [{ "code": 10200, "message": "No namespace named \"nope\" exists." }],
+  "messages": []
+}
+```
+
+A rejected field carries a JSON pointer at it in `errors[].source.pointer`.
+
+Lists answer with a bare array in `result` and their paging state beside it in
+`result_info`. Cursors are keyset, not offset — the cursor carries the sort key
+of the last row handed out — so a repository created mid-walk cannot shift rows
+onto a page the client has already seen. `cursor` is empty once the last page has
+been handed out.
+
+A cursor names a position in one ordering of one filtered set, so it also
+carries the `sort`, `direction`, and `search` it was issued under. Replaying it
+against a different query is a `400`, not a quietly different page: comparing a
+stored `created_at` against a name would let every row through and hand back
+page one again under a fresh cursor. A cursor the service did not issue is a
+`400` for the same reason — an empty page would be indistinguishable from a
+finished list.
+
+```json
+{ "result_info": { "cursor": "eyJ2IjoiLi4uIn0", "per_page": 20, "count": 20 } }
+```
 
 ## Monorepo
 
@@ -50,12 +100,20 @@ has to be a single serialized decision and listing namespaces has to see all of
 them; `onConflictDoNothing().returning()` makes the uniqueness check and the
 insert one statement.
 
+Artifacts creates a namespace implicitly with its first repository and documents
+only list and get. Explicit create and delete are ours; they sit on methods
+Artifacts has not spoken for on those paths.
+
 | Endpoint | Behavior |
 | --- | --- |
-| `POST /api/v1/namespaces` | `201` with a `Location` header, `409` if the slug is taken, `400` if the body is invalid |
-| `GET /api/v1/namespaces` | `200` with `{ "namespaces": [...] }`, ordered by slug |
-| `GET /api/v1/namespaces/:namespace` | `200` or `404` |
-| `DELETE /api/v1/namespaces/:namespace` | `204` or `404`; takes the namespace's repositories with it |
+| `POST /namespaces` | `201` with a `Location` header, `409` if the slug is taken, `400` if the body is invalid |
+| `GET /namespaces?limit=&cursor=` | `200`, ordered by slug, with `result_info` |
+| `GET /namespaces/:namespace` | `200` or `404` |
+| `DELETE /namespaces/:namespace` | `200` with `{ "slug": … }` or `404`; takes the namespace's repositories with it |
+
+The delete answers `200`, not the `202` a repository delete answers, because it
+really has finished: the index rows and the objects behind them are gone by the
+time it replies.
 
 A slug is lowercase alphanumerics with interior hyphens, at most 39 characters,
 and may not be one of the reserved segments of the HTTP surface (`api`, `git`,
@@ -63,9 +121,9 @@ and may not be one of the reserved segments of the HTTP surface (`api`, `git`,
 `packages/contracts` so clients can apply the same rule before a round trip.
 
 ```sh
-curl -X POST http://localhost:1337/api/v1/namespaces \
+curl -X POST http://localhost:1337/namespaces \
   -H 'Content-Type: application/json' \
-  -d '{"slug":"acme","displayName":"Acme, Inc."}'
+  -d '{"slug":"acme","display_name":"Acme, Inc."}'
 ```
 
 ## Repositories
@@ -100,14 +158,32 @@ that keeps listing a namespace one query.
 
 | Endpoint | Behavior |
 | --- | --- |
-| `POST /api/v1/namespaces/:namespace/repos` | `201` with a `Location` header, `404` if the namespace is unknown, `409` if the name is taken, `400` if the body is invalid |
-| `GET /api/v1/namespaces/:namespace/repos` | `200` with `{ "repositories": [...] }`, ordered by name, `404` if the namespace is unknown |
-| `GET /api/v1/namespaces/:namespace/repos/:repo` | `200` or `404` |
-| `DELETE /api/v1/namespaces/:namespace/repos/:repo` | `204` or `404`; discards the repository object's storage |
+| `POST /namespaces/:namespace/repos` | `200` with `{id, name, description, default_branch, remote, token}`, `404` if the namespace is unknown, `409` if the name is taken, `400` if the body is invalid |
+| `GET /namespaces/:namespace/repos?limit=&cursor=&search=&sort=&direction=` | `200` with `result_info`, `404` if the namespace is unknown |
+| `GET /namespaces/:namespace/repos/:repo` | `200` or `404` |
+| `DELETE /namespaces/:namespace/repos/:repo` | `202` with `{ "id": … }` or `404`; discards the repository object's storage |
+
+A create answers with a deliberately narrower shape than a list or get: the
+identity, the remote to clone from, and the one token it will not show again.
+List and get carry the full `RepoInfo` — `id`, `name`, `description`,
+`default_branch`, `created_at`, `updated_at`, `last_push_at`, `source`,
+`read_only` — plus `remote`. `source` and `last_push_at` are always `null` until
+import and push exist to write them.
+
+`sort` is one of `created_at`, `updated_at`, `last_push_at`, or `name`,
+defaulting to `created_at` descending. `search` filters on an infix of the name.
+`limit` defaults to 50 and caps at 200.
+
+The remote is built from the host the request arrived on, so an installation
+advertises whatever host the client actually reached it at. The token is a
+correctly shaped `art_v1_<40 hex>?expires=<unix seconds>` secret — **nothing
+stores or verifies it yet**, because the token API is still a stub and the Git
+surface answers `501`. Persisting it belongs with the work that makes tokens
+checkable.
 
 A name is lowercase alphanumerics with interior dots, underscores, and hyphens,
 at most 100 characters, and may not end in `.git` — `/git/:namespace/:repo.git`
-appends that suffix itself. `defaultBranch` defaults to `main` and is checked
+appends that suffix itself. `default_branch` defaults to `main` and is checked
 against a conservative subset of `git check-ref-format`.
 
 Deleting a namespace deletes its repositories in the same transaction and hands
@@ -115,20 +191,82 @@ back the object ids, which the route then discards; an index row and the object
 it points at are never removed by the same layer.
 
 ```sh
-curl -X POST http://localhost:1337/api/v1/namespaces/acme/repos \
+curl -X POST http://localhost:1337/namespaces/acme/repos \
   -H 'Content-Type: application/json' \
   -d '{"name":"demo","description":"Anvil firmware"}'
 ```
 
-Git Smart HTTP is still unimplemented, so `RepositoryObject`'s `fetch` handler
-answers `501`; the REST API reaches it over RPC.
+## Git Smart HTTP
+
+A repository's remote is `/git/:namespace/:repo.git`, and the first thing any
+Git client asks it for is an **advertisement**: the refs the server holds and
+the capabilities it supports. The push side of that is implemented.
+
+```sh
+curl 'http://localhost:1337/git/acme/demo.git/info/refs?service=git-receive-pack'
+```
+
+```text
+001f# service=git-receive-pack
+0000
+00950000000000000000000000000000000000000000 capabilities^{}\0report-status side-band-64k …
+0000
+```
+
+A repository with no refs answers with the zero-id `capabilities^{}` line rather
+than an empty body, which is how a client tells a fresh repository from a server
+that failed to answer. Refs are advertised in byte order by full name, with the
+capabilities hung off the first line. `HEAD` is not advertised and annotated
+tags are not peeled — both belong to the upload-pack advertisement.
+
+| Capability | Why |
+| --- | --- |
+| `report-status` | Per-ref accept or reject, which is how a push reports anything at all |
+| `side-band-64k` | Progress and errors alongside the response |
+| `ofs-delta` | Offset deltas in the pack |
+| `no-thin` | Never send a delta whose base is not in the pack |
+| `object-format=sha1` | The only hash we store |
+| `agent=open-relic/<version>` | Identifies the server in a client's trace |
+
+`delete-refs`, `atomic`, `push-options`, and `report-status-v2` are deliberately
+absent: an unadvertised capability is how a client learns not to use one, and
+advertising something we do not honor is worse than not advertising it.
+
+An advertisement is Git's protocol rather than JSON, so it is the one response
+that is not a v4 envelope. Failures on this path still are — a Git client reads
+the status code and little else, and there is no reason for a second error
+shape.
+
+The path from a request to a repository is: the Worker resolves
+`namespace/repo` in the registry, passes an authorization seam, and calls a
+named RPC method on the repository object, which returns a stream of pkt-lines.
+`RepositoryObject`'s `fetch` handler is not part of that path and answers `501`.
+See [ADR-0004](./docs/adr/0004-git-reaches-a-repository-over-rpc.md).
+
+There are no credentials yet, so pushes are refused unless the installation sets
+`ALLOW_ANONYMOUS_WRITE="true"`. An unset variable is a refusal rather than a
+default — an installation that has never heard of it is closed, not open to the
+world. Repo-scoped tokens replace it.
+
+```sh
+ALLOW_ANONYMOUS_WRITE=true bun run deploy
+```
+
+Refs live in a `refs` table in the repository object rather than as Git's loose
+files plus `packed-refs`: that split exists because of a filesystem, and a push
+has to move several refs in one transaction. Nothing writes to it yet — the
+advertisement is a read of an empty ref store until push lands.
 
 ## Objects and packs
 
-`RepositoryObject.readPack` takes the byte stream of a Git pack and leaves the
-repository holding every object the pack carried, named by SHA-1. Nothing calls
-it over HTTP yet — receive-pack lands with push — but the storage and the parse
-are what everything Git-shaped is built on.
+`readPack` is the next of the named RPC methods
+[ADR-0004](./docs/adr/0004-git-reaches-a-repository-over-rpc.md) calls for, one
+per Git operation: it takes the byte stream of a Git pack and leaves the
+repository holding every object the pack carried, named by SHA-1. Streams cross
+the RPC boundary, so a pack reaches the object without the Worker buffering it.
+Nothing calls it over HTTP yet — receive-pack lands with push, alongside the ref
+updates that make these objects reachable — but the storage and the parse are
+what everything Git-shaped is built on.
 
 Objects are stored inflated: metadata in the `objects` table, bytes in the
 object's synchronous KV storage under `o:<oid>:<n>`, split into 1.5 MiB chunks
@@ -172,9 +310,21 @@ at once; lifting it means inflating whole objects straight into chunks instead
 of into one buffer, since only a delta's base genuinely has to be resident.
 
 Both delta encodings resolve, including chains several deep. Thin packs are out
-of scope — `no-thin` is advertised, so a delta whose base is nowhere is a
-`missing-base` error, distinguishable from `truncated`, `checksum-mismatch`, and
-the rest of `PackError`'s codes.
+of scope, which is what advertising `no-thin` promises the client: a delta whose
+base is nowhere is a `missing-base` error rather than a case to handle.
+
+Failures are a `PackError` with a code, and the code is a Git fact rather than
+an HTTP one — the object owns Git and the Worker owns the envelope, so push maps
+these onto Artifacts' documented codes when it lands:
+
+| `PackError.code` | Artifacts code |
+| --- | --- |
+| `object-too-large` | `memoryLimit` (10402) |
+| `not-a-pack`, `unsupported-version`, `truncated`, `checksum-mismatch`, `trailing-bytes`, `missing-base`, `corrupt` | `invalidInput` (10100) |
+
+That `memoryLimit` exists in Artifacts' own list is the corroboration for the
+ceiling above: refusing an object too big to hold is a documented answer, not an
+invention of ours.
 
 `apps/api/test/fixtures` holds packs written by a real Git client, alongside the
 object ids that client reported; `fixtures/generate.sh` rebuilds them. Agreeing
@@ -286,7 +436,7 @@ Subdomain:Edit, Workers Observability:Edit, and Account Settings:Read.
 { "service": "open-relic", "status": "ok" }
 ```
 
-Alongside the namespace and repository endpoints above, routes for forks,
-imports, tokens, repository contents, archives, and Git upload/receive pack are
+Alongside the endpoints above, routes for forks, imports, tokens, repository
+contents, archives, the upload-pack advertisement, and both pack transfers are
 registered from the manifest in `packages/contracts/src/index.ts`, answer `501`,
 and are covered by tests.

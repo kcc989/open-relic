@@ -1,9 +1,9 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "e4d7533f-899a-423a-9dba-d3ee29ac623a",
+  "id": "4c2a19ba-67ea-44d7-aac9-15913ec29a89",
   "prevIds": [
-    "e1ddd293-566b-437d-ad5a-b444b23f2500"
+    "ed2ecb2f-eb9d-452d-a20b-f3023399a25e"
   ],
   "ddl": [
     {
@@ -12,6 +12,10 @@
     },
     {
       "name": "objects",
+      "entityType": "tables"
+    },
+    {
+      "name": "refs",
       "entityType": "tables"
     },
     {
@@ -104,6 +108,26 @@
       "autoincrement": false,
       "default": null,
       "generated": null,
+      "name": "name",
+      "entityType": "columns",
+      "table": "refs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "object_id",
+      "entityType": "columns",
+      "table": "refs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
       "name": "id",
       "entityType": "columns",
       "table": "repository_state"
@@ -149,6 +173,15 @@
       "nameExplicit": false,
       "name": "objects_pk",
       "table": "objects",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "name"
+      ],
+      "nameExplicit": false,
+      "name": "refs_pk",
+      "table": "refs",
       "entityType": "pks"
     },
     {

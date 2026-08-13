@@ -24,6 +24,22 @@ export const REPOSITORY_STATE_ID = "repository";
 export type RepositoryStateRow = typeof repositoryState.$inferSelect;
 
 /**
+ * The repository's refs, full name (`refs/heads/main`) to object id. A table
+ * rather than Git's loose files plus `packed-refs`, because the only reason
+ * that split exists is a filesystem, and because a push has to move several
+ * refs in one transaction.
+ *
+ * HEAD is not here: it is the one ref-shaped thing Git keeps outside the ref
+ * store, and it stays outside ours too (ADR-0003).
+ */
+export const refs = sqliteTable("refs", {
+  name: text("name").primaryKey(),
+  objectId: text("object_id").notNull(),
+});
+
+export type RefRow = typeof refs.$inferSelect;
+
+/**
  * One row per Git object, with the bytes themselves in the KV half under
  * `o:<oid>:<n>` (ADR-0002). `chunk_count` is what tells a read how many keys to
  * ask for, so the row and the chunks are only meaningful together.

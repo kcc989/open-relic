@@ -1,7 +1,7 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "664412d3-7a6e-4fd8-9e6f-cc5c6b23cd5d",
+  "id": "5f6dff40-da7c-49f1-94e8-24aa6f18f92e",
   "prevIds": [
     "91e0e5c7-2e53-496a-a800-1c6e526bfee8"
   ],
@@ -80,6 +80,16 @@
       "autoincrement": false,
       "default": null,
       "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "repositories"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
       "name": "durable_object_id",
       "entityType": "columns",
       "table": "repositories"
@@ -105,12 +115,52 @@
       "table": "repositories"
     },
     {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "false",
+      "generated": null,
+      "name": "read_only",
+      "entityType": "columns",
+      "table": "repositories"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "source",
+      "entityType": "columns",
+      "table": "repositories"
+    },
+    {
       "type": "text",
       "notNull": true,
       "autoincrement": false,
       "default": null,
       "generated": null,
       "name": "created_at",
+      "entityType": "columns",
+      "table": "repositories"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "table": "repositories"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "last_push_at",
       "entityType": "columns",
       "table": "repositories"
     },
@@ -147,6 +197,20 @@
       "name": "namespaces_pk",
       "table": "namespaces",
       "entityType": "pks"
+    },
+    {
+      "columns": [
+        {
+          "value": "id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "repositories_id_unique",
+      "entityType": "indexes",
+      "table": "repositories"
     }
   ],
   "renames": []

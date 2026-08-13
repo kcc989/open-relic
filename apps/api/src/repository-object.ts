@@ -1,3 +1,4 @@
+import { ERROR_CODES } from "@open-relic/contracts";
 import { DurableObject } from "cloudflare:workers";
 import {
   drizzle,
@@ -6,6 +7,7 @@ import {
 import { migrate } from "drizzle-orm/durable-sqlite/migrator";
 
 import migrations from "../drizzle/repository/migrations.js";
+import { fail } from "./envelope.ts";
 import type { PackBase, PackSummary } from "./pack.ts";
 import {
   RepositoryStore,
@@ -45,6 +47,10 @@ export class RepositoryObject extends DurableObject {
     return this.#store.describe();
   }
 
+  advertiseReceivePack(): Promise<ReadableStream<Uint8Array>> {
+    return this.#store.advertiseReceivePack();
+  }
+
   readPack(pack: ReadableStream<Uint8Array>): Promise<PackSummary> {
     return this.#store.readPack(pack);
   }
@@ -64,18 +70,15 @@ export class RepositoryObject extends DurableObject {
     await this.ctx.storage.deleteAll();
   }
 
+  /**
+   * Git reaches this object through RPC methods like
+   * {@link RepositoryObject.advertiseReceivePack}, never through a forwarded
+   * request, so nothing should arrive here.
+   */
   override async fetch(): Promise<Response> {
-    return Response.json(
-      {
-        type: "https://open-relic.dev/problems/not-implemented",
-        title: "Not Implemented",
-        status: 501,
-        detail: "Git Smart HTTP has not been implemented.",
-      },
-      {
-        status: 501,
-        headers: { "Content-Type": "application/problem+json" },
-      },
-    );
+    return fail(501, {
+      code: ERROR_CODES.notImplemented,
+      message: "A repository object is addressed over RPC, not over HTTP.",
+    });
   }
 }

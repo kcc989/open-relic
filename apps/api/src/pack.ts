@@ -18,6 +18,13 @@ import { InflateError, Inflater } from "./inflate.ts";
 import { MAX_OBJECT_BYTES, hashObject, type ObjectType } from "./object.ts";
 import { Sha1, toHex } from "./sha1.ts";
 
+/**
+ * Git facts, not HTTP ones: the object owns Git and the Worker owns the v4
+ * envelope (ADR-0004), so nothing here knows a status code. Receive-pack maps
+ * `object-too-large` onto Artifacts' `memoryLimit` and the rest onto
+ * `invalidInput` — that `memoryLimit` is in Artifacts' documented list is what
+ * says refusing an object too big to hold is an answer rather than a crash.
+ */
 export type PackErrorCode =
   | "not-a-pack"
   | "unsupported-version"

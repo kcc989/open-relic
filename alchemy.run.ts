@@ -20,6 +20,11 @@ export const ApiWorker = Cloudflare.Worker("Api", {
     REPOSITORIES: Cloudflare.DurableObject<RepositoryObject>("Repositories", {
       className: "RepositoryObject",
     }),
+    // The Git protocol has no credentials yet, so an installation opts in to
+    // unauthenticated pushes explicitly. Anything but `"true"` — including the
+    // empty string this deploys when the variable is unset — refuses them.
+    // Repo-scoped tokens replace this.
+    ALLOW_ANONYMOUS_WRITE: process.env.ALLOW_ANONYMOUS_WRITE ?? "",
   },
   observability: {
     enabled: true,
