@@ -1,34 +1,54 @@
 import {
-  API_BASE_PATH,
   DEFAULT_BRANCH,
-  PROBLEM_TYPES,
+  LIST_DEFAULT_LIMIT,
+  LIST_MAX_LIMIT,
+  NAMESPACES_PATH,
   REPOSITORY_DESCRIPTION_MAX_LENGTH,
+  REPOSITORY_NAME_MAX_LENGTH,
+  REPO_LIST_DEFAULT_DIRECTION,
+  REPO_LIST_DEFAULT_SORT,
+  REPO_SORT_FIELDS,
+  SORT_DIRECTIONS,
   describeBranchNameViolation,
   describeRepositoryNameViolation,
   validateBranchName,
   validateRepositoryName,
-  type CreateRepositoryBody,
-  type Repository,
-  type RepositoryListBody,
+  type CreateRepoRequest,
+  type CreateRepoResult,
+  type DeleteRepoResult,
+  type RepoInfo,
+  type RepoWithRemote,
 } from "@open-relic/contracts";
 import type { Hono } from "hono";
 
 import type { ApiEnv } from "../../../alchemy.run.ts";
 import type { RepositoryObjects } from "./bindings.ts";
-import { conflict, invalidRequest, notFound, problemResponse } from "./problems.ts";
+import {
+  alreadyExists,
+  invalidInput,
+  invalidRepoName,
+  notFound,
+  ok,
+  okList,
+} from "./envelope.ts";
+import { parseChoice, parseCursor, parseLimit, parseSearch } from "./query.ts";
+import { gitRemoteUrl, mintArtifactToken } from "./remote.ts";
 import type {
   CreateRepositoryCommand,
   RepositoryIndexClient,
 } from "./repository-index.ts";
 import {
   parseJsonObject,
+  parseOptionalFlag,
   parseOptionalText,
   type Rejected,
 } from "./request-body.ts";
 
 type NewRepository = Omit<CreateRepositoryCommand, "durableObjectId">;
 
-type ParsedCreate = { readonly ok: true; readonly command: NewRepository } | Rejected;
+type ParsedCreate =
+  | { readonly ok: true; readonly command: NewRepository }
+  | (Rejected & { readonly badName?: true });
 
 const parseCreateBody = (
   namespaceSlug: string,
@@ -39,14 +59,20 @@ const parseCreateBody = (
     return object;
   }
 
-  const body = object.value as Partial<Record<keyof CreateRepositoryBody, unknown>>;
+  const body = object.value as Partial<
+    Record<keyof CreateRepoRequest, unknown>
+  >;
   if (typeof body.name !== "string") {
-    return { ok: false, detail: `"name" must be a string.` };
+    return { ok: false, detail: `"name" must be a string.`, badName: true };
   }
 
   const nameViolation = validateRepositoryName(body.name);
   if (nameViolation !== null) {
-    return { ok: false, detail: describeRepositoryNameViolation(nameViolation) };
+    return {
+      ok: false,
+      detail: describeRepositoryNameViolation(nameViolation),
+      badName: true,
+    };
   }
 
   const description = parseOptionalText(
@@ -58,14 +84,30 @@ const parseCreateBody = (
     return description;
   }
 
-  if (body.defaultBranch !== undefined && typeof body.defaultBranch !== "string") {
-    return { ok: false, detail: `"defaultBranch" must be a string.` };
+  const readOnly = parseOptionalFlag(body.read_only, "read_only", false);
+  if (!readOnly.ok) {
+    return readOnly;
   }
 
-  const defaultBranch = body.defaultBranch ?? DEFAULT_BRANCH;
+  if (
+    body.default_branch !== undefined &&
+    typeof body.default_branch !== "string"
+  ) {
+    return {
+      ok: false,
+      detail: `"default_branch" must be a string.`,
+      pointer: "/default_branch",
+    };
+  }
+
+  const defaultBranch = body.default_branch ?? DEFAULT_BRANCH;
   const branchViolation = validateBranchName(defaultBranch);
   if (branchViolation !== null) {
-    return { ok: false, detail: describeBranchNameViolation(branchViolation) };
+    return {
+      ok: false,
+      detail: describeBranchNameViolation(branchViolation),
+      pointer: "/default_branch",
+    };
   }
 
   return {
@@ -75,12 +117,10 @@ const parseCreateBody = (
       name: body.name,
       description: description.value,
       defaultBranch,
+      readOnly: readOnly.value,
     },
   };
 };
-
-const repositoryLocation = (repository: Repository): string =>
-  `${API_BASE_PATH}/namespaces/${repository.namespace}/repos/${repository.name}`;
 
 const noSuchRepository = (namespaceSlug: string, name: string): string =>
   `No repository named "${namespaceSlug}/${name}" exists.`;
@@ -90,8 +130,18 @@ export const registerRepositoryRoutes = (
   resolveIndex: (env: ApiEnv) => RepositoryIndexClient,
   resolveObjects: (env: ApiEnv) => RepositoryObjects,
 ): void => {
-  const REPOS = `${API_BASE_PATH}/namespaces/:namespace/repos` as const;
+  const REPOS = `${NAMESPACES_PATH}/:namespace/repos` as const;
   const REPO = `${REPOS}/:repo` as const;
+
+  /** The list and get shape: the stored row plus the remote to clone it from. */
+  const withRemote = (
+    context: { req: { url: string } },
+    namespaceSlug: string,
+    repository: RepoInfo,
+  ): RepoWithRemote => ({
+    ...repository,
+    remote: gitRemoteUrl(context.req.url, namespaceSlug, repository.name),
+  });
 
   app.post(REPOS, async (context) => {
     const namespaceSlug = context.req.param("namespace");
@@ -100,19 +150,16 @@ export const registerRepositoryRoutes = (
     try {
       payload = await context.req.json();
     } catch {
-      return problemResponse(
-        invalidRequest(
-          "repositories.create",
-          "The request body must be valid JSON.",
-        ),
-      );
+      return invalidInput("The request body must be valid JSON.");
     }
 
     const parsed = parseCreateBody(namespaceSlug, payload);
     if (!parsed.ok) {
-      return problemResponse(
-        invalidRequest("repositories.create", parsed.detail),
-      );
+      // A bad name has its own code, because it is the one rejection a client
+      // can fix by choosing differently rather than by fixing its request.
+      return parsed.badName === true
+        ? invalidRepoName(parsed.detail)
+        : invalidInput(parsed.detail, parsed.pointer);
     }
 
     const objects = resolveObjects(context.env);
@@ -126,48 +173,101 @@ export const registerRepositoryRoutes = (
     });
 
     if (!outcome.created) {
-      return problemResponse(
-        outcome.reason === "namespace-missing"
-          ? notFound(
-              "repositories.create",
-              `No namespace named "${namespaceSlug}" exists.`,
-            )
-          : conflict(
-              "repositories.create",
-              PROBLEM_TYPES.repositoryExists,
-              `The repository "${namespaceSlug}/${parsed.command.name}" already exists.`,
-            ),
-      );
+      return outcome.reason === "namespace-missing"
+        ? notFound(`No namespace named "${namespaceSlug}" exists.`)
+        : alreadyExists(
+            `The repository "${namespaceSlug}/${parsed.command.name}" already exists.`,
+          );
     }
 
     // The name is claimed; now give the object its Git state.
     await objects.get(durableObjectId).initialize({
-      defaultBranch: outcome.repository.defaultBranch,
-      createdAt: outcome.repository.createdAt,
+      defaultBranch: outcome.repository.default_branch,
+      createdAt: outcome.repository.created_at,
     });
 
-    return Response.json(outcome.repository, {
-      status: 201,
-      headers: { Location: repositoryLocation(outcome.repository) },
-    });
+    // Narrower than the list and get shape on purpose: Artifacts answers a
+    // create with the identity, the remote, and the one token it will not show
+    // again.
+    return ok({
+      id: outcome.repository.id,
+      name: outcome.repository.name,
+      description: outcome.repository.description,
+      default_branch: outcome.repository.default_branch,
+      remote: gitRemoteUrl(
+        context.req.url,
+        namespaceSlug,
+        outcome.repository.name,
+      ),
+      token: mintArtifactToken(),
+    } satisfies CreateRepoResult);
   });
 
   app.get(REPOS, async (context) => {
     const namespaceSlug = context.req.param("namespace");
-    const repositories = await resolveIndex(context.env).listRepositories(
-      namespaceSlug,
-    );
 
-    if (repositories === null) {
-      return problemResponse(
-        notFound(
-          "repositories.list",
-          `No namespace named "${namespaceSlug}" exists.`,
-        ),
-      );
+    const limit = parseLimit(
+      context.req.query("limit"),
+      LIST_DEFAULT_LIMIT,
+      LIST_MAX_LIMIT,
+    );
+    if (!limit.ok) {
+      return invalidInput(limit.detail);
     }
 
-    return Response.json({ repositories } satisfies RepositoryListBody);
+    const sort = parseChoice(
+      context.req.query("sort"),
+      "sort",
+      REPO_SORT_FIELDS,
+      REPO_LIST_DEFAULT_SORT,
+    );
+    if (!sort.ok) {
+      return invalidInput(sort.detail);
+    }
+
+    const direction = parseChoice(
+      context.req.query("direction"),
+      "direction",
+      SORT_DIRECTIONS,
+      REPO_LIST_DEFAULT_DIRECTION,
+    );
+    if (!direction.ok) {
+      return invalidInput(direction.detail);
+    }
+
+    const search = parseSearch(
+      context.req.query("search"),
+      REPOSITORY_NAME_MAX_LENGTH,
+    );
+    if (!search.ok) {
+      return invalidInput(search.detail);
+    }
+
+    const page = await resolveIndex(context.env).listRepositories(
+      namespaceSlug,
+      {
+        limit: limit.value,
+        cursor: parseCursor(context.req.query("cursor")),
+        search: search.value,
+        sort: sort.value,
+        direction: direction.value,
+      },
+    );
+
+    if (page === null) {
+      return notFound(`No namespace named "${namespaceSlug}" exists.`);
+    }
+
+    return okList(
+      page.repositories.map((repository) =>
+        withRemote(context, namespaceSlug, repository),
+      ),
+      {
+        cursor: page.cursor,
+        per_page: limit.value,
+        count: page.repositories.length,
+      },
+    );
   });
 
   app.get(REPO, async (context) => {
@@ -179,32 +279,33 @@ export const registerRepositoryRoutes = (
     );
 
     if (found === null) {
-      return problemResponse(
-        notFound("repositories.get", noSuchRepository(namespaceSlug, name)),
-      );
+      return notFound(noSuchRepository(namespaceSlug, name));
     }
 
-    return Response.json(found.repository);
+    return ok(withRemote(context, namespaceSlug, found.repository));
   });
 
+  /**
+   * `202`, matching Artifacts: the name is free the moment this returns, but
+   * discarding a repository's contents is not something a caller should have to
+   * wait on to be told it worked.
+   */
   app.delete(REPO, async (context) => {
     const namespaceSlug = context.req.param("namespace");
     const name = context.req.param("repo");
-    const durableObjectId = await resolveIndex(context.env).deleteRepository(
+    const deleted = await resolveIndex(context.env).deleteRepository(
       namespaceSlug,
       name,
     );
 
-    if (durableObjectId === null) {
-      return problemResponse(
-        notFound("repositories.delete", noSuchRepository(namespaceSlug, name)),
-      );
+    if (deleted === null) {
+      return notFound(noSuchRepository(namespaceSlug, name));
     }
 
     // The pointer is gone first, so nothing can reach a half-emptied
     // repository even if discarding its storage fails.
-    await resolveObjects(context.env).get(durableObjectId).destroy();
+    await resolveObjects(context.env).get(deleted.durableObjectId).destroy();
 
-    return new Response(null, { status: 204 });
+    return ok({ id: deleted.id } satisfies DeleteRepoResult, { status: 202 });
   });
 };

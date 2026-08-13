@@ -1,6 +1,5 @@
 import {
   GIT_HTTP_ENDPOINTS,
-  PROBLEM_TYPES,
   REST_ENDPOINTS,
   isImplementedEndpoint,
   type EndpointId,
@@ -15,9 +14,9 @@ import {
   repositoryObjectsFromEnv,
   type RepositoryObjects,
 } from "./bindings.ts";
+import { notFound, notImplemented } from "./envelope.ts";
 import type { NamespaceRegistryClient } from "./namespace-registry.ts";
 import { registerNamespaceRoutes } from "./namespace-routes.ts";
-import { notImplemented, problemResponse } from "./problems.ts";
 import type { RepositoryIndexClient } from "./repository-index.ts";
 import { registerRepositoryRoutes } from "./repository-routes.ts";
 import {
@@ -59,7 +58,7 @@ export const createApp = ({
     );
 
     return failure instanceof EndpointNotImplemented
-      ? problemResponse(notImplemented(failure.operation))
+      ? notImplemented(failure.operation)
       : new Response(null, { status: 204 });
   };
 
@@ -97,14 +96,7 @@ export const createApp = ({
     ),
   );
 
-  app.notFound(() =>
-    problemResponse({
-      type: PROBLEM_TYPES.notFound,
-      title: "Not Found",
-      status: 404,
-      detail: "No route matches this request.",
-    }),
-  );
+  app.notFound(() => notFound("No route matches this request."));
 
   return app;
 };

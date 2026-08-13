@@ -14,9 +14,10 @@ Artifacts' documented behavior disagree, Artifacts wins.
 
 Two surfaces, both documented:
 
-- **REST API** — `https://api.cloudflare.com/client/v4/accounts/:accountId/artifacts/…`,
-  the Cloudflare v4 envelope (`{result, success, errors, messages}`, `result_info`
-  for pagination), and v4-shaped errors (`{code, message}`), not RFC 9457.
+- **REST API** — Artifacts' own paths (`/namespaces/:namespace/repos/…`, served
+  at the root; see "The base path" below), the Cloudflare v4 envelope
+  (`{result, success, errors, messages}`, `result_info` for pagination), and
+  v4-shaped errors (`{code, message}`), not RFC 9457.
 - **Git Smart HTTP** — `https://<host>/git/:namespace/:repo.git`. Fetch negotiates
   protocol v1 or v2; push is v1 only, matching Artifacts, which does not support
   receive-pack over v2. `filter` and `include-tag` are unsupported there, so they
@@ -32,40 +33,54 @@ easily replace with a `fetch` to their own installation.
 
 ## Consequences
 
-The API implemented so far predates this decision and does not match. The gap is
-known and deliberate — the namespace and repository work was about Durable Object
-shape, not about the wire — but it has to close before anything depends on it:
+The API implemented so far predated this decision and did not match. Most of the
+gap is now closed — the shape of the wire is Artifacts' — and what remains is
+behavior that has not been built at all rather than behavior built differently:
 
 | | Open Relic today | Artifacts |
 | --- | --- | --- |
-| Base path | `/api/v1/namespaces/…` | `/client/v4/accounts/:accountId/artifacts/namespaces/…` |
-| Body | bare JSON (`{"namespaces": […]}`) | v4 envelope |
-| Errors | RFC 9457 `application/problem+json` | `errors: [{code, message}]` |
 | Namespaces | created and deleted explicitly | created implicitly with the first repo; list and get only |
-| Repo create | repository metadata | `{id, name, description, default_branch, remote, token}` — mints a token, returns the clone URL |
-| Repo delete | `204` | `202` with `{id}` |
-| Repo fields | — | `id`, `read_only` |
-| Contents | `commits/:hash`, `trees/:hash`, `blobs/:hash`, `files/*` | `commit/:hash`, `tree/:hash`, `blob/:hash`, `file?ref=&path=`, `raw/:ref/:path` |
-| Tokens | `POST …/repos/:repo/tokens` | `POST …/namespaces/:namespace/tokens` with `{repo, scope?, ttl?}`; revoke by id |
-| Git remote | `/git/:namespace/:repo.git` | same |
+| Tokens | route registered, answers `501`; create mints an unstored token | issued, listed, and revoked for real |
+| Contents | routes registered, answer `501` | serve refs, log, objects, and files |
+| Fork, import | routes registered, answer `501` | copy and mirror repositories |
+| `source`, `last_push_at` | always `null` — nothing writes them yet | set by import and by push |
 
-`archive/*` is ours, not theirs. Extensions are allowed — an installation may
-serve more than Artifacts does — but never at the cost of a documented behavior,
-and never on a path Artifacts has spoken for.
+These closed with the reshaping of the REST surface: the path shape, the v4
+envelope, `result_info` pagination, `errors[]` in place of RFC 9457 problem
+documents, the contents path spellings, token creation on the namespace, `202`
+with `{id}` on repository delete, and the `id`/`read_only` repository fields.
 
-## The account ID segment
+`refs` and `archive/*` are ours, not theirs. Extensions are allowed — an
+installation may serve more than Artifacts does — but never at the cost of a
+documented behavior, and never on a path Artifacts has spoken for. Explicit
+namespace create and delete are the other extension, and they sit on methods
+Artifacts does not define for those paths.
 
-An installation is single-tenant, so `/client/v4/accounts/:accountId/artifacts/…`
-names an account that does not exist here. The segment stays anyway, and its
-value is ignored: any account ID resolves to the one tenant. The client is what
-builds that path — Wrangler, the SDKs, every documented `curl` — so dropping the
-segment would mean no Artifacts client could reach an installation without being
-modified, which is the one thing this ADR exists to prevent.
+## The base path
+
+Artifacts documents its routes relative to `/accounts/$ACCOUNT_ID`, hung off
+`https://api.cloudflare.com/client/v4`. An installation serves the same
+endpoints at the root instead:
+
+| Artifacts | Open Relic |
+| --- | --- |
+| `GET /client/v4/accounts/:id/artifacts/namespaces` | `GET /namespaces` |
+| `POST /client/v4/accounts/:id/artifacts/namespaces/:namespace/repos` | `POST /namespaces/:namespace/repos` |
+| `POST /client/v4/accounts/:id/artifacts/namespaces/:namespace/tokens` | `POST /namespaces/:namespace/tokens` |
+
+An installation is single-tenant and is nothing but Artifacts, so
+`/client/v4/accounts/<ignored>/artifacts` would be three segments of ceremony
+carrying no information — an account ID naming an account that does not exist,
+under a version marker for an API surface that is not Cloudflare's. Everything
+from `/namespaces` rightward matches Artifacts exactly, as does every body,
+field name, status code, and error shape. The base URL is the one thing a client
+changes, which is the same thing it already changes for the host.
 
 The Git remote is the mirror image. Artifacts hands it to the caller in the repo
 create response rather than having the caller construct it, so its host is ours
 to choose; only the `/git/:namespace/:repo.git` path shape has to match, and it
-already does.
+already does. An installation builds it from the host the request arrived on, so
+it advertises whatever host the client actually reached it at.
 
 Artifacts' documented limits are the ones worth designing against: 10 GB per
 repository, 1 TB per account, 2,000 requests per 10 seconds per namespace for the

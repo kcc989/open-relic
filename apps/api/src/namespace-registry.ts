@@ -1,5 +1,5 @@
-import type { Namespace } from "@open-relic/contracts";
-import { asc, eq } from "drizzle-orm";
+import type { NamespaceInfo } from "@open-relic/contracts";
+import { and, asc, eq, gt, type SQL } from "drizzle-orm";
 
 import type { SyncSqliteDatabase } from "./db/database.ts";
 import {
@@ -7,6 +7,7 @@ import {
   repositories,
   type NamespaceRow,
 } from "./db/registry-schema.ts";
+import { decodeCursor, encodeCursor } from "./pagination.ts";
 
 export interface CreateNamespaceCommand {
   readonly slug: string;
@@ -19,8 +20,19 @@ export interface CreateNamespaceCommand {
  * the Durable Object RPC boundary as an opaque string.
  */
 export type CreateNamespaceOutcome =
-  | { readonly created: true; readonly namespace: Namespace }
+  | { readonly created: true; readonly namespace: NamespaceInfo }
   | { readonly created: false; readonly reason: "slug-taken" };
+
+export interface ListNamespacesQuery {
+  readonly limit: number;
+  readonly cursor: string | null;
+}
+
+export interface NamespacePage {
+  readonly namespaces: readonly NamespaceInfo[];
+  /** Empty once the last page has been handed out. */
+  readonly cursor: string;
+}
 
 /**
  * The dropped repositories' object ids come back so the caller can destroy
@@ -35,16 +47,18 @@ export interface NamespaceRegistryClient {
   readonly createNamespace: (
     command: CreateNamespaceCommand,
   ) => Promise<CreateNamespaceOutcome>;
-  readonly listNamespaces: () => Promise<readonly Namespace[]>;
-  readonly getNamespace: (slug: string) => Promise<Namespace | null>;
+  readonly listNamespaces: (
+    query: ListNamespacesQuery,
+  ) => Promise<NamespacePage>;
+  readonly getNamespace: (slug: string) => Promise<NamespaceInfo | null>;
   readonly deleteNamespace: (slug: string) => Promise<DeleteNamespaceOutcome>;
 }
 
-const toNamespace = (row: NamespaceRow): Namespace => ({
+const toNamespace = (row: NamespaceRow): NamespaceInfo => ({
   slug: row.slug,
-  displayName: row.displayName,
+  display_name: row.displayName,
   description: row.description,
-  createdAt: row.createdAt,
+  created_at: row.createdAt,
 });
 
 /**
@@ -82,16 +96,42 @@ export class NamespaceRegistry {
       : { created: true, namespace: toNamespace(row) };
   }
 
-  async listNamespaces(): Promise<Namespace[]> {
+  /**
+   * Ordered by slug, which is also the cursor key: the slug is the primary key,
+   * so the keyset walk is an index range scan and needs no tiebreak. One row
+   * beyond the limit is read to decide whether there is a next cursor.
+   */
+  async listNamespaces(query: ListNamespacesQuery): Promise<NamespacePage> {
+    const filters: SQL[] = [];
+
+    if (query.cursor !== null) {
+      const key = decodeCursor(query.cursor);
+      if (key === null || key.n === undefined) {
+        return { namespaces: [], cursor: "" };
+      }
+      filters.push(gt(namespaces.slug, key.n));
+    }
+
     const rows = await this.#db
       .select()
       .from(namespaces)
-      .orderBy(asc(namespaces.slug));
+      .where(filters.length === 0 ? undefined : and(...filters))
+      .orderBy(asc(namespaces.slug))
+      .limit(query.limit + 1);
 
-    return rows.map(toNamespace);
+    const page = rows.slice(0, query.limit);
+    const last = page.at(-1);
+
+    return {
+      namespaces: page.map(toNamespace),
+      cursor:
+        rows.length > query.limit && last !== undefined
+          ? encodeCursor({ n: last.slug })
+          : "",
+    };
   }
 
-  async getNamespace(slug: string): Promise<Namespace | null> {
+  async getNamespace(slug: string): Promise<NamespaceInfo | null> {
     const rows = await this.#db
       .select()
       .from(namespaces)
