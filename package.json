@@ -9,9 +9,12 @@
   "scripts": {
     "check": "bun run typecheck && bun test",
     "deploy": "bun alchemy deploy",
+    "deploy:prod": "bun alchemy deploy --stage prod",
     "dev": "bun alchemy dev",
     "destroy": "bun alchemy destroy",
     "plan": "bun alchemy plan",
+    "plan:prod": "bun alchemy plan --stage prod",
+    "tail": "bun alchemy tail",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },

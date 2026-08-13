@@ -1,0 +1,35 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Alchemy serialises on a single remote state store per stage, so never let two
+# deploys of the same stage overlap.
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.7
+
+      - run: bun install --frozen-lockfile
+
+      - run: bun run check
+
+      # `--yes` accepts the Cloudflare state-store bootstrap/upgrade prompt,
+      # which cannot be answered interactively here.
+      - run: bun alchemy deploy --stage prod --yes
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

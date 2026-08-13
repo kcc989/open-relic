@@ -6,7 +6,10 @@ import type { RepositoryObject } from "./apps/api/src/repository-object.ts";
 
 export const ApiWorker = Cloudflare.Worker("Api", {
   main: "./apps/api/src/index.ts",
-  compatibility: { date: "2026-08-12" },
+  // Keep this at or below the newest date the workerd binary bundled with
+  // Alchemy supports, otherwise `bun run dev` refuses to start the Worker even
+  // though a remote deploy would accept it.
+  compatibility: { date: "2026-07-11" },
   env: {
     REPOSITORIES: Cloudflare.DurableObject<RepositoryObject>("Repositories", {
       className: "RepositoryObject",
@@ -16,6 +19,15 @@ export const ApiWorker = Cloudflare.Worker("Api", {
     enabled: true,
   },
 });
+
+/**
+ * The Worker's runtime bindings, derived from the stack declaration above.
+ *
+ * The API app types its Hono instance with this, so a binding can never drift
+ * from the infrastructure that provisions it — adding an R2 bucket or a KV
+ * namespace to `env` is immediately visible on `context.env` in the routes.
+ */
+export type ApiEnv = Cloudflare.InferEnv<typeof ApiWorker>;
 
 export default Alchemy.Stack(
   "OpenRelic",
