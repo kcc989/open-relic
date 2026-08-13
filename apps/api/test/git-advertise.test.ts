@@ -141,6 +141,7 @@ describe("the other services on the advertisement path", () => {
     expect(body).toStartWith("001e# service=git-upload-pack\n0000");
     expect(body).toContain(`${MAIN} HEAD\0`);
     expect(body).toContain(`${MAIN} refs/heads/main\n`);
+    expect(body).toContain("multi_ack_detailed");
     expect(body).toContain("symref=HEAD:refs/heads/main");
     expect(body).not.toContain("version 2");
   });

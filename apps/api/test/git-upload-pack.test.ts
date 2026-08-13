@@ -235,6 +235,50 @@ describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
     expect(reads.get(README.oid)).toBe(1);
   });
 
+  test("negotiates a coalesced side-band fetch over two stateless POST rounds", async () => {
+    await harness.app.request(
+      new Request("http://local.test/git/acme/demo.git/git-receive-pack", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${harness.repositoryToken}` },
+        body: pushBody({
+          commands: [{ oldOid: FIRST.oid, newOid: SECOND.oid, name: MAIN }],
+          objects: [SECOND, SECOND_ROOT, REVISED],
+        }),
+      }),
+    );
+
+    const capabilities = "multi_ack_detailed thin-pack side-band-64k ofs-delta";
+    const negotiate = concat(
+      pktLine(`want ${SECOND.oid} ${capabilities}\n`),
+      flushPkt(),
+      pktLine(`have ${FIRST.oid}\n`),
+      flushPkt(),
+    );
+    const negotiationResponse = new Uint8Array(await (await post(UPLOAD, negotiate)).arrayBuffer());
+
+    expect(
+      packetPayloads(negotiationResponse).map((payload) => new TextDecoder().decode(payload)),
+    ).toEqual([`ACK ${FIRST.oid} common\n`, "NAK\n"]);
+
+    const done = concat(
+      pktLine(`want ${SECOND.oid} ${capabilities}\n`),
+      flushPkt(),
+      pktLine(`have ${FIRST.oid}\n`),
+      pktLine("done\n"),
+    );
+    const doneResponse = new Uint8Array(await (await post(UPLOAD, done)).arrayBuffer());
+    const [acknowledgement, ...bandedPack] = packetPayloads(doneResponse);
+
+    expect(new TextDecoder().decode(acknowledgement)).toBe(`ACK ${FIRST.oid}\n`);
+    expect(bandedPack.length).toBeGreaterThan(0);
+    expect(bandedPack.every((payload) => payload[0] === 1)).toBe(true);
+    expect(
+      new TextDecoder().decode(
+        concat(...bandedPack.map((payload) => payload.subarray(1))).subarray(0, 4),
+      ),
+    ).toBe("PACK");
+  });
+
   test("sends only the new closure and reuses a persisted delta against the client's base", async () => {
     const delta = buildDelta(README.bytes.length, REVISED.bytes.length, [
       insertInstruction(REVISED.bytes),
