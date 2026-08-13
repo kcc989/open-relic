@@ -161,9 +161,10 @@ const treeLinks = (bytes: Uint8Array, includeBlobs: boolean): readonly ObjectLin
       throw new ObjectParseError("A tree entry ends mid-way.");
     }
 
+    const oid = toHex(bytes.subarray(nul + 1, nul + 21));
     if (modeIs(bytes, at, space, TREE_MODE)) {
       links.push({
-        oid: toHex(bytes.subarray(nul + 1, nul + 21)),
+        oid,
         type: "tree",
       });
     } else if (!modeIs(bytes, at, space, GITLINK_MODE)) {
@@ -174,10 +175,7 @@ const treeLinks = (bytes: Uint8Array, includeBlobs: boolean): readonly ObjectLin
         throw new ObjectParseError(`"${mode}" is not a tree entry mode.`);
       }
       if (includeBlobs) {
-        links.push({
-          oid: toHex(bytes.subarray(nul + 1, nul + 21)),
-          type: "blob",
-        });
+        links.push({ oid, type: "blob" });
       }
     }
 
@@ -221,6 +219,9 @@ export const linksToReach = (type: ObjectType, bytes: Uint8Array): readonly Obje
       return [];
   }
 };
+
+/** Every object named by this one, for walking the closure a fetch must send. */
+export const linksToFetch = linksToReach;
 
 export const commitParents = (bytes: Uint8Array): readonly string[] => commitHeader(bytes).parents;
 

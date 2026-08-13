@@ -131,6 +131,8 @@ type Step = "continue" | "wait" | "done";
 
 type State = "zlib-header" | "block-header" | "stored" | "compressed" | "checksum" | "done";
 
+export type InflateFormat = "zlib" | "raw";
+
 export class Inflater {
   readonly #output: Uint8Array;
   #outputAt = 0;
@@ -139,7 +141,8 @@ export class Inflater {
   #bitAt = 0;
   #atEnd = false;
 
-  #state: State = "zlib-header";
+  #state: State;
+  readonly #checksummed: boolean;
   #lastBlock = false;
   #storedRemaining = 0;
   #literals: Huffman = FIXED_LITERALS;
@@ -148,8 +151,10 @@ export class Inflater {
   #leftover: Uint8Array = EMPTY;
 
   /** `size` is the inflated length the pack promised, and is enforced. */
-  constructor(size: number) {
+  constructor(size: number, format: InflateFormat = "zlib") {
     this.#output = new Uint8Array(size);
+    this.#state = format === "zlib" ? "zlib-header" : "block-header";
+    this.#checksummed = format === "zlib";
   }
 
   get done(): boolean {
@@ -333,7 +338,7 @@ export class Inflater {
       return "wait";
     }
 
-    this.#state = this.#lastBlock ? "checksum" : "block-header";
+    this.#state = this.#stateAfterBlock();
     return "continue";
   }
 
@@ -402,7 +407,7 @@ export class Inflater {
     }
 
     if (symbol === 256) {
-      this.#state = this.#lastBlock ? "checksum" : "block-header";
+      this.#state = this.#stateAfterBlock();
       return "continue";
     }
 
@@ -446,6 +451,20 @@ export class Inflater {
       throw new InflateError("corrupt", "The zlib checksum does not match.");
     }
 
+    return "done";
+  }
+
+  #stateAfterBlock(): State {
+    if (!this.#lastBlock) {
+      return "block-header";
+    }
+    if (this.#checksummed) {
+      return "checksum";
+    }
+
+    // A raw deflate stream still pads its last block to a byte boundary. The
+    // caller owns whatever begins at the following byte (gzip's trailer).
+    this.#align();
     return "done";
   }
 

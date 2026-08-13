@@ -120,11 +120,45 @@ describe("without a token", () => {
 });
 
 describe("the other services on the advertisement path", () => {
-  test("upload-pack is still a stub", async () => {
-    const response = await advertise(`${INFO_REFS}?service=git-upload-pack`);
+  test("advertises upload-pack refs and honestly falls back from protocol v2", async () => {
+    const [durableObjectId] = harness.objects.mintedIds;
+    await harness.objects.seedRefs(durableObjectId!, { "refs/heads/main": MAIN });
 
-    expect(response.status).toBe(501);
-    expect(await errorCode(response)).toBe(ERROR_CODES.notImplemented);
+    const response = await harness.app.request(
+      new Request(`${INFO_REFS}?service=git-upload-pack`, {
+        headers: {
+          Authorization: `Bearer ${harness.repositoryToken}`,
+          "Git-Protocol": "version=2",
+        },
+      }),
+    );
+    const body = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe(
+      "application/x-git-upload-pack-advertisement",
+    );
+    expect(body).toStartWith("001e# service=git-upload-pack\n0000");
+    expect(body).toContain(`${MAIN} HEAD\0`);
+    expect(body).toContain(`${MAIN} refs/heads/main\n`);
+    expect(body).toContain("symref=HEAD:refs/heads/main");
+    expect(body).not.toContain("version 2");
+  });
+
+  test("honors an explicit protocol v1 request", async () => {
+    const [durableObjectId] = harness.objects.mintedIds;
+    await harness.objects.seedRefs(durableObjectId!, { "refs/heads/main": MAIN });
+
+    const response = await harness.app.request(
+      new Request(`${INFO_REFS}?service=git-upload-pack`, {
+        headers: {
+          Authorization: `Bearer ${harness.repositoryToken}`,
+          "Git-Protocol": "version=1",
+        },
+      }),
+    );
+
+    expect(await response.text()).toStartWith("001e# service=git-upload-pack\n0000000eversion 1\n");
   });
 
   const rejected: ReadonlyArray<readonly [string, string]> = [

@@ -4,8 +4,8 @@ Status: accepted
 
 A Git request arrives at the Worker, which resolves `namespace/repo` in the
 registry, passes the request through an authorization seam, and then calls a
-**named RPC method** on the repository's Durable Object — `advertiseReceivePack`
-today, one method per Git operation as the rest lands. The object's `fetch`
+**named RPC method** on the repository's Durable Object — `advertiseReceivePack`,
+`receivePack`, `advertiseUploadPack`, or `uploadPack`. The object's `fetch`
 handler is not part of the path and answers `501`.
 
 ## Why not forward the request

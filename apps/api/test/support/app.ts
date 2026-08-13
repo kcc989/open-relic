@@ -53,6 +53,8 @@ export class FakeRepositoryObjects implements RepositoryObjects {
       initialize: (init) => store.initialize(init),
       describe: () => store.describe(),
       advertiseReceivePack: () => store.advertiseReceivePack(),
+      advertiseUploadPack: (protocolVersion) => store.advertiseUploadPack(protocolVersion),
+      uploadPack: (body) => store.uploadPack(body),
       receivePack: (body) => store.receivePack(body),
       sweep: () => store.sweep(),
       destroy: async () => {
