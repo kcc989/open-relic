@@ -23,9 +23,10 @@ import {
  * resolves the name to that id first.
  *
  * The Git engine is not implemented, so what the object holds today is what
- * `git init --bare` writes before its first ref: `HEAD`, as a default branch.
- * `fetch` stays a `501` because Git Smart HTTP is still unimplemented; the REST
- * API talks to this object over RPC.
+ * `git init --bare` writes before its first ref: the `HEAD` file itself, in the
+ * KV half of the same storage the SQL schema lives in. `fetch` stays a `501`
+ * because Git Smart HTTP is still unimplemented; the REST API talks to this
+ * object over RPC.
  */
 export class RepositoryObject extends DurableObject {
   readonly #db: DrizzleSqliteDODatabase;
@@ -35,7 +36,7 @@ export class RepositoryObject extends DurableObject {
     super(ctx, env);
 
     this.#db = drizzle(ctx.storage);
-    this.#store = new RepositoryStore(this.#db);
+    this.#store = new RepositoryStore(this.#db, ctx.storage.kv);
 
     ctx.blockConcurrencyWhile(async () => {
       migrate(this.#db, migrations);
