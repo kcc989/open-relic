@@ -1,5 +1,9 @@
-import type { Repository } from "@open-relic/contracts";
-import { and, asc, eq } from "drizzle-orm";
+import type {
+  RepoInfo,
+  RepoSortField,
+  SortDirection,
+} from "@open-relic/contracts";
+import { and, asc, desc, eq, sql, type SQL } from "drizzle-orm";
 
 import type { SyncSqliteDatabase } from "./db/database.ts";
 import {
@@ -7,12 +11,14 @@ import {
   repositories,
   type RepositoryRow,
 } from "./db/registry-schema.ts";
+import { escapeLikePattern } from "./pagination.ts";
 
 export interface CreateRepositoryCommand {
   readonly namespaceSlug: string;
   readonly name: string;
   readonly description: string | null;
   readonly defaultBranch: string;
+  readonly readOnly: boolean;
   /**
    * The `RepositoryObject` this name will point at, allocated by the caller so
    * that a rejected create never leaves an initialized object behind.
@@ -25,14 +31,44 @@ export interface CreateRepositoryCommand {
  * an opaque string across the Durable Object RPC boundary.
  */
 export type CreateRepositoryOutcome =
-  | { readonly created: true; readonly repository: Repository }
+  | { readonly created: true; readonly repository: RepoInfo }
   | {
       readonly created: false;
       readonly reason: "name-taken" | "namespace-missing";
     };
 
+/**
+ * The position a page resumes from: the sort key of the last row handed out,
+ * and its name to break a tie. Not a wire cursor — the route is what encodes
+ * this into a string, and what binds it to the query that produced it.
+ */
+export interface RepositoryCursor {
+  readonly value: string;
+  readonly name: string;
+}
+
+export interface ListRepositoriesQuery {
+  readonly limit: number;
+  readonly cursor: RepositoryCursor | null;
+  readonly search: string | null;
+  readonly sort: RepoSortField;
+  readonly direction: SortDirection;
+}
+
+export interface RepositoryPage {
+  readonly repositories: readonly RepoInfo[];
+  /** Where the next page resumes; `null` once the walk has finished. */
+  readonly next: RepositoryCursor | null;
+}
+
 export interface RepositoryPointer {
-  readonly repository: Repository;
+  readonly repository: RepoInfo;
+  readonly durableObjectId: string;
+}
+
+/** What a delete answers with, and what its storage has to be discarded by. */
+export interface DeletedRepository {
+  readonly id: string;
   readonly durableObjectId: string;
 }
 
@@ -42,7 +78,8 @@ export interface RepositoryIndexClient {
   ) => Promise<CreateRepositoryOutcome>;
   readonly listRepositories: (
     namespaceSlug: string,
-  ) => Promise<readonly Repository[] | null>;
+    query: ListRepositoriesQuery,
+  ) => Promise<RepositoryPage | null>;
   readonly getRepository: (
     namespaceSlug: string,
     name: string,
@@ -50,16 +87,56 @@ export interface RepositoryIndexClient {
   readonly deleteRepository: (
     namespaceSlug: string,
     name: string,
-  ) => Promise<string | null>;
+  ) => Promise<DeletedRepository | null>;
 }
 
-const toRepository = (row: RepositoryRow): Repository => ({
-  namespace: row.namespaceSlug,
+const toRepository = (row: RepositoryRow): RepoInfo => ({
+  id: row.id,
   name: row.name,
   description: row.description,
-  defaultBranch: row.defaultBranch,
-  createdAt: row.createdAt,
+  default_branch: row.defaultBranch,
+  created_at: row.createdAt,
+  updated_at: row.updatedAt,
+  last_push_at: row.lastPushAt,
+  source: row.source,
+  read_only: row.readOnly,
 });
+
+const newRepositoryId = (): string =>
+  `repo_${crypto.randomUUID().replaceAll("-", "")}`;
+
+/**
+ * `last_push_at` is the one nullable sort key, and NULL breaks the tuple
+ * comparison a keyset cursor is built on. Coalescing it to the empty string
+ * makes the ordering total and puts never-pushed repositories first ascending,
+ * which is where SQLite's own NULLS FIRST would have put them.
+ */
+const sortExpression = (field: RepoSortField): SQL => {
+  switch (field) {
+    case "created_at":
+      return sql`${repositories.createdAt}`;
+    case "updated_at":
+      return sql`${repositories.updatedAt}`;
+    case "last_push_at":
+      return sql`coalesce(${repositories.lastPushAt}, '')`;
+    case "name":
+      return sql`${repositories.name}`;
+  }
+};
+
+/** The value the cursor has to carry for the row to be resumable from it. */
+const sortValue = (row: RepositoryRow, field: RepoSortField): string => {
+  switch (field) {
+    case "created_at":
+      return row.createdAt;
+    case "updated_at":
+      return row.updatedAt;
+    case "last_push_at":
+      return row.lastPushAt ?? "";
+    case "name":
+      return row.name;
+  }
+};
 
 /**
  * Shares a database with `NamespaceRegistry` — one registry object holds both —
@@ -97,14 +174,24 @@ export class RepositoryIndex {
         return { created: false, reason: "namespace-missing" };
       }
 
+      // One clock for both stamps: a repository that has never been touched
+      // reports the same `created_at` and `updated_at`.
+      const now = new Date().toISOString();
+
       const inserted = tx
         .insert(repositories)
         .values({
           namespaceSlug: command.namespaceSlug,
           name: command.name,
+          id: newRepositoryId(),
           durableObjectId: command.durableObjectId,
           description: command.description,
           defaultBranch: command.defaultBranch,
+          readOnly: command.readOnly,
+          source: null,
+          createdAt: now,
+          updatedAt: now,
+          lastPushAt: null,
         })
         .onConflictDoNothing()
         .returning()
@@ -117,10 +204,15 @@ export class RepositoryIndex {
     });
   }
 
-  /** `null` is a missing namespace; `[]` is one that owns no repositories. */
+  /**
+   * `null` is a missing namespace; an empty page is one that owns no matching
+   * repositories. One row beyond the limit is read to decide whether there is a
+   * next cursor without a second count query.
+   */
   async listRepositories(
     namespaceSlug: string,
-  ): Promise<readonly Repository[] | null> {
+    query: ListRepositoriesQuery,
+  ): Promise<RepositoryPage | null> {
     const namespace = await this.#db
       .select({ slug: namespaces.slug })
       .from(namespaces)
@@ -131,13 +223,49 @@ export class RepositoryIndex {
       return null;
     }
 
+    const expression = sortExpression(query.sort);
+    const ascending = query.direction === "asc";
+    const filters: SQL[] = [eq(repositories.namespaceSlug, namespaceSlug)];
+
+    if (query.search !== null) {
+      const pattern = `%${escapeLikePattern(query.search)}%`;
+      filters.push(
+        sql`${repositories.name} LIKE ${pattern} ESCAPE '\\'`,
+      );
+    }
+
+    if (query.cursor !== null) {
+      const { value, name } = query.cursor;
+
+      // A row-value comparison, so the sort key and the name tiebreak resume
+      // together — two repositories sharing a timestamp cannot hide each other.
+      filters.push(
+        ascending
+          ? sql`(${expression}, ${repositories.name}) > (${value}, ${name})`
+          : sql`(${expression}, ${repositories.name}) < (${value}, ${name})`,
+      );
+    }
+
     const rows = await this.#db
       .select()
       .from(repositories)
-      .where(eq(repositories.namespaceSlug, namespaceSlug))
-      .orderBy(asc(repositories.name));
+      .where(and(...filters))
+      .orderBy(
+        ascending ? asc(expression) : desc(expression),
+        ascending ? asc(repositories.name) : desc(repositories.name),
+      )
+      .limit(query.limit + 1);
 
-    return rows.map(toRepository);
+    const page = rows.slice(0, query.limit);
+    const last = page.at(-1);
+
+    return {
+      repositories: page.map(toRepository),
+      next:
+        rows.length > query.limit && last !== undefined
+          ? { value: sortValue(last, query.sort), name: last.name }
+          : null,
+    };
   }
 
   async getRepository(
@@ -163,12 +291,13 @@ export class RepositoryIndex {
 
   /**
    * Hands back the object id the dropped entry pointed at, so the caller can
-   * destroy its storage. `null` when there was no such repository.
+   * destroy its storage, and the public id the response answers with. `null`
+   * when there was no such repository.
    */
   async deleteRepository(
     namespaceSlug: string,
     name: string,
-  ): Promise<string | null> {
+  ): Promise<DeletedRepository | null> {
     const deleted = await this.#db
       .delete(repositories)
       .where(
@@ -177,8 +306,11 @@ export class RepositoryIndex {
           eq(repositories.name, name),
         ),
       )
-      .returning({ durableObjectId: repositories.durableObjectId });
+      .returning({
+        id: repositories.id,
+        durableObjectId: repositories.durableObjectId,
+      });
 
-    return deleted[0]?.durableObjectId ?? null;
+    return deleted[0] ?? null;
   }
 }
