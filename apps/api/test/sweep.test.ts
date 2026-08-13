@@ -98,6 +98,38 @@ describe("marking from refs", () => {
     expect(await objects.has(shared.oid)).toBe(true);
   });
 
+  test("marks a tree with more links than fit in one Cloudflare SQLite statement", async () => {
+    const files = Array.from({ length: 40 }, (_, index) => blob(`file ${index}\n`));
+    const root = tree(files.map((file, index) => treeEntry(`file-${index}.txt`, file)));
+    const tip = commit({ tree: root });
+    await write(tip, root, ...files);
+    await seedRefs(opened.db, { [MAIN]: tip.oid });
+
+    expect(await finish()).toMatchObject({
+      phase: "complete",
+      reachableObjects: 42,
+      reclaimedObjects: 0,
+    });
+    for (const file of files) {
+      expect(await objects.has(file.oid)).toBe(true);
+    }
+  });
+
+  test("seeds more ref roots than fit in one Cloudflare SQLite statement", async () => {
+    const roots = Array.from({ length: 40 }, (_, index) => blob(`root ${index}\n`));
+    await write(...roots);
+    await seedRefs(
+      opened.db,
+      Object.fromEntries(roots.map((root, index) => [`refs/heads/root-${index}`, root.oid])),
+    );
+
+    expect(await finish()).toMatchObject({
+      phase: "complete",
+      reachableObjects: 40,
+      reclaimedObjects: 0,
+    });
+  });
+
   test("does not read blob chunks merely to discover that blobs name nothing", async () => {
     const contents = blob("the bytes a sweep should not load\n");
     const root = tree([treeEntry("large.bin", contents)]);

@@ -19,6 +19,11 @@ export interface TestRepositoryStorage extends TestDatabase {
   readonly kv: SyncKv;
 }
 
+interface TestDatabaseOptions {
+  /** Reject queries that the target SQLite runtime could not execute. */
+  readonly maxBoundValues?: number;
+}
+
 /**
  * Durable Object KV structured-clones what it is given, so the fake does too —
  * otherwise a caller could hand over a buffer, reuse it, and see the store
@@ -47,10 +52,25 @@ export const createTestKv = (): SyncKv => {
  * them and `bun:sqlite` does not; without the pragma the tests would be looser
  * than production.
  */
-const createDatabase = (durableObject: "registry" | "repository"): TestDatabase => {
+const createDatabase = (
+  durableObject: "registry" | "repository",
+  options: TestDatabaseOptions = {},
+): TestDatabase => {
   const client = new Database(":memory:");
   client.run("PRAGMA foreign_keys = ON");
-  const db = drizzle({ client });
+  const maxBoundValues = options.maxBoundValues ?? 100;
+  const db = drizzle({
+    client,
+    logger: {
+      logQuery(_query, params) {
+        if (params.length > maxBoundValues) {
+          throw new RangeError(
+            `SQLite statement binds ${params.length} values; the configured maximum is ${maxBoundValues}.`,
+          );
+        }
+      },
+    },
+  });
 
   migrate(db, { migrationsFolder: migrationsFolder(durableObject) });
 
@@ -63,11 +83,14 @@ const createDatabase = (durableObject: "registry" | "repository"): TestDatabase 
 };
 
 /** The namespace registry's database: namespaces and the repository index. */
-export const createTestDatabase = (): TestDatabase => createDatabase("registry");
+export const createTestDatabase = (options: TestDatabaseOptions = {}): TestDatabase =>
+  createDatabase("registry", options);
 
 /** One repository object's storage, SQL and KV. */
-export const createTestRepositoryStorage = (): TestRepositoryStorage => ({
-  ...createDatabase("repository"),
+export const createTestRepositoryStorage = (
+  options: TestDatabaseOptions = {},
+): TestRepositoryStorage => ({
+  ...createDatabase("repository", options),
   kv: createTestKv(),
 });
 
