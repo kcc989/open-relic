@@ -72,6 +72,17 @@ export interface DeletedRepository {
   readonly durableObjectId: string;
 }
 
+/**
+ * What a push changes about a repository's index entry. `defaultBranch` is
+ * `null` on all but the one push that retargets HEAD, and the row is left
+ * alone then — the repository object stays authoritative for HEAD, and this
+ * column is the copy that keeps listing a namespace one query.
+ */
+export interface PushRecord {
+  readonly pushedAt: string;
+  readonly defaultBranch: string | null;
+}
+
 export interface RepositoryIndexClient {
   readonly createRepository: (
     command: CreateRepositoryCommand,
@@ -88,6 +99,11 @@ export interface RepositoryIndexClient {
     namespaceSlug: string,
     name: string,
   ) => Promise<DeletedRepository | null>;
+  readonly recordPush: (
+    namespaceSlug: string,
+    name: string,
+    record: PushRecord,
+  ) => Promise<void>;
 }
 
 const toRepository = (row: RepositoryRow): RepoInfo => ({
@@ -312,5 +328,34 @@ export class RepositoryIndex {
       });
 
     return deleted[0] ?? null;
+  }
+
+  /**
+   * Stamps a push onto the index entry, after the refs have already moved.
+   *
+   * Deliberately not part of the push: the repository object is where a push
+   * either happens or does not, and the row here is a copy for the REST
+   * surface's benefit. A stamp that fails leaves `last_push_at` stale rather
+   * than leaving a ref half-moved.
+   */
+  async recordPush(
+    namespaceSlug: string,
+    name: string,
+    record: PushRecord,
+  ): Promise<void> {
+    await this.#db
+      .update(repositories)
+      .set({
+        lastPushAt: record.pushedAt,
+        ...(record.defaultBranch === null
+          ? {}
+          : { defaultBranch: record.defaultBranch }),
+      })
+      .where(
+        and(
+          eq(repositories.namespaceSlug, namespaceSlug),
+          eq(repositories.name, name),
+        ),
+      );
   }
 }

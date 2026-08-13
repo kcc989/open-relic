@@ -8,9 +8,10 @@ import { migrate } from "drizzle-orm/durable-sqlite/migrator";
 
 import migrations from "../drizzle/repository/migrations.js";
 import { fail } from "./envelope.ts";
-import type { PackBase, PackSummary } from "./pack.ts";
+import type { PackBase } from "./pack.ts";
 import {
   RepositoryStore,
+  type ReceivePackOutcome,
   type RepositoryInit,
   type RepositorySnapshot,
 } from "./repository-store.ts";
@@ -51,8 +52,15 @@ export class RepositoryObject extends DurableObject {
     return this.#store.advertiseReceivePack();
   }
 
-  readPack(pack: ReadableStream<Uint8Array>): Promise<PackSummary> {
-    return this.#store.readPack(pack);
+  /**
+   * The request body streams in over RPC, so a pack reaches the object without
+   * the Worker buffering it, and the outcome comes back as bytes plus the two
+   * facts the registry needs.
+   */
+  receivePack(
+    body: ReadableStream<Uint8Array>,
+  ): Promise<ReceivePackOutcome> {
+    return this.#store.receivePack(body);
   }
 
   readObject(oid: string): Promise<PackBase | null> {

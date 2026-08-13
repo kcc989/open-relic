@@ -2,11 +2,11 @@ import { describe, expect, test } from "bun:test";
 
 import {
   RECEIVE_PACK_CAPABILITIES,
-  ZERO_OID,
   receivePackAdvertisement,
   receivePackAdvertisementStream,
   type AdvertisedRef,
 } from "../src/git/advertisement.ts";
+import { ZERO_OID } from "../src/object.ts";
 
 const decoder = new TextDecoder();
 

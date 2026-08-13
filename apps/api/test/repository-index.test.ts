@@ -417,6 +417,64 @@ describe("deleteRepository", () => {
   });
 });
 
+describe("recording a push", () => {
+  const pushed = async () => {
+    const store = await withNamespace();
+    await store.repositories.createRepository(command("acme", "demo"));
+    return store;
+  };
+
+  const demo = (store: ReturnType<typeof registry>) =>
+    store.repositories
+      .getRepository("acme", "demo")
+      .then((found) => found?.repository);
+
+  test("stamps last_push_at, which was null until something was pushed", async () => {
+    const store = await pushed();
+    expect((await demo(store))?.last_push_at).toBeNull();
+
+    await store.repositories.recordPush("acme", "demo", {
+      pushedAt: "2026-08-14T09:00:00.000Z",
+      defaultBranch: null,
+    });
+
+    expect((await demo(store))?.last_push_at).toBe("2026-08-14T09:00:00.000Z");
+  });
+
+  test("leaves the default branch alone on all but the push that retargets HEAD", async () => {
+    const store = await pushed();
+
+    await store.repositories.recordPush("acme", "demo", {
+      pushedAt: "2026-08-14T09:00:00.000Z",
+      defaultBranch: null,
+    });
+
+    expect((await demo(store))?.default_branch).toBe("main");
+  });
+
+  test("follows HEAD when the push retargeted it", async () => {
+    const store = await pushed();
+
+    await store.repositories.recordPush("acme", "demo", {
+      pushedAt: "2026-08-14T09:00:00.000Z",
+      defaultBranch: "master",
+    });
+
+    expect((await demo(store))?.default_branch).toBe("master");
+  });
+
+  test("touches nothing when the repository is not there", async () => {
+    const store = await pushed();
+
+    await store.repositories.recordPush("acme", "gone", {
+      pushedAt: "2026-08-14T09:00:00.000Z",
+      defaultBranch: "master",
+    });
+
+    expect((await demo(store))?.last_push_at).toBeNull();
+  });
+});
+
 describe("deleting a namespace", () => {
   test("takes its repositories with it and names their objects", async () => {
     const store = await withNamespace();

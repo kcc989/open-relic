@@ -11,6 +11,11 @@ export const ApiWorker = Cloudflare.Worker("Api", {
   // Alchemy supports, otherwise `bun run dev` refuses to start the Worker even
   // though a remote deploy would accept it.
   compatibility: { date: "2026-07-11" },
+  // A push reads a whole pack, hashes every object in it, and then walks the
+  // commits and trees it carried, all inside one request. The default 30
+  // seconds is a first push of any real repository; five minutes is the
+  // platform's ceiling and is what the connectivity walk is budgeted against.
+  limits: { cpuMs: 300_000 },
   env: {
     // Alchemy creates new Durable Object classes as `new_sqlite_classes`, so
     // this namespace comes with the SQLite storage the registry queries.

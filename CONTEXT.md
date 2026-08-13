@@ -55,6 +55,17 @@ _Avoid_: default branch, main branch
 An object no ref can reach. Invisible to every reader, and collectable.
 _Avoid_: dangling object, garbage
 
+**Fast-forward**:
+A ref update whose old value is an ancestor of its new one, so nothing that was
+reachable stops being reachable. The only kind of update a push may make.
+_Avoid_: forward update, non-destructive update
+
+**Connectivity**:
+That every object a ref can reach is present. Checked before a push moves a ref,
+because a ref naming an object that is not there is a repository no client can
+read and nothing after the fact can repair.
+_Avoid_: integrity, validation
+
 ## The wire
 
 **Pack**:
@@ -80,6 +91,16 @@ _Avoid_: feature, option, extension
 The server side of a push: read the client's ref update commands and pack, then
 accept or reject each command.
 _Avoid_: push handler, ingest
+
+**Command**:
+One line of a push: move this ref from this object to that one. A create spells
+its old value as the zero id and a delete its new one.
+_Avoid_: ref update request, instruction
+
+**Report-status**:
+The server's answer to a push: whether the pack could be read, and then one
+accepted-or-rejected line per command, in the order the client sent them.
+_Avoid_: push result, status report
 
 **Upload-pack**:
 The server side of a fetch or clone: negotiate what the client is missing, then

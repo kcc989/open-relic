@@ -1,7 +1,11 @@
 import { deflateSync } from "node:zlib";
 
+import { concat } from "../../src/bytes.ts";
 import type { ObjectType } from "../../src/object.ts";
 import { Sha1, fromHex } from "../../src/sha1.ts";
+
+/** The same helper the pack reader uses, so both halves agree byte for byte. */
+export { concat };
 
 /**
  * A pack writer, so tests can name the shapes they want — a delta chain, an
@@ -9,18 +13,6 @@ import { Sha1, fromHex } from "../../src/sha1.ts";
  * fixture that happens to contain one. Packs from a real Git client live in
  * `test/fixtures` and are what the compatibility test reads.
  */
-
-export const concat = (...parts: readonly Uint8Array[]): Uint8Array => {
-  const joined = new Uint8Array(
-    parts.reduce((total, part) => total + part.length, 0),
-  );
-  let at = 0;
-  for (const part of parts) {
-    joined.set(part, at);
-    at += part.length;
-  }
-  return joined;
-};
 
 const ENTRY_TYPES: Readonly<Record<ObjectType, number>> = {
   commit: 1,
@@ -126,7 +118,7 @@ export type PackEntry =
   | { readonly kind: "ref-delta"; readonly baseOid: string; readonly delta: Uint8Array };
 
 export interface BuiltPack {
-  readonly bytes: Uint8Array;
+  readonly bytes: Uint8Array<ArrayBuffer>;
   /** Where each entry began, which is what an `ofs-delta` counts back from. */
   readonly offsets: readonly number[];
 }

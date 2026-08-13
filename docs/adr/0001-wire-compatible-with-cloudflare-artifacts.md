@@ -43,7 +43,7 @@ behavior that has not been built at all rather than behavior built differently:
 | Tokens | route registered, answers `501`; create mints an unstored token | issued, listed, and revoked for real |
 | Contents | routes registered, answer `501` | serve refs, log, objects, and files |
 | Fork, import | routes registered, answer `501` | copy and mirror repositories |
-| `source`, `last_push_at` | always `null` — nothing writes them yet | set by import and by push |
+| `source` | always `null` — nothing writes it yet | set by import |
 
 These closed with the reshaping of the REST surface: the path shape, the v4
 envelope, `result_info` pagination, `errors[]` in place of RFC 9457 problem
