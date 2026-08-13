@@ -73,7 +73,6 @@ const parseCreateBody = (payload: unknown): ParsedCreate => {
     ok: true,
     command: {
       slug: body.slug,
-      // A namespace always renders as something; the slug is the fallback.
       displayName: displayName.value ?? body.slug,
       description: description.value,
     },
@@ -83,11 +82,6 @@ const parseCreateBody = (payload: unknown): ParsedCreate => {
 const namespaceLocation = (namespace: Namespace): string =>
   `${API_BASE_PATH}/namespaces/${namespace.slug}`;
 
-/**
- * Registers the four namespace endpoints from the contract manifest against a
- * live registry, replacing the `501` stubs `app.ts` installs for everything
- * that is still unimplemented.
- */
 export const registerNamespaceRoutes = (
   app: Hono<{ Bindings: ApiEnv }>,
   resolveRegistry: (env: ApiEnv) => NamespaceRegistryClient,
@@ -159,9 +153,8 @@ export const registerNamespaceRoutes = (
       );
     }
 
-    // Deleting a namespace takes its repositories with it. The index rows are
-    // already gone, so this only discards storage nothing can reach; the
-    // objects are independent of each other, so discard them concurrently.
+    // The index rows are already gone, so this only discards storage nothing
+    // can reach.
     if (outcome.repositoryObjectIds.length > 0) {
       const objects = resolveObjects(context.env);
       await Promise.all(

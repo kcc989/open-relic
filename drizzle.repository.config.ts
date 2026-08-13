@@ -1,9 +1,8 @@
 import { defineConfig } from "drizzle-kit";
 
 /**
- * Migrations for a repository's own Durable Object. One `RepositoryObject`
- * exists per repository and each has its own SQLite database, so it needs a
- * schema and a migrations bundle separate from the registry's — see
+ * Migrations for a repository's own Durable Object, separate from the
+ * registry's because each object class has its own storage. See
  * `drizzle.config.ts`.
  */
 export default defineConfig({

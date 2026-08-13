@@ -4,11 +4,6 @@ import {
   type ProblemDetails,
 } from "@open-relic/contracts";
 
-/**
- * Every status the API answers with a problem document. Keeping it a union
- * rather than `number` means a new failure mode has to be declared here before
- * it can be returned.
- */
 export type ProblemStatus = 400 | 404 | 409 | 501;
 
 export interface ProblemInit {
@@ -56,8 +51,8 @@ export const notFound = (
 });
 
 /**
- * A name that is already taken. The `type` is the caller's, because a client
- * distinguishes a taken namespace slug from a taken repository name by it.
+ * `type` is the caller's, unlike the helpers above: a client distinguishes a
+ * taken namespace slug from a taken repository name by it.
  */
 export const conflict = (
   operation: EndpointId,

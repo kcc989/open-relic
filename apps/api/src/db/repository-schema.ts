@@ -1,25 +1,21 @@
 import { sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 /**
- * The single row every `RepositoryObject` holds about itself.
+ * Deliberately no namespace or name: the registry owns naming. Nor HEAD — that
+ * lives in the object's KV storage as the literal Git file, so a detached HEAD
+ * is expressible and there is one authority for it (ADR-0003).
  *
- * Deliberately no namespace or name: the registry owns the naming, and a
- * repository object that also stored its name would be a second source of
- * truth for it. What lives here is Git state — `default_branch` is the target
- * of `HEAD`, which a bare repository has from the moment it is initialized and
- * before it has a single ref. Refs and objects join it here when the Git engine
- * lands.
+ * What is left is the row's existence, which is what marks the object
+ * initialized, and the creation time it shares with its index entry.
  */
 export const repositoryState = sqliteTable("repository_state", {
   id: text("id").primaryKey(),
-  defaultBranch: text("default_branch").notNull(),
   createdAt: text("created_at").notNull(),
 });
 
 /**
- * Primary key of the one row in {@link repositoryState}. A Durable Object is
- * already scoped to a single repository, so the table is a singleton and the
- * key exists only to make "upsert the state" expressible.
+ * The object is already scoped to one repository, so the table is a singleton;
+ * the key exists only to make "upsert the state" expressible.
  */
 export const REPOSITORY_STATE_ID = "repository";
 

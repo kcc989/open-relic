@@ -1,14 +1,23 @@
 import { afterEach, expect, test } from "bun:test";
 
+import { HEAD_KEY } from "../src/head.ts";
 import { RepositoryStore } from "../src/repository-store.ts";
-import { createTestRepositoryDatabase } from "./support/database.ts";
+import {
+  createTestRepositoryStorage,
+  type TestRepositoryStorage,
+} from "./support/database.ts";
 
 const openHandles: Array<() => void> = [];
 
+const storage = (): TestRepositoryStorage => {
+  const opened = createTestRepositoryStorage();
+  openHandles.push(opened.close);
+  return opened;
+};
+
 const store = () => {
-  const { db, close } = createTestRepositoryDatabase();
-  openHandles.push(close);
-  return new RepositoryStore(db);
+  const { db, kv } = storage();
+  return new RepositoryStore(db, kv);
 };
 
 afterEach(() => {
@@ -22,6 +31,8 @@ const init = {
   createdAt: "2026-08-13T00:00:00.000Z",
 };
 
+const DETACHED_OID = "9d5c1f2b8a4e7c0d3f6b1a8e5c2d9f0b7a4e6c31";
+
 test("an uninitialized repository object describes itself as empty", async () => {
   expect(await store().describe()).toBeNull();
 });
@@ -33,8 +44,19 @@ test("initializing records the branch HEAD will point at", async () => {
   expect(await repository.describe()).toEqual(init);
 });
 
+test("initializing writes HEAD as the bytes git init would write", async () => {
+  const opened = storage();
+  await new RepositoryStore(opened.db, opened.kv).initialize({
+    ...init,
+    defaultBranch: "release/2.0.x",
+  });
+
+  expect(opened.kv.get(HEAD_KEY)).toBe("ref: refs/heads/release/2.0.x\n");
+});
+
 test("initializing twice keeps the first state", async () => {
-  const repository = store();
+  const opened = storage();
+  const repository = new RepositoryStore(opened.db, opened.kv);
   await repository.initialize(init);
 
   const second = await repository.initialize({
@@ -44,13 +66,39 @@ test("initializing twice keeps the first state", async () => {
 
   expect(second).toEqual(init);
   expect(await repository.describe()).toEqual(init);
+  expect(opened.kv.get(HEAD_KEY)).toBe("ref: refs/heads/main\n");
 });
 
-test("a store reopened on the same database sees the existing state", async () => {
-  const { db, close } = createTestRepositoryDatabase();
-  await new RepositoryStore(db).initialize(init);
+test("a store reopened on the same storage sees the existing state", async () => {
+  const { db, kv } = storage();
+  await new RepositoryStore(db, kv).initialize(init);
 
   // A Durable Object is reconstructed against the same storage after eviction.
-  expect(await new RepositoryStore(db).describe()).toEqual(init);
-  close();
+  expect(await new RepositoryStore(db, kv).describe()).toEqual(init);
+});
+
+test("a detached HEAD leaves the repository with no default branch", async () => {
+  const opened = storage();
+  const repository = new RepositoryStore(opened.db, opened.kv);
+  await repository.initialize(init);
+
+  opened.kv.put(HEAD_KEY, `${DETACHED_OID}\n`);
+
+  expect(await repository.describe()).toEqual({
+    defaultBranch: null,
+    createdAt: init.createdAt,
+  });
+});
+
+test("an unreadable HEAD leaves the repository with no default branch", async () => {
+  const opened = storage();
+  const repository = new RepositoryStore(opened.db, opened.kv);
+  await repository.initialize(init);
+
+  opened.kv.delete(HEAD_KEY);
+
+  expect(await repository.describe()).toEqual({
+    defaultBranch: null,
+    createdAt: init.createdAt,
+  });
 });

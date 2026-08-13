@@ -27,18 +27,9 @@ import {
 } from "./stub-service.ts";
 
 export interface AppDependencies {
-  /** Stub boundary for every endpoint the Git engine has yet to implement. */
   readonly gitService?: GitService;
-  /**
-   * Resolves the namespace registry for a request. Defaults to the Durable
-   * Object bound as `NAMESPACES`; tests substitute a local one.
-   */
   readonly namespaceRegistry?: (env: ApiEnv) => NamespaceRegistryClient;
-  /** Resolves the repository index, which shares the registry's object. */
   readonly repositoryIndex?: (env: ApiEnv) => RepositoryIndexClient;
-  /**
-   * Resolves the per-repository Durable Objects bound as `REPOSITORIES`.
-   */
   readonly repositoryObjects?: (env: ApiEnv) => RepositoryObjects;
 }
 
@@ -48,8 +39,6 @@ export const createApp = ({
   repositoryIndex = repositoryIndexFromEnv,
   repositoryObjects = repositoryObjectsFromEnv,
 }: AppDependencies = {}) => {
-  // Bindings come from the Alchemy stack, so `context.env.NAMESPACES` is the
-  // same Durable Object namespace that `alchemy.run.ts` provisions.
   const app = new Hono<{ Bindings: ApiEnv }>();
 
   app.get("/healthz", (context) =>

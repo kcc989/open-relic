@@ -1,7 +1,7 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "eb505dae-aef9-443e-a842-5322e2fe6fd5",
+  "id": "e1ddd293-566b-437d-ad5a-b444b23f2500",
   "prevIds": [
     "00000000-0000-0000-0000-000000000000"
   ],
@@ -17,16 +17,6 @@
       "default": null,
       "generated": null,
       "name": "id",
-      "entityType": "columns",
-      "table": "repository_state"
-    },
-    {
-      "type": "text",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "default_branch",
       "entityType": "columns",
       "table": "repository_state"
     },

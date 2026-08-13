@@ -84,9 +84,19 @@ row and not a byte of Git data.
 
 The split is metadata against contents. The registry row holds what the API
 answers with, which keeps listing a namespace one query instead of a fan-out of
-RPCs. The repository object holds what Git owns — today that is only the branch
-`HEAD` points at, because a bare repository has one from `git init` and before
-its first ref. Both are written when the repository is created.
+RPCs. The repository object holds what Git owns — today that is only `HEAD`,
+because a bare repository has one from `git init` and before its first ref. Both
+are written when the repository is created.
+
+`HEAD` is stored the way Git stores it: the literal bytes of the `.git/HEAD`
+file — `ref: refs/heads/main\n` when symbolic, a bare 40-hex object id when
+detached — under one key in the object's synchronous KV storage. The API's
+`default_branch` is parsed back out of it, so a repository has one authority for
+`HEAD` rather than a branch column beside it, and a detached `HEAD` needs no
+schema change to be expressible. See
+[ADR-0003](./docs/adr/0003-head-is-the-literal-git-file.md). The registry's
+`repositories.default_branch` stays what it already was — a denormalized copy
+that keeps listing a namespace one query.
 
 | Endpoint | Behavior |
 | --- | --- |
@@ -142,6 +152,12 @@ repository's — each of which takes any synchronous drizzle SQLite database.
 Tests construct one over `bun:sqlite` and migrate it from the same `drizzle/`
 folder, so the queries and the generated schema run for real without a Workers
 runtime — the only thing the tests skip is the RPC hop.
+
+Git files are the exception to the schema. `RepositoryStore` also takes the
+synchronous KV half of the same storage, because `HEAD` is stored as the file
+Git writes rather than as columns; the tests hand it a `Map`. KV and SQL are one
+SQLite database inside the object, so a row and a file written in the same
+storage turn commit together.
 
 The registry's transactions run synchronously (`.all()` rather than `await`)
 because the driver is synchronous: a transaction body that yielded would commit

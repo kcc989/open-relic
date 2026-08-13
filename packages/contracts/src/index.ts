@@ -173,9 +173,6 @@ export const HTTP_ENDPOINTS = [
 export type EndpointId = (typeof HTTP_ENDPOINTS)[number]["id"];
 
 /**
- * Endpoints that the API actually serves. Everything else in the manifest is
- * still registered, but answers `501`.
- *
  * `app.ts` skips stub registration for these ids and the test suite derives its
  * "still a stub" expectations from the complement, so implementing an endpoint
  * is a one-line change here rather than a hunt through the router and tests.
@@ -216,12 +213,6 @@ export const PROBLEM_TYPES = {
   repositoryExists: `${PROBLEM_BASE_URI}/repository-exists`,
 } as const;
 
-/**
- * A namespace owns repositories the way a GitHub user or organization does. It
- * is addressed by its slug in both the REST API (`/api/v1/namespaces/:slug`)
- * and Git Smart HTTP (`/git/:slug/:repo.git`), so the slug has to survive being
- * a path segment on both.
- */
 export interface Namespace {
   readonly slug: string;
   readonly displayName: string;
@@ -244,15 +235,12 @@ export const NAMESPACE_DISPLAY_NAME_MAX_LENGTH = 100;
 export const NAMESPACE_DESCRIPTION_MAX_LENGTH = 500;
 
 /**
- * Lowercase alphanumerics and interior hyphens. Deliberately narrower than a
- * URL path segment: no percent-encoding, no case folding, and no `.git` suffix
- * ambiguity when the slug is concatenated into a Git remote URL.
+ * Deliberately narrower than a URL path segment: no percent-encoding and no
+ * case folding, because the slug is concatenated into a Git remote URL.
  */
 export const NAMESPACE_SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 
-/**
- * Slugs that would collide with a fixed path segment of the HTTP surface.
- */
+/** Slugs that would collide with a fixed path segment of the HTTP surface. */
 export const RESERVED_NAMESPACE_SLUGS: readonly string[] = [
   "api",
   "git",
@@ -300,14 +288,7 @@ export const describeNamespaceSlugViolation = (
   }
 };
 
-/**
- * A repository inside a namespace. `namespace` and `name` together are its
- * identity in both the REST API (`/api/v1/namespaces/:namespace/repos/:repo`)
- * and Git Smart HTTP (`/git/:namespace/:repo.git`).
- *
- * `defaultBranch` is the branch a fresh clone checks out — the target of the
- * repository's `HEAD`.
- */
+/** `defaultBranch` is what a fresh clone checks out: the target of `HEAD`. */
 export interface Repository {
   readonly namespace: string;
   readonly name: string;
@@ -330,14 +311,12 @@ export const REPOSITORY_NAME_MAX_LENGTH = 100;
 export const REPOSITORY_DESCRIPTION_MAX_LENGTH = 500;
 export const BRANCH_NAME_MAX_LENGTH = 255;
 
-/** The branch a repository gets when the create request does not name one. */
 export const DEFAULT_BRANCH = "main";
 
 /**
- * Lowercase alphanumerics with interior dots, underscores, and hyphens. Wider
- * than {@link NAMESPACE_SLUG_PATTERN} because repository names carry file-like
- * conventions (`my.config`, `dot_files`), but held to the same lowercase-only
- * rule so a clone URL never depends on case folding.
+ * Wider than {@link NAMESPACE_SLUG_PATTERN} because repository names carry
+ * file-like conventions (`my.config`, `dot_files`), but held to the same
+ * lowercase-only rule so a clone URL never depends on case folding.
  */
 export const REPOSITORY_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/;
 
@@ -385,9 +364,9 @@ export const describeRepositoryNameViolation = (
 export type BranchNameViolation = "empty" | "malformed" | "too-long";
 
 /**
- * A conservative subset of `git check-ref-format` for the one branch name the
- * API accepts today. It rejects everything Git rejects and some things Git
- * would allow; widening it later cannot invalidate a name already stored.
+ * A conservative subset of `git check-ref-format`: it rejects everything Git
+ * rejects and some things Git would allow, so widening it later cannot
+ * invalidate a name already stored.
  */
 export const validateBranchName = (name: string): BranchNameViolation | null => {
   if (name.length === 0) {
@@ -405,11 +384,9 @@ export const validateBranchName = (name: string): BranchNameViolation | null => 
     return "malformed";
   }
 
-  // Git applies its dot rules to each slash-separated component rather than to
-  // the name as a whole, so `foo/.bar` and `a.lock/b` are refs it will not
-  // create even though neither the name nor its first component offends. An
-  // empty component covers `foo//bar` and a trailing slash; a leading one is
-  // already excluded by the alphabet above.
+  // Git applies its dot rules per slash-separated component, not to the whole
+  // name, so `foo/.bar` and `a.lock/b` are refs it will not create. An empty
+  // component covers `foo//bar` and a trailing slash.
   for (const component of name.split("/")) {
     if (
       component.length === 0 ||

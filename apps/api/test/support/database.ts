@@ -4,6 +4,7 @@ import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { fileURLToPath } from "node:url";
 
 import type { SyncSqliteDatabase } from "../../src/db/database.ts";
+import type { SyncKv } from "../../src/db/kv.ts";
 
 const migrationsFolder = (durableObject: "registry" | "repository"): string =>
   fileURLToPath(new URL(`../../drizzle/${durableObject}`, import.meta.url));
@@ -13,18 +14,32 @@ export interface TestDatabase {
   readonly close: () => void;
 }
 
+export interface TestRepositoryStorage extends TestDatabase {
+  readonly kv: SyncKv;
+}
+
+export const createTestKv = (): SyncKv => {
+  const entries = new Map<string, string>();
+
+  return {
+    get: (key) => entries.get(key),
+    put: (key, value) => {
+      entries.set(key, value);
+    },
+    delete: (key) => {
+      entries.delete(key);
+    },
+  };
+};
+
 /**
- * An in-memory drizzle database migrated from the same `drizzle/` folder the
- * matching Durable Object applies at startup.
- *
- * `bun:sqlite` and a Durable Object's storage are both synchronous SQLite, and
- * drizzle presents them through the same query builder, so the query classes
- * and the generated schema are exercised for real here — the only thing the
- * tests skip is the RPC hop.
+ * An in-memory database migrated from the same `drizzle/` folder the matching
+ * Durable Object applies at startup, so the queries and the generated schema
+ * are exercised for real — the only thing the tests skip is the RPC hop.
  *
  * Foreign keys are enabled explicitly because Durable Object SQLite enforces
- * them and `bun:sqlite` does not by default; without the pragma the tests
- * would be looser than production.
+ * them and `bun:sqlite` does not; without the pragma the tests would be looser
+ * than production.
  */
 const createDatabase = (
   durableObject: "registry" | "repository",
@@ -46,6 +61,8 @@ const createDatabase = (
 /** The namespace registry's database: namespaces and the repository index. */
 export const createTestDatabase = (): TestDatabase => createDatabase("registry");
 
-/** One repository object's database. */
-export const createTestRepositoryDatabase = (): TestDatabase =>
-  createDatabase("repository");
+/** One repository object's storage, SQL and KV. */
+export const createTestRepositoryStorage = (): TestRepositoryStorage => ({
+  ...createDatabase("repository"),
+  kv: createTestKv(),
+});
