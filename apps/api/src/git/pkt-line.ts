@@ -8,8 +8,15 @@ const encoder = new TextEncoder();
 
 export const PKT_LINE_LENGTH_BYTES = 4;
 
-/** A pkt-line's length field is four hex digits, so `ffff` bounds the whole line. */
-export const PKT_LINE_MAX_PAYLOAD_BYTES = 0xffff - PKT_LINE_LENGTH_BYTES;
+/**
+ * Git's ceiling, which is lower than the length field's: four hex digits could
+ * frame `ffff` bytes, but a Git reader dies with `protocol error: bad line
+ * length` above 65520 on the wire.
+ */
+export const PKT_LINE_MAX_BYTES = 65520;
+
+export const PKT_LINE_MAX_PAYLOAD_BYTES =
+  PKT_LINE_MAX_BYTES - PKT_LINE_LENGTH_BYTES;
 
 export const FLUSH_PKT_TEXT = "0000";
 

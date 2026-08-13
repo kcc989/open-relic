@@ -38,7 +38,10 @@ describe("pktLine", () => {
     expect(text(pktLine(new Uint8Array([0x61, 0x62])))).toBe("0006ab");
   });
 
-  test("refuses a payload that will not fit its length field", () => {
+  test("refuses a payload larger than Git's maximum", () => {
+    // Git's own limit rather than what four hex digits could frame: a reader
+    // dies with `protocol error: bad line length` above 65520 on the wire.
+    expect(PKT_LINE_MAX_PAYLOAD_BYTES).toBe(65516);
     expect(() => pktLine("x".repeat(PKT_LINE_MAX_PAYLOAD_BYTES))).not.toThrow();
     expect(() => pktLine("x".repeat(PKT_LINE_MAX_PAYLOAD_BYTES + 1))).toThrow(
       RangeError,
