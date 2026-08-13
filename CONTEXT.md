@@ -20,26 +20,52 @@ _Avoid_: organization, owner, project
 A bare Git repository inside a namespace, identified by `namespace/name`.
 _Avoid_: artifact, project
 
+**Read-only repository**:
+A repository whose Git data may be read but whose refs may not be changed by a
+push. Read-only does not prevent control-plane operations such as deletion.
+_Avoid_: read-only token, immutable repository
+
+**Repository status**:
+The repository's availability phase: creating, importing, forking, or ready.
+Only a ready repository may serve its Git data.
+_Avoid_: lifecycle state, repository state
+
+**Import**:
+Creation of a repository from one branch of a public HTTPS Git remote. The
+branch is named by the request or discovered from the remote's HEAD; its history
+may be complete or shallow.
+_Avoid_: mirror, clone
+
 **Registry**:
 The single store of every namespace in the installation and the index of their
 repositories. It owns naming; a repository's contents are not in it.
 _Avoid_: catalog, directory
 
-**Token**:
-A repo-scoped credential presented to the Git protocol, carrying a read or write
-scope and an expiry.
-_Avoid_: key, secret, credential
+**Git token**:
+A repository-scoped credential presented to the Git protocol, carrying a read
+or write scope and an expiry.
+_Avoid_: repository token, token, key, secret, credential
 
-**Installation API token**:
-The installation-wide Bearer value that protects the REST control plane. It is
-operator-configured and is never a repo-scoped Token.
-_Avoid_: admin token, Token
+**API token**:
+An installation-wide credential presented to the REST API. It authorizes use of
+the whole Open Relic service rather than access to one repository's Git data.
+_Avoid_: master token, installation token, token
 
 ## Git data
 
 **Object**:
 An immutable blob, tree, commit, or tag, named by the SHA-1 of its contents. The
 unit everything in a repository is made of.
+
+**Logical usage**:
+The sum of the inflated sizes of the unique objects stored by a repository.
+Orphans count until collected; pack compression, chunks, and retained delta
+representations do not change the total.
+_Avoid_: repository size, physical storage, billed storage
+
+**Storage quota**:
+The maximum logical usage a storage boundary permits.
+_Avoid_: disk limit, object limit, storage size
 
 **Chunk**:
 A slice of one object's bytes, sized to fit a single storage row. An object is
