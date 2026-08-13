@@ -1,4 +1,14 @@
 {
   "extends": "../../tsconfig.base.json",
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  "compilerOptions": {
+    // drizzle-kit generates `drizzle/migrations.js`; reading it is what types
+    // the migration bundle the Durable Object applies.
+    "allowJs": true
+  },
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "types/**/*.d.ts",
+    "drizzle/**/*.js"
+  ]
 }

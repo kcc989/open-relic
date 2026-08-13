@@ -172,6 +172,28 @@ export const HTTP_ENDPOINTS = [
 
 export type EndpointId = (typeof HTTP_ENDPOINTS)[number]["id"];
 
+/**
+ * Endpoints that the API actually serves. Everything else in the manifest is
+ * still registered, but answers `501`.
+ *
+ * `app.ts` skips stub registration for these ids and the test suite derives its
+ * "still a stub" expectations from the complement, so implementing an endpoint
+ * is a one-line change here rather than a hunt through the router and tests.
+ */
+export const IMPLEMENTED_ENDPOINT_IDS = [
+  "namespaces.create",
+  "namespaces.list",
+  "namespaces.get",
+  "namespaces.delete",
+] as const satisfies readonly EndpointId[];
+
+export type ImplementedEndpointId = (typeof IMPLEMENTED_ENDPOINT_IDS)[number];
+
+export const isImplementedEndpoint = (
+  id: EndpointId,
+): id is ImplementedEndpointId =>
+  (IMPLEMENTED_ENDPOINT_IDS as readonly EndpointId[]).includes(id);
+
 export interface ProblemDetails {
   readonly type: string;
   readonly title: string;
@@ -179,3 +201,96 @@ export interface ProblemDetails {
   readonly detail: string;
   readonly operation?: EndpointId;
 }
+
+export const PROBLEM_BASE_URI = "https://open-relic.dev/problems" as const;
+
+export const PROBLEM_TYPES = {
+  invalidRequest: `${PROBLEM_BASE_URI}/invalid-request`,
+  namespaceExists: `${PROBLEM_BASE_URI}/namespace-exists`,
+  notFound: `${PROBLEM_BASE_URI}/not-found`,
+  notImplemented: `${PROBLEM_BASE_URI}/not-implemented`,
+} as const;
+
+/**
+ * A namespace owns repositories the way a GitHub user or organization does. It
+ * is addressed by its slug in both the REST API (`/api/v1/namespaces/:slug`)
+ * and Git Smart HTTP (`/git/:slug/:repo.git`), so the slug has to survive being
+ * a path segment on both.
+ */
+export interface Namespace {
+  readonly slug: string;
+  readonly displayName: string;
+  readonly description: string | null;
+  readonly createdAt: string;
+}
+
+export interface CreateNamespaceBody {
+  readonly slug: string;
+  readonly displayName?: string;
+  readonly description?: string;
+}
+
+export interface NamespaceListBody {
+  readonly namespaces: readonly Namespace[];
+}
+
+export const NAMESPACE_SLUG_MAX_LENGTH = 39;
+export const NAMESPACE_DISPLAY_NAME_MAX_LENGTH = 100;
+export const NAMESPACE_DESCRIPTION_MAX_LENGTH = 500;
+
+/**
+ * Lowercase alphanumerics and interior hyphens. Deliberately narrower than a
+ * URL path segment: no percent-encoding, no case folding, and no `.git` suffix
+ * ambiguity when the slug is concatenated into a Git remote URL.
+ */
+export const NAMESPACE_SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+
+/**
+ * Slugs that would collide with a fixed path segment of the HTTP surface.
+ */
+export const RESERVED_NAMESPACE_SLUGS: readonly string[] = [
+  "api",
+  "git",
+  "healthz",
+  "static",
+  "well-known",
+];
+
+export type NamespaceSlugViolation =
+  | "empty"
+  | "malformed"
+  | "reserved"
+  | "too-long";
+
+export const validateNamespaceSlug = (
+  slug: string,
+): NamespaceSlugViolation | null => {
+  if (slug.length === 0) {
+    return "empty";
+  }
+  if (slug.length > NAMESPACE_SLUG_MAX_LENGTH) {
+    return "too-long";
+  }
+  if (!NAMESPACE_SLUG_PATTERN.test(slug)) {
+    return "malformed";
+  }
+  if (RESERVED_NAMESPACE_SLUGS.includes(slug)) {
+    return "reserved";
+  }
+  return null;
+};
+
+export const describeNamespaceSlugViolation = (
+  violation: NamespaceSlugViolation,
+): string => {
+  switch (violation) {
+    case "empty":
+      return "A namespace slug is required.";
+    case "too-long":
+      return `A namespace slug may be at most ${NAMESPACE_SLUG_MAX_LENGTH} characters.`;
+    case "malformed":
+      return "A namespace slug may only contain lowercase letters, digits, and interior hyphens.";
+    case "reserved":
+      return "That namespace slug is reserved by the API.";
+  }
+};

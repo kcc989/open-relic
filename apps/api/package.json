@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@open-relic/contracts": "workspace:*",
+    "drizzle-orm": "1.0.0-rc.4",
     "effect": "4.0.0-rc.108",
     "hono": "4.13.1"
   }

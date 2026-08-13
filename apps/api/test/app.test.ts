@@ -1,6 +1,7 @@
 import {
   GIT_HTTP_ENDPOINTS,
   REST_ENDPOINTS,
+  isImplementedEndpoint,
 } from "@open-relic/contracts";
 import { describe, expect, test } from "bun:test";
 
@@ -22,7 +23,11 @@ describe("health", () => {
 });
 
 describe("REST API stubs", () => {
-  for (const endpoint of REST_ENDPOINTS) {
+  // Implemented endpoints have their own suites; everything else must still
+  // answer 501 so the manifest and the router cannot drift apart.
+  for (const endpoint of REST_ENDPOINTS.filter(
+    (candidate) => !isImplementedEndpoint(candidate.id),
+  )) {
     test(`${endpoint.method} ${endpoint.path}`, async () => {
       const response = await app.request(
         new Request(`http://local.test${endpoint.samplePath}`, {

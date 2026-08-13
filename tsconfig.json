@@ -1,9 +1,17 @@
 {
   "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    // drizzle-kit generates `apps/api/drizzle/migrations.js`; reading it is
+    // what types the migration bundle the Durable Object applies.
+    "allowJs": true
+  },
   "include": [
     "alchemy.run.ts",
+    "drizzle.config.ts",
     "apps/*/src/**/*.ts",
     "apps/*/test/**/*.ts",
+    "apps/*/types/**/*.d.ts",
+    "apps/*/drizzle/**/*.js",
     "packages/*/src/**/*.ts"
   ]
 }
