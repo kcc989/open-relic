@@ -17,6 +17,14 @@ import { ObjectStore } from "./object-store.ts";
 /** One alarm turn stays bounded even when a repository contains millions of objects. */
 export const SWEEP_BATCH_SIZE = 64;
 
+/** Durable Object SQLite rejects statements that bind more values than this. */
+const SQLITE_MAX_BOUND_VALUES = 100;
+/** `oid`, `expected_type`, and `pending` are bound for every reachable row. */
+const SWEEP_REACHABLE_BOUND_VALUES_PER_ROW = 3;
+const SWEEP_REACHABLE_INSERT_BATCH_SIZE = Math.floor(
+  SQLITE_MAX_BOUND_VALUES / SWEEP_REACHABLE_BOUND_VALUES_PER_ROW,
+);
+
 export interface SweepProgress {
   readonly phase: "mark" | "sweep" | "complete";
   readonly startedAt: string;
@@ -131,10 +139,10 @@ export class RepositorySweeper {
         .run();
 
       if (roots.length > 0) {
-        for (let at = 0; at < roots.length; at += 256) {
+        for (let at = 0; at < roots.length; at += SWEEP_REACHABLE_INSERT_BATCH_SIZE) {
           tx.insert(sweepReachable)
             .values(
-              roots.slice(at, at + 256).map(({ oid }) => ({
+              roots.slice(at, at + SWEEP_REACHABLE_INSERT_BATCH_SIZE).map(({ oid }) => ({
                 oid,
                 expectedType: null,
                 pending: true,
@@ -208,10 +216,10 @@ export class RepositorySweeper {
   async #finishMark(oid: string, links: ReturnType<typeof linksToReach>): Promise<void> {
     await this.#db.transaction((tx) => {
       if (links.length > 0) {
-        for (let at = 0; at < links.length; at += 256) {
+        for (let at = 0; at < links.length; at += SWEEP_REACHABLE_INSERT_BATCH_SIZE) {
           tx.insert(sweepReachable)
             .values(
-              links.slice(at, at + 256).map((link) => ({
+              links.slice(at, at + SWEEP_REACHABLE_INSERT_BATCH_SIZE).map((link) => ({
                 oid: link.oid,
                 expectedType: link.type,
                 pending: true,
