@@ -27,6 +27,11 @@ import {
 } from "./database.ts";
 import { result } from "./envelope.ts";
 
+export interface PausedForkSnapshot {
+  readonly captured: Promise<void>;
+  readonly release: () => void;
+}
+
 /**
  * The `REPOSITORIES` binding, standing in for the Durable Object namespace.
  * Each id gets a real {@link RepositoryStore} over its own in-memory storage;
@@ -36,9 +41,12 @@ import { result } from "./envelope.ts";
  */
 export class FakeRepositoryObjects implements RepositoryObjects {
   readonly #storages = new Map<string, TestRepositoryStorage>();
+  readonly #stores = new Map<string, RepositoryStore>();
   readonly #minted: string[] = [];
   readonly #destroyed: string[] = [];
   #serializedRpcLimit = Number.POSITIVE_INFINITY;
+  #forkWriteError: Error | null = null;
+  #afterForkSnapshot: (() => Promise<void>) | null = null;
 
   createId(): string {
     const id = `repository-object-${this.#minted.length + 1}`;
@@ -47,8 +55,7 @@ export class FakeRepositoryObjects implements RepositoryObjects {
   }
 
   get(durableObjectId: string): RepositoryObjectClient {
-    const storage = this.#storageFor(durableObjectId);
-    const store = new RepositoryStore(storage.db, storage.kv);
+    const store = this.#storeFor(durableObjectId);
 
     return {
       initialize: (init) => store.initialize(init),
@@ -57,6 +64,20 @@ export class FakeRepositoryObjects implements RepositoryObjects {
       advertiseUploadPack: (protocolVersion) => store.advertiseUploadPack(protocolVersion),
       uploadPack: (body) => store.uploadPack(body),
       receivePack: (body) => store.receivePack(body),
+      copyForkTo: (target, options) => {
+        const afterSnapshot = this.#afterForkSnapshot ?? undefined;
+        this.#afterForkSnapshot = null;
+        return store.copyForkTo(target, options, afterSnapshot);
+      },
+      writeForkObject: (object, bytes) => {
+        const error = this.#forkWriteError;
+        this.#forkWriteError = null;
+        if (error !== null) {
+          return Promise.reject(error);
+        }
+        return store.writeForkObject(object, bytes);
+      },
+      completeFork: (state) => store.completeFork(state),
       readObject: async (oid) => {
         const object = await store.readObject(oid);
         if (object !== null && object.bytes.byteLength >= this.#serializedRpcLimit) {
@@ -65,11 +86,13 @@ export class FakeRepositoryObjects implements RepositoryObjects {
         return object;
       },
       readBlob: (oid) => store.readBlob(oid),
+      hasObject: (oid) => store.hasObject(oid),
       sweep: () => store.sweep(),
       destroy: async () => {
         this.#destroyed.push(durableObjectId);
         this.#storages.get(durableObjectId)?.close();
         this.#storages.delete(durableObjectId);
+        this.#stores.delete(durableObjectId);
       },
     };
   }
@@ -102,11 +125,32 @@ export class FakeRepositoryObjects implements RepositoryObjects {
     return seedRefs(this.#storageFor(durableObjectId).db, entries);
   }
 
+  failNextForkWrite(error: Error): void {
+    this.#forkWriteError = error;
+  }
+
+  pauseNextForkAfterSnapshot(): PausedForkSnapshot {
+    let signalCaptured = (): void => {};
+    let release = (): void => {};
+    const captured = new Promise<void>((resolve) => {
+      signalCaptured = resolve;
+    });
+    const paused = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.#afterForkSnapshot = async () => {
+      signalCaptured();
+      await paused;
+    };
+    return { captured, release };
+  }
+
   close(): void {
     for (const storage of this.#storages.values()) {
       storage.close();
     }
     this.#storages.clear();
+    this.#stores.clear();
   }
 
   #storageFor(durableObjectId: string): TestRepositoryStorage {
@@ -117,6 +161,17 @@ export class FakeRepositoryObjects implements RepositoryObjects {
 
     const created = createTestRepositoryStorage();
     this.#storages.set(durableObjectId, created);
+    return created;
+  }
+
+  #storeFor(durableObjectId: string): RepositoryStore {
+    const existing = this.#stores.get(durableObjectId);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const storage = this.#storageFor(durableObjectId);
+    const created = new RepositoryStore(storage.db, storage.kv);
+    this.#stores.set(durableObjectId, created);
     return created;
   }
 }

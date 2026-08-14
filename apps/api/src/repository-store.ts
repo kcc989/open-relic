@@ -39,7 +39,8 @@ import {
   type Head,
 } from "./head.ts";
 import { ObjectStore, RepositoryStorageExhaustedError } from "./object-store.ts";
-import { PackError, readPack, type PackBase } from "./pack.ts";
+import type { ObjectType } from "./object.ts";
+import { PackError, readPack, type PackBase, type PackObject } from "./pack.ts";
 import { RepositorySweeper, type SweepProgress } from "./sweep.ts";
 
 /** The Git side of a `git init --bare`; the registry owns naming. */
@@ -72,6 +73,42 @@ export interface ReceivePackOutcome {
   readonly retargetedTo: string | null;
 }
 
+export interface ForkOptions {
+  readonly createdAt: string;
+  readonly defaultBranchOnly: boolean;
+}
+
+export interface ForkState {
+  readonly createdAt: string;
+  readonly head: string;
+  readonly refs: readonly AdvertisedRef[];
+}
+
+export interface ForkTarget {
+  readonly writeForkObject: (
+    object: ForkObject,
+    bytes: ReadableStream<Uint8Array>,
+  ) => Promise<void>;
+  readonly completeFork: (state: ForkState) => Promise<void>;
+}
+
+export interface ForkObject {
+  readonly oid: string;
+  readonly type: ObjectType;
+  readonly size: number;
+}
+
+export interface ForkOutcome {
+  readonly objects: number;
+}
+
+export class ForkError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ForkError";
+  }
+}
+
 export interface RepositoryObjectClient {
   readonly initialize: (init: RepositoryInit) => Promise<RepositorySnapshot>;
   readonly describe: () => Promise<RepositorySnapshot | null>;
@@ -81,8 +118,15 @@ export interface RepositoryObjectClient {
   ) => Promise<ReadableStream<Uint8Array>>;
   readonly uploadPack: (body: ReadableStream<Uint8Array>) => Promise<ReadableStream<Uint8Array>>;
   readonly receivePack: (body: ReadableStream<Uint8Array>) => Promise<ReceivePackOutcome>;
+  readonly copyForkTo: (target: ForkTarget, options: ForkOptions) => Promise<ForkOutcome>;
+  readonly writeForkObject: (
+    object: ForkObject,
+    bytes: ReadableStream<Uint8Array>,
+  ) => Promise<void>;
+  readonly completeFork: (state: ForkState) => Promise<void>;
   readonly readObject: (oid: string) => Promise<PackBase | null>;
   readonly readBlob: (oid: string) => Promise<ReadableStream<Uint8Array> | null>;
+  readonly hasObject: (oid: string) => Promise<boolean>;
   readonly sweep: () => Promise<SweepProgress>;
   readonly destroy: () => Promise<void>;
 }
@@ -210,6 +254,138 @@ export class RepositoryStore {
     return this.#exclusive(async () => {
       await before;
       return this.#receivePack(body);
+    });
+  }
+
+  /**
+   * Copy one stable, reachable source snapshot while excluding pushes and
+   * sweeps. The target receives one resolved object at a time, so the copy's
+   * memory is bounded by the largest object rather than by repository size.
+   */
+  async copyForkTo(
+    target: ForkTarget,
+    options: ForkOptions,
+    afterSnapshot: () => Promise<void> = async () => {},
+  ): Promise<ForkOutcome> {
+    return this.#exclusive(async () => {
+      const headContents = this.#kv.get(HEAD_KEY);
+      if (headContents === undefined) {
+        throw new ForkError("The source repository has no readable HEAD.");
+      }
+
+      const head = parseHead(headContents);
+      if (head === null) {
+        throw new ForkError("The source repository has an unreadable HEAD.");
+      }
+      const capturedRefs = await this.#refs();
+      const copiedRefs = options.defaultBranchOnly
+        ? head.kind === "symbolic"
+          ? capturedRefs.filter((ref) => ref.name === head.ref)
+          : []
+        : capturedRefs;
+      const pending = copiedRefs.map((ref) => ref.oid);
+      if (head.kind === "detached") {
+        pending.push(head.oid);
+      }
+
+      // Tests use this seam to land a concurrent push after the snapshot was
+      // chosen. The operation gate keeps that push queued until the copy ends.
+      await afterSnapshot();
+
+      const copied = new Set<string>();
+      while (pending.length > 0) {
+        const oid = pending.pop()!;
+        if (copied.has(oid)) {
+          continue;
+        }
+
+        const object = await this.#objects.read(oid);
+        if (object === null) {
+          throw new ForkError(`Reachable source object ${oid} is missing.`);
+        }
+        copied.add(oid);
+
+        for (const link of linksToFetch(object.type, object.bytes)) {
+          pending.push(link.oid);
+        }
+
+        const transferable =
+          object.bytes.buffer instanceof ArrayBuffer
+            ? new Uint8Array(object.bytes.buffer, object.bytes.byteOffset, object.bytes.byteLength)
+            : new Uint8Array(object.bytes);
+
+        await target.writeForkObject(
+          { oid, type: object.type, size: object.bytes.length },
+          new ReadableStream<Uint8Array>({
+            type: "bytes",
+            start(controller) {
+              // workerd rejects zero-length chunks in byte streams. Closing
+              // without enqueueing still represents an empty Git object.
+              if (transferable.byteLength > 0) {
+                controller.enqueue(transferable);
+              }
+              controller.close();
+            },
+          }),
+        );
+      }
+
+      await target.completeFork({
+        createdAt: options.createdAt,
+        head: headContents,
+        refs: copiedRefs,
+      });
+
+      return { objects: copied.size };
+    });
+  }
+
+  /** The target side of a fork; it owns fresh object rows and chunk values. */
+  async writeForkObject(object: ForkObject, bytes: ReadableStream<Uint8Array>): Promise<void> {
+    const contents = new Uint8Array(object.size);
+    const reader = bytes.getReader();
+    let at = 0;
+    try {
+      while (true) {
+        const next = await reader.read();
+        if (next.done) {
+          break;
+        }
+        if (at + next.value.length > contents.length) {
+          await reader.cancel("Fork object exceeded its declared size.");
+          throw new ForkError(`Fork object ${object.oid} exceeded its declared size.`);
+        }
+        contents.set(next.value, at);
+        at += next.value.length;
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    if (at !== contents.length) {
+      throw new ForkError(
+        `Fork object ${object.oid} held ${at} bytes where it declared ${object.size}.`,
+      );
+    }
+    await this.#objects.write({ ...object, bytes: contents, delta: null } satisfies PackObject);
+  }
+
+  /**
+   * Make copied Git data visible inside the target only after every reachable
+   * object arrived. The registry keeps the name unavailable until after this.
+   */
+  async completeFork(state: ForkState): Promise<void> {
+    await this.#exclusive(async () => {
+      await this.#db.transaction((tx) => {
+        tx.insert(repositoryState)
+          .values({ id: REPOSITORY_STATE_ID, createdAt: state.createdAt })
+          .onConflictDoNothing()
+          .run();
+        for (const ref of state.refs) {
+          tx.insert(refs).values({ name: ref.name, objectId: ref.oid }).onConflictDoNothing().run();
+        }
+        this.#kv.put(HEAD_KEY, state.head);
+      });
     });
   }
 

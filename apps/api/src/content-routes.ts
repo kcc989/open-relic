@@ -3,7 +3,7 @@ import type { Hono } from "hono";
 
 import type { ApiEnv } from "../../../alchemy.run.ts";
 import type { RepositoryObjects } from "./bindings.ts";
-import { fail, notFound, ok } from "./envelope.ts";
+import { fail, forkInProgress, notFound, ok } from "./envelope.ts";
 import { isObjectId, type ObjectType } from "./object.ts";
 import { ObjectParseError } from "./object-parse.ts";
 import { parseCommit, parseTree } from "./repository-content.ts";
@@ -44,6 +44,9 @@ const objectNotFound = (kind: DirectObjectKind): Response =>
 const repositoryNotFound = (namespaceSlug: string, repositoryName: string): Response =>
   notFound(`No repository named "${namespaceSlug}/${repositoryName}" exists.`);
 
+const repositoryIsForking = (namespaceSlug: string, repositoryName: string): Response =>
+  forkInProgress(`The repository "${namespaceSlug}/${repositoryName}" is still being forked.`);
+
 const corruptObject = (): Response =>
   documentedFailure(500, ERROR_CODES.internalError, "A stored git object is corrupt.");
 
@@ -54,7 +57,13 @@ export const registerContentRoutes = (
 ): void => {
   const resolveRepository = async (env: ApiEnv, namespaceSlug: string, repositoryName: string) => {
     const found = await resolveIndex(env).getRepository(namespaceSlug, repositoryName);
-    return found === null ? null : resolveObjects(env).get(found.durableObjectId);
+    if (found === null) {
+      return { response: repositoryNotFound(namespaceSlug, repositoryName) } as const;
+    }
+    if (found.status === "forking") {
+      return { response: repositoryIsForking(namespaceSlug, repositoryName) } as const;
+    }
+    return { repository: resolveObjects(env).get(found.durableObjectId) } as const;
   };
 
   app.get(`${REPO}/commit/:hash`, async (context) => {
@@ -65,11 +74,11 @@ export const registerContentRoutes = (
 
     const namespaceSlug = context.req.param("namespace");
     const repositoryName = context.req.param("repo");
-    const repository = await resolveRepository(context.env, namespaceSlug, repositoryName);
-    if (repository === null) {
-      return repositoryNotFound(namespaceSlug, repositoryName);
+    const resolved = await resolveRepository(context.env, namespaceSlug, repositoryName);
+    if ("response" in resolved) {
+      return resolved.response;
     }
-    const object = await repository.readObject(hash);
+    const object = await resolved.repository.readObject(hash);
     if (object === null) {
       return objectNotFound("commit");
     }
@@ -95,11 +104,11 @@ export const registerContentRoutes = (
 
     const namespaceSlug = context.req.param("namespace");
     const repositoryName = context.req.param("repo");
-    const repository = await resolveRepository(context.env, namespaceSlug, repositoryName);
-    if (repository === null) {
-      return repositoryNotFound(namespaceSlug, repositoryName);
+    const resolved = await resolveRepository(context.env, namespaceSlug, repositoryName);
+    if ("response" in resolved) {
+      return resolved.response;
     }
-    const object = await repository.readObject(hash);
+    const object = await resolved.repository.readObject(hash);
     if (object === null) {
       return objectNotFound("tree");
     }
@@ -125,11 +134,11 @@ export const registerContentRoutes = (
 
     const namespaceSlug = context.req.param("namespace");
     const repositoryName = context.req.param("repo");
-    const repository = await resolveRepository(context.env, namespaceSlug, repositoryName);
-    if (repository === null) {
-      return repositoryNotFound(namespaceSlug, repositoryName);
+    const resolved = await resolveRepository(context.env, namespaceSlug, repositoryName);
+    if ("response" in resolved) {
+      return resolved.response;
     }
-    const stream = await repository.readBlob(hash);
+    const stream = await resolved.repository.readBlob(hash);
     if (stream === null) {
       return objectNotFound("blob");
     }

@@ -9,6 +9,11 @@ import type { UploadProtocolVersion } from "./git/advertisement.ts";
 import type { PackBase } from "./pack.ts";
 import {
   RepositoryStore,
+  type ForkOptions,
+  type ForkObject,
+  type ForkOutcome,
+  type ForkState,
+  type ForkTarget,
   type ReceivePackOutcome,
   type RepositoryInit,
   type RepositorySnapshot,
@@ -73,6 +78,18 @@ export class RepositoryObject extends DurableObject {
     return this.#store.receivePack(body, scheduled);
   }
 
+  copyForkTo(target: ForkTarget, options: ForkOptions): Promise<ForkOutcome> {
+    return this.#store.copyForkTo(target, options);
+  }
+
+  writeForkObject(object: ForkObject, bytes: ReadableStream<Uint8Array>): Promise<void> {
+    return this.#store.writeForkObject(object, bytes);
+  }
+
+  completeFork(state: ForkState): Promise<void> {
+    return this.#store.completeFork(state);
+  }
+
   /** Start or resume reclamation; alarms carry subsequent batches. */
   async sweep(): Promise<SweepProgress> {
     return this.#advanceSweep();
@@ -88,6 +105,10 @@ export class RepositoryObject extends DurableObject {
 
   readBlob(oid: string): Promise<ReadableStream<Uint8Array> | null> {
     return this.#store.readBlob(oid);
+  }
+
+  hasObject(oid: string): Promise<boolean> {
+    return this.#store.hasObject(oid);
   }
 
   /**

@@ -3,7 +3,13 @@ import type { Hono } from "hono";
 
 import type { ApiEnv } from "../../../alchemy.run.ts";
 import type { RepositoryObjects } from "./bindings.ts";
-import { forbidden, gitAuthenticationRequired, invalidInput, notFound } from "./envelope.ts";
+import {
+  forbidden,
+  forkInProgress,
+  gitAuthenticationRequired,
+  invalidInput,
+  notFound,
+} from "./envelope.ts";
 import {
   RECEIVE_PACK_ADVERTISEMENT_CONTENT_TYPE,
   RECEIVE_PACK_SERVICE,
@@ -68,7 +74,13 @@ export const registerGitRoutes = (
 
     const found = await repositoryIndex(context.env).getRepository(namespace, name);
 
-    return found ?? notFound(`No repository named "${namespace}/${name}" exists.`);
+    if (found === null) {
+      return notFound(`No repository named "${namespace}/${name}" exists.`);
+    }
+    if (found.status === "forking") {
+      return forkInProgress(`The repository "${namespace}/${name}" is still being forked.`);
+    }
+    return found;
   };
 
   // Both advertisements share a path and are told apart by the service Git

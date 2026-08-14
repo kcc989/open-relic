@@ -19,10 +19,19 @@ import { Schema } from "effect";
 import type { Hono } from "hono";
 
 import type { ApiEnv } from "../../../alchemy.run.ts";
-import { invalidInput, invalidRepoName, invalidTtl, notFound, ok, okList } from "./envelope.ts";
+import {
+  forkInProgress,
+  invalidInput,
+  invalidRepoName,
+  invalidTtl,
+  notFound,
+  ok,
+  okList,
+} from "./envelope.ts";
 import { parseChoice, parseLimit } from "./query.ts";
 import { decodeJson, type Json, type Rejected } from "./request-body.ts";
 import type { TokenRegistryClient } from "./token-registry.ts";
+import type { RepositoryIndexClient } from "./repository-index.ts";
 
 const CreateTokenJson = Schema.Struct({
   repo: Schema.optionalKey(
@@ -106,6 +115,7 @@ const noSuchRepository = (namespaceSlug: string, repositoryName: string): string
 export const registerTokenRoutes = (
   app: Hono<{ Bindings: ApiEnv }>,
   resolveTokens: (env: ApiEnv) => TokenRegistryClient,
+  resolveRepositories: (env: ApiEnv) => RepositoryIndexClient,
 ): void => {
   app.post(`${NAMESPACES_PATH}/:namespace/tokens`, async (context) => {
     let payload: Json;
@@ -128,6 +138,15 @@ export const registerTokenRoutes = (
     }
 
     const namespaceSlug = context.req.param("namespace");
+    const repository = await resolveRepositories(context.env).getRepository(
+      namespaceSlug,
+      parsed.repositoryName,
+    );
+    if (repository?.status === "forking") {
+      return forkInProgress(
+        `The repository "${namespaceSlug}/${parsed.repositoryName}" is still being forked.`,
+      );
+    }
     const outcome = await resolveTokens(context.env).createToken({
       namespaceSlug,
       repositoryName: parsed.repositoryName,
@@ -167,6 +186,15 @@ export const registerTokenRoutes = (
 
     const namespaceSlug = context.req.param("namespace");
     const repositoryName = context.req.param("repo");
+    const repository = await resolveRepositories(context.env).getRepository(
+      namespaceSlug,
+      repositoryName,
+    );
+    if (repository?.status === "forking") {
+      return forkInProgress(
+        `The repository "${namespaceSlug}/${repositoryName}" is still being forked.`,
+      );
+    }
     const result = await resolveTokens(context.env).listTokens(namespaceSlug, repositoryName, {
       state: state.value,
       page: page.value,

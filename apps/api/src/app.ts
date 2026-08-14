@@ -76,7 +76,7 @@ export const createApp = ({
   registerNamespaceRoutes(app, namespaceRegistry, repositoryObjects);
   registerRepositoryRoutes(app, repositoryIndex, repositoryObjects, tokenRegistry);
   registerContentRoutes(app, repositoryIndex, repositoryObjects);
-  registerTokenRoutes(app, tokenRegistry);
+  registerTokenRoutes(app, tokenRegistry, repositoryIndex);
 
   const invokeStub = async (operation: EndpointId): Promise<Response> => {
     const failure = await Effect.runPromise(

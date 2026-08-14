@@ -1,0 +1,1 @@
+ALTER TABLE `repositories` ADD `status` text DEFAULT 'ready' NOT NULL;
