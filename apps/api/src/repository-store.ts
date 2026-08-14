@@ -38,6 +38,7 @@ import {
   type RefStatus,
 } from "./git/receive-pack.ts";
 import { uploadPackResultStream } from "./git/upload-pack.ts";
+import { uploadPackV2ResultStream } from "./git/upload-pack-v2.ts";
 import {
   fetchRemoteBranch,
   type RemoteBranchRequest,
@@ -324,6 +325,9 @@ export const withRepositoryStore = <TBase extends RepositoryStorageConstructor>(
     async advertiseUploadPack(
       protocolVersion: UploadProtocolVersion,
     ): Promise<ReadableStream<Uint8Array>> {
+      if (protocolVersion === 2) {
+        return uploadPackAdvertisementStream([], null, protocolVersion);
+      }
       const shallow = [...(await this.#shallow())].sort();
       return uploadPackAdvertisementStream(
         await this.#uploadRefs(),
@@ -334,14 +338,21 @@ export const withRepositoryStore = <TBase extends RepositoryStorageConstructor>(
     }
 
     /** A fetch response is pulled object by object rather than assembled here. */
-    async uploadPack(body: ReadableStream<Uint8Array>): Promise<ReadableStream<Uint8Array>> {
-      const advertisedOids = new Set((await this.#uploadRefs()).map((ref) => ref.oid));
+    async uploadPack(
+      body: ReadableStream<Uint8Array>,
+      protocolVersion: UploadProtocolVersion = 0,
+    ): Promise<ReadableStream<Uint8Array>> {
+      const refs = await this.#uploadRefs();
+      const advertisedOids = new Set(refs.map((ref) => ref.oid));
       const head = this.#head();
       if (head?.kind === "detached") {
         advertisedOids.add(head.oid);
       }
 
-      return uploadPackResultStream(body, this.#objects, advertisedOids, await this.#shallow());
+      const shallow = await this.#shallow();
+      return protocolVersion === 2
+        ? uploadPackV2ResultStream(body, refs, head, this.#objects, advertisedOids, shallow)
+        : uploadPackResultStream(body, this.#objects, advertisedOids, shallow);
     }
 
     async importBranch(

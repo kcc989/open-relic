@@ -117,6 +117,25 @@ describe("a real Git client", () => {
     }
   });
 
+  test("clones a pushed repository with protocol v2", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch: (request) => harness.app.fetch(request),
+    });
+    const checkout = join(directory, "checkout-v2");
+
+    try {
+      await run(["git", "-c", "protocol.version=2", "clone", remoteFor(server.port), checkout]);
+
+      expect(await readFile(join(checkout, "README.md"), "utf8")).toBe("Anvil firmware\n");
+      expect(await run(["git", "-C", checkout, "rev-parse", "HEAD"])).toBe(FIRST.oid);
+      expect(await run(["git", "-C", checkout, "rev-parse", "refs/tags/v1^{}"])).toBe(FIRST.oid);
+      expect(await run(["git", "-C", checkout, "fsck", "--full"])).toBe("");
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("depth-clones and subsequently fetches from a shallow repository", async () => {
     const server = Bun.serve({
       port: 0,
@@ -124,6 +143,7 @@ describe("a real Git client", () => {
     });
     const writer = join(directory, "writer");
     const reader = join(directory, "reader");
+    const readerV2 = join(directory, "reader-v2");
 
     try {
       await run(["git", "clone", remoteFor(server.port), writer]);
@@ -150,6 +170,9 @@ describe("a real Git client", () => {
         reader,
       ]);
       expect(await run(["git", "-C", reader, "rev-list", "--count", "HEAD"])).toBe("1");
+      await run(["git", "-c", "protocol.version=2", "clone", remoteFor(server.port), readerV2]);
+      expect(await run(["git", "-C", readerV2, "rev-list", "--count", "HEAD"])).toBe("3");
+      expect((await readFile(join(readerV2, ".git", "shallow"), "utf8")).trim()).toBe(FIRST.oid);
 
       await writeFile(join(writer, "README.md"), "Anvil firmware, fourth\n");
       await run(["git", "-C", writer, "add", "README.md"]);
@@ -157,14 +180,16 @@ describe("a real Git client", () => {
       const remoteTip = await run(["git", "-C", writer, "rev-parse", "HEAD"]);
       await run(["git", "-C", writer, "push", "origin", "HEAD:main"]);
 
-      await run(["git", "-C", reader, "fetch", "origin"]);
+      await run(["git", "-c", "protocol.version=1", "-C", reader, "fetch", "origin"]);
+      await run(["git", "-c", "protocol.version=1", "-C", readerV2, "fetch", "origin"]);
 
       expect(await run(["git", "-C", reader, "rev-parse", "origin/main"])).toBe(remoteTip);
       expect(await run(["git", "-C", reader, "show", "origin/main:README.md"])).toBe(
         "Anvil firmware, fourth",
       );
+      expect(await run(["git", "-C", readerV2, "rev-parse", "origin/main"])).toBe(remoteTip);
 
-      await run(["git", "-C", reader, "fetch", "--depth=3", "origin"]);
+      await run(["git", "-c", "protocol.version=1", "-C", reader, "fetch", "--depth=3", "origin"]);
       expect(await run(["git", "-C", reader, "rev-list", "--count", "origin/main"])).toBe("3");
     } finally {
       server.stop(true);

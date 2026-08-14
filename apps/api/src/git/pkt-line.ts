@@ -19,6 +19,7 @@ export const PKT_LINE_MAX_BYTES = 65520;
 export const PKT_LINE_MAX_PAYLOAD_BYTES = PKT_LINE_MAX_BYTES - PKT_LINE_LENGTH_BYTES;
 
 export const FLUSH_PKT_TEXT = "0000";
+export const DELIMITER_PKT_TEXT = "0001";
 
 /**
  * A fresh array per call rather than a shared constant: enqueuing a buffer into
@@ -26,6 +27,9 @@ export const FLUSH_PKT_TEXT = "0000";
  * response.
  */
 export const flushPkt = (): Uint8Array => encoder.encode(FLUSH_PKT_TEXT);
+
+/** Separates protocol-v2 request and response sections. */
+export const delimiterPkt = (): Uint8Array => encoder.encode(DELIMITER_PKT_TEXT);
 
 export const pktLine = (payload: Uint8Array | string): Uint8Array => {
   const bytes = payload instanceof Uint8Array ? payload : encoder.encode(payload);
@@ -80,6 +84,11 @@ export type PktLine =
   | { readonly kind: "flush" }
   | { readonly kind: "end" };
 
+export type ProtocolV2PktLine =
+  | PktLine
+  | { readonly kind: "delimiter" }
+  | { readonly kind: "response-end" };
+
 const EMPTY = new Uint8Array(0);
 
 /** Git writes lowercase; a reader that insisted on it would be gratuitous. */
@@ -106,6 +115,19 @@ export class PktLineReader {
   }
 
   async next(): Promise<PktLine> {
+    const line = await this.#next(false);
+    if (line.kind === "delimiter" || line.kind === "response-end") {
+      throw new PktLineError("A protocol-v2 control packet appeared in a v0/v1 stream.");
+    }
+    return line;
+  }
+
+  /** Reads protocol-v2's delimiter and response-end control packets as well. */
+  nextV2(): Promise<ProtocolV2PktLine> {
+    return this.#next(true);
+  }
+
+  async #next(protocolV2: boolean): Promise<ProtocolV2PktLine> {
     if (this.#handedOver) {
       throw new PktLineError("The rest of this stream has already been handed over.");
     }
@@ -124,8 +146,18 @@ export class PktLineReader {
       return { kind: "flush" };
     }
 
-    // `0001` and `0002` are protocol v2's delimiters and `0003` is nothing at
-    // all. Push is v1 only, so none of them belong on this stream.
+    if (protocolV2 && length === 1) {
+      this.#advance(PKT_LINE_LENGTH_BYTES);
+      return { kind: "delimiter" };
+    }
+
+    if (protocolV2 && length === 2) {
+      this.#advance(PKT_LINE_LENGTH_BYTES);
+      return { kind: "response-end" };
+    }
+
+    // `0001` is protocol v2's delimiter, `0002` is its response-end packet,
+    // and `0003` is nothing at all. Push is v1 only, so none belong here.
     if (length < PKT_LINE_LENGTH_BYTES) {
       throw new PktLineError(`A pkt-line length of ${length} has no meaning in this protocol.`);
     }

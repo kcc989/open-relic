@@ -20,7 +20,7 @@ export const UPLOAD_PACK_ADVERTISEMENT_CONTENT_TYPE =
 export const UPLOAD_PACK_RESULT_CONTENT_TYPE =
   `application/x-${UPLOAD_PACK_SERVICE}-result` as const;
 
-export type UploadProtocolVersion = 0 | 1;
+export type UploadProtocolVersion = 0 | 1 | 2;
 
 /** Bumped by hand; the `agent` capability is the only thing that reads it. */
 export const SERVICE_VERSION = "0.1.0";
@@ -108,6 +108,14 @@ export const uploadPackCapabilities = (
   ...(head?.kind === "symbolic" ? [`symref=HEAD:${head.ref}`] : []),
 ];
 
+/** Protocol-v2 commands and command features Open Relic actually honors. */
+export const UPLOAD_PACK_V2_CAPABILITIES: readonly string[] = [
+  `agent=open-relic/${SERVICE_VERSION}`,
+  "ls-refs=unborn",
+  "fetch",
+  "object-format=sha1",
+];
+
 const uploadHeadRef = (
   refs: readonly AdvertisedRef[],
   head: Head | null,
@@ -125,9 +133,8 @@ const uploadHeadRef = (
 };
 
 /**
- * Protocol v1 adds only its version marker to the original advertisement.
- * A v2 request deliberately receives v0 instead, truthfully declining commands
- * we do not implement so Git can fall back automatically.
+ * Protocol v1 adds its version marker to the original ref advertisement. V2
+ * advertises commands instead; refs move to a subsequent `ls-refs` request.
  */
 export function* uploadPackAdvertisement(
   refs: readonly AdvertisedRef[],
@@ -135,6 +142,15 @@ export function* uploadPackAdvertisement(
   protocolVersion: UploadProtocolVersion,
   shallow: readonly string[] = [],
 ): Generator<Uint8Array> {
+  if (protocolVersion === 2) {
+    yield pktLine("version 2\n");
+    for (const capability of UPLOAD_PACK_V2_CAPABILITIES) {
+      yield pktLine(`${capability}\n`);
+    }
+    yield flushPkt();
+    return;
+  }
+
   yield pktLine(`# service=${UPLOAD_PACK_SERVICE}\n`);
   yield flushPkt();
   if (protocolVersion === 1) {

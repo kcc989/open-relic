@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  delimiterPkt,
   PKT_LINE_MAX_PAYLOAD_BYTES,
   PktLineError,
   PktLineReader,
@@ -48,6 +49,20 @@ describe("pktLine", () => {
     expect(PKT_LINE_MAX_PAYLOAD_BYTES).toBe(65516);
     expect(() => pktLine("x".repeat(PKT_LINE_MAX_PAYLOAD_BYTES))).not.toThrow();
     expect(() => pktLine("x".repeat(PKT_LINE_MAX_PAYLOAD_BYTES + 1))).toThrow(RangeError);
+  });
+});
+
+describe("protocol-v2 control packets", () => {
+  test("writes and reads a delimiter", async () => {
+    const reader = new PktLineReader(streamOf(delimiterPkt()));
+
+    expect(await reader.nextV2()).toEqual({ kind: "delimiter" });
+  });
+
+  test("keeps a delimiter invalid on a v0/v1 reader", async () => {
+    const reader = new PktLineReader(streamOf(delimiterPkt()));
+
+    expect(reader.next()).rejects.toThrow(PktLineError);
   });
 });
 
