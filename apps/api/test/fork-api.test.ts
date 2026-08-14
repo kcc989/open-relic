@@ -3,7 +3,7 @@ import {
   ERROR_CODES,
   type ForkRepoResult,
   type RepoWithRemote,
-} from "@open-relic/contracts";
+} from "../src/contracts.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";

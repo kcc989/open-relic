@@ -1,4 +1,4 @@
-import { ERROR_CODES, NAMESPACES_PATH, REST_ENDPOINTS } from "@open-relic/contracts";
+import { ERROR_CODES, NAMESPACES_PATH, REST_ENDPOINTS } from "../src/contracts.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { createApp } from "../src/app.ts";

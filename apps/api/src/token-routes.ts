@@ -14,7 +14,7 @@ import {
   type CreateTokenResult,
   type DeleteTokenResult,
   type TokenScope,
-} from "@open-relic/contracts";
+} from "./contracts.ts";
 import { Schema } from "effect";
 import type { Hono } from "hono";
 

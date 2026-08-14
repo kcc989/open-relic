@@ -1,4 +1,4 @@
-import type { NamespaceInfo } from "@open-relic/contracts";
+import type { NamespaceInfo } from "./contracts.ts";
 import { asc, eq, gt } from "drizzle-orm";
 
 import type { SyncSqliteDatabase } from "./db/database.ts";

@@ -4,7 +4,7 @@ import {
   ARTIFACT_TOKEN_PREFIX,
   ARTIFACT_TOKEN_SECRET_LENGTH,
   formatArtifactToken,
-} from "@open-relic/contracts";
+} from "./contracts.ts";
 
 const randomHex = (length: number): string => {
   const bytes = crypto.getRandomValues(new Uint8Array(length / 2));

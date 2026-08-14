@@ -2,8 +2,7 @@
   "name": "open-relic",
   "private": true,
   "workspaces": [
-    "apps/*",
-    "packages/*"
+    "apps/*"
   ],
   "type": "module",
   "scripts": {

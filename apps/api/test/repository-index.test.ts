@@ -3,7 +3,7 @@ import {
   REPO_LIST_DEFAULT_SORT,
   type RepoSortField,
   type SortDirection,
-} from "@open-relic/contracts";
+} from "../src/contracts.ts";
 import { afterEach, describe, expect, test } from "bun:test";
 
 import { NamespaceRegistry } from "../src/namespace-registry.ts";

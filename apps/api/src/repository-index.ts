@@ -1,4 +1,4 @@
-import type { RepoInfo, RepoSortField, SortDirection } from "@open-relic/contracts";
+import type { RepoInfo, RepoSortField, SortDirection } from "./contracts.ts";
 import { and, asc, desc, eq, sql, type SQL } from "drizzle-orm";
 
 import type { SyncSqliteDatabase } from "./db/database.ts";

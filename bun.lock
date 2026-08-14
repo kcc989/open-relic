@@ -20,15 +20,11 @@
     "apps/api": {
       "name": "@open-relic/api",
       "dependencies": {
-        "@open-relic/contracts": "workspace:*",
         "drizzle-orm": "1.0.0-rc.4",
         "effect": "4.0.0-rc.108",
         "hono": "4.13.1",
         "mime": "4.1.0",
       },
-    },
-    "packages/contracts": {
-      "name": "@open-relic/contracts",
     },
   },
   "packages": {
@@ -333,8 +329,6 @@
     "@octokit/webhooks-methods": ["@octokit/webhooks-methods@6.0.0", "", {}, "sha512-MFlzzoDJVw/GcbfzVC1RLR36QqkTLUf79vLVO3D+xn7r0QgxnFoLZgtrzxiQErAjFUOdH6fas2KeQJ1yr/qaXQ=="],
 
     "@open-relic/api": ["@open-relic/api@workspace:apps/api"],
-
-    "@open-relic/contracts": ["@open-relic/contracts@workspace:packages/contracts"],
 
     "@oxc-project/types": ["@oxc-project/types@0.139.0", "", {}, "sha512-r9gHphtCs+1M7J0pw6Sn/hh/Wpa/iQrOOkrNAlVLF/gHq+/CJmHIWKKUUhdWjcD6CIa8idarspCsASiXCXvFUw=="],
 

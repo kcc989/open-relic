@@ -1,4 +1,4 @@
-import { GIT_HTTP_ENDPOINTS, REST_ENDPOINTS, isImplementedEndpoint } from "@open-relic/contracts";
+import { GIT_HTTP_ENDPOINTS, REST_ENDPOINTS, isImplementedEndpoint } from "./contracts.ts";
 import { Hono, type MiddlewareHandler } from "hono";
 
 import type { ApiEnv } from "../../../alchemy.run.ts";
