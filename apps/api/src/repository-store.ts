@@ -63,6 +63,76 @@ import { GITLINK_MODE, TREE_MODE, treeEntries, type ParsedTreeEntry } from "./tr
 
 const TREE_NAME_DECODER = new TextDecoder();
 
+interface QueuedCommit {
+  readonly commit: CommitInfo;
+  readonly sequence: number;
+}
+
+/** Newest commit first; insertion order breaks equal-second Git timestamps. */
+class CommitDateQueue {
+  readonly #heap: QueuedCommit[] = [];
+  #sequence = 0;
+
+  get length(): number {
+    return this.#heap.length;
+  }
+
+  push(commit: CommitInfo): void {
+    const queued = { commit, sequence: this.#sequence };
+    this.#sequence += 1;
+    this.#heap.push(queued);
+
+    let at = this.#heap.length - 1;
+    while (at > 0) {
+      const parent = Math.floor((at - 1) / 2);
+      if (!this.#newer(queued, this.#heap[parent]!)) {
+        break;
+      }
+      this.#heap[at] = this.#heap[parent]!;
+      at = parent;
+    }
+    this.#heap[at] = queued;
+  }
+
+  pop(): CommitInfo | undefined {
+    const newest = this.#heap[0];
+    const last = this.#heap.pop();
+    if (newest === undefined || last === undefined) {
+      return undefined;
+    }
+    if (this.#heap.length === 0) {
+      return newest.commit;
+    }
+
+    let at = 0;
+    while (true) {
+      const left = at * 2 + 1;
+      if (left >= this.#heap.length) {
+        break;
+      }
+      const right = left + 1;
+      const child =
+        right < this.#heap.length && this.#newer(this.#heap[right]!, this.#heap[left]!)
+          ? right
+          : left;
+      if (!this.#newer(this.#heap[child]!, last)) {
+        break;
+      }
+      this.#heap[at] = this.#heap[child]!;
+      at = child;
+    }
+    this.#heap[at] = last;
+    return newest.commit;
+  }
+
+  #newer(left: QueuedCommit, right: QueuedCommit): boolean {
+    return (
+      left.commit.committedAt > right.commit.committedAt ||
+      (left.commit.committedAt === right.commit.committedAt && left.sequence < right.sequence)
+    );
+  }
+}
+
 /** The Git side of a `git init --bare`; the registry owns naming. */
 export interface RepositoryInit {
   readonly defaultBranch: string;
@@ -685,42 +755,44 @@ export class RepositoryStore {
       return { ok: true, commits: [] };
     }
 
+    const first = await this.#readCommitInfo(resolved.oid);
+    if (!first.ok) {
+      return first;
+    }
+
     const commits: CommitInfo[] = [];
-    const pending = [resolved.oid];
-    const visited = new Set<string>();
+    const pending = new CommitDateQueue();
+    pending.push(first.commit);
+    const scheduled = new Set([resolved.oid]);
     const shallow = await this.#shallow();
+    let skipped = 0;
 
-    while (pending.length > 0 && commits.length < offset + limit) {
-      const oid = pending.shift()!;
-      if (visited.has(oid)) {
-        continue;
-      }
-      visited.add(oid);
-
-      const object = await this.#objects.read(oid);
-      if (object === null) {
-        return { ok: false, reason: "corrupt" };
-      }
-      if (object.type !== "commit") {
-        return { ok: false, reason: "wrong-object-type" };
-      }
-
-      let parsed: CommitInfo;
-      try {
-        parsed = parseCommit(oid, object.bytes);
-      } catch (error) {
-        if (error instanceof ObjectParseError) {
-          return { ok: false, reason: "corrupt" };
+    while (pending.length > 0 && commits.length < limit) {
+      const parsed = pending.pop()!;
+      if (skipped < offset) {
+        skipped += 1;
+      } else {
+        commits.push(parsed);
+        if (commits.length === limit) {
+          break;
         }
-        throw error;
       }
-      commits.push(parsed);
-      if (!shallow.has(oid)) {
-        pending.push(...parsed.parents);
+      if (!shallow.has(parsed.hash)) {
+        for (const parent of parsed.parents) {
+          if (scheduled.has(parent)) {
+            continue;
+          }
+          const loaded = await this.#readCommitInfo(parent);
+          if (!loaded.ok) {
+            return loaded;
+          }
+          scheduled.add(parent);
+          pending.push(loaded.commit);
+        }
       }
     }
 
-    return { ok: true, commits: commits.slice(offset) };
+    return { ok: true, commits };
   }
 
   async readFile(revision: string | null, path: string): Promise<RepositoryFileResult> {
@@ -868,6 +940,30 @@ export class RepositoryStore {
     }
 
     return { ok: false, reason: "corrupt" };
+  }
+
+  async #readCommitInfo(
+    oid: string,
+  ): Promise<
+    | { readonly ok: true; readonly commit: CommitInfo }
+    | { readonly ok: false; readonly reason: ResolvedContentFailure }
+  > {
+    const object = await this.#objects.read(oid);
+    if (object === null) {
+      return { ok: false, reason: "corrupt" };
+    }
+    if (object.type !== "commit") {
+      return { ok: false, reason: "wrong-object-type" };
+    }
+
+    try {
+      return { ok: true, commit: parseCommit(oid, object.bytes) };
+    } catch (error) {
+      if (error instanceof ObjectParseError) {
+        return { ok: false, reason: "corrupt" };
+      }
+      throw error;
+    }
   }
 
   async #shallow(): Promise<ReadonlySet<string>> {

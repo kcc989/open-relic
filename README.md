@@ -85,7 +85,8 @@ Direct object reads use the same immutable SHA-1 names as Git:
 
 Resolved content reads share Git revision and nested-tree traversal:
 
-- `GET /namespaces/:namespace/repos/:repo/log?ref=&limit=&offset=` returns commit history.
+- `GET /namespaces/:namespace/repos/:repo/log?ref=&limit=&offset=` returns commit history,
+  with at most 1,000 commits per page and an offset no greater than 10,000.
 - `GET /namespaces/:namespace/repos/:repo/file?ref=&path=` returns file bytes as
   `application/octet-stream`.
 - `GET /namespaces/:namespace/repos/:repo/raw/:ref/*` returns the same bytes with

@@ -152,12 +152,82 @@ describe("GET /namespaces/:namespace/repos/:repo/log", () => {
     });
   });
 
+  test("orders merge history by commit date without placing a parent before its child", async () => {
+    const identityAt = (timestamp: number): string =>
+      `Open Relic <fixtures@open-relic.dev> ${timestamp} +0000`;
+    const base = commit({
+      tree: ROOT,
+      message: "base",
+      author: identityAt(1_000),
+      committer: identityAt(1_000),
+    });
+    const old1 = commit({
+      tree: ROOT,
+      parents: [base],
+      message: "old1",
+      author: identityAt(1_100),
+      committer: identityAt(1_100),
+    });
+    const old2 = commit({
+      tree: ROOT,
+      parents: [old1],
+      message: "old2",
+      author: identityAt(1_200),
+      committer: identityAt(1_200),
+    });
+    const new1 = commit({
+      tree: ROOT,
+      parents: [base],
+      message: "new1",
+      author: identityAt(2_000),
+      committer: identityAt(2_000),
+    });
+    const merge = commit({
+      tree: ROOT,
+      parents: [new1, old2],
+      message: "merge",
+      author: identityAt(3_000),
+      committer: identityAt(3_000),
+    });
+
+    const push = await harness.app.request(
+      new Request(PUSH, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${harness.repositoryToken}`,
+          "Content-Type": "application/x-git-receive-pack-request",
+        },
+        body: pushBody({
+          commands: [{ newOid: merge.oid, name: "refs/heads/merge-order" }],
+          objects: [merge, new1, old2, old1, base],
+        }),
+      }),
+    );
+    expect(push.status).toBe(200);
+
+    const response = await harness.app.request(`${CONTENT}/log?ref=merge-order&limit=4`);
+    const history = await result<readonly CommitInfo[]>(response);
+
+    expect(response.status).toBe(200);
+    expect(history.map((entry) => entry.message)).toEqual(["merge", "new1", "old2", "old1"]);
+  });
+
   test("validates limit and offset before walking history", async () => {
-    for (const query of ["limit=0", "limit=1001", "limit=1.5", "offset=-1", "offset=1.5"]) {
+    for (const query of [
+      "limit=0",
+      "limit=1001",
+      "limit=1.5",
+      "offset=-1",
+      "offset=1.5",
+      "offset=10001",
+    ]) {
       const response = await harness.app.request(`${CONTENT}/log?${query}`);
 
       expect(response.status).toBe(400);
     }
+
+    const boundary = await harness.app.request(`${CONTENT}/log?offset=10000`);
+    expect(boundary.status).toBe(200);
   });
 
   test("includes an imported shallow boundary without walking beyond it", async () => {

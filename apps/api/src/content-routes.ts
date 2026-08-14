@@ -14,6 +14,7 @@ const REPO = `${NAMESPACES_PATH}/:namespace/repos/:repo` as const;
 const ERROR_DOCUMENTATION = "https://developers.cloudflare.com/artifacts/api/errors";
 const LOG_DEFAULT_LIMIT = 50;
 const LOG_MAX_LIMIT = 1_000;
+const LOG_MAX_OFFSET = 10_000;
 
 type DirectObjectKind = Extract<ObjectType, "blob" | "commit" | "tree">;
 
@@ -84,8 +85,8 @@ const parseLogInteger = (
   if (name === "limit" && (value < 1 || value > LOG_MAX_LIMIT)) {
     return invalidLogParameter(name, `must be between 1 and ${LOG_MAX_LIMIT}.`);
   }
-  if (name === "offset" && value < 0) {
-    return invalidLogParameter(name, "must be a non-negative integer.");
+  if (name === "offset" && (value < 0 || value > LOG_MAX_OFFSET)) {
+    return invalidLogParameter(name, `must be between 0 and ${LOG_MAX_OFFSET}.`);
   }
   return value;
 };
