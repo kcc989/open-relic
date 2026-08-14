@@ -94,8 +94,15 @@ describe("Git Smart HTTP stubs", () => {
   }
 });
 
-test("unknown routes remain 404s in the envelope", async () => {
-  const response = await app.request("http://local.test/nope");
+test.each([
+  ["GET", "/nope"],
+  ["PATCH", "/namespaces/acme/repos/demo"],
+])("undocumented %s %s routes remain 404s in the envelope", async (method, path) => {
+  const response = await app.request(
+    new Request(`http://local.test${path}`, {
+      method,
+    }),
+  );
 
   expect(response.status).toBe(404);
   expect(await errorCode(response)).toBe(ERROR_CODES.notFound);
