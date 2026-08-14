@@ -62,6 +62,8 @@ export const commit = (options: {
   readonly tree: GitObject;
   readonly parents?: readonly GitObject[];
   readonly message?: string;
+  readonly author?: string;
+  readonly committer?: string;
 }): GitObject =>
   object(
     "commit",
@@ -69,8 +71,8 @@ export const commit = (options: {
       [
         `tree ${options.tree.oid}`,
         ...(options.parents ?? []).map((parent) => `parent ${parent.oid}`),
-        `author ${IDENTITY}`,
-        `committer ${IDENTITY}`,
+        `author ${options.author ?? IDENTITY}`,
+        `committer ${options.committer ?? IDENTITY}`,
         "",
         `${options.message ?? "A commit"}\n`,
       ].join("\n"),

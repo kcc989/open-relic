@@ -81,6 +81,8 @@ export interface RepositoryObjectClient {
   ) => Promise<ReadableStream<Uint8Array>>;
   readonly uploadPack: (body: ReadableStream<Uint8Array>) => Promise<ReadableStream<Uint8Array>>;
   readonly receivePack: (body: ReadableStream<Uint8Array>) => Promise<ReceivePackOutcome>;
+  readonly readObject: (oid: string) => Promise<PackBase | null>;
+  readonly readBlob: (oid: string) => Promise<ReadableStream<Uint8Array> | null>;
   readonly sweep: () => Promise<SweepProgress>;
   readonly destroy: () => Promise<void>;
 }
@@ -345,6 +347,11 @@ export class RepositoryStore {
   /** `null` when the repository does not hold that object. */
   readObject(oid: string): Promise<PackBase | null> {
     return this.#objects.read(oid);
+  }
+
+  /** Blob bytes cross the RPC boundary chunk by chunk, never as one 32 MiB value. */
+  readBlob(oid: string): Promise<ReadableStream<Uint8Array> | null> {
+    return this.#objects.readStream(oid, "blob");
   }
 
   hasObject(oid: string): Promise<boolean> {

@@ -15,8 +15,12 @@
  */
 
 import { isObjectId, isObjectType, type ObjectType } from "./object.ts";
+import { ObjectParseError } from "./object-parse.ts";
 import type { PackBase } from "./pack.ts";
-import { toHex } from "./sha1.ts";
+import { GITLINK_MODE, TREE_MODE, treeEntries } from "./tree-entry.ts";
+
+export { ObjectParseError } from "./object-parse.ts";
+export { GITLINK_MODE, TREE_MODE } from "./tree-entry.ts";
 
 /** Where the walk reads from; {@link ObjectStore} is the one that matters. */
 export interface ObjectSource {
@@ -28,35 +32,7 @@ export interface ObjectLink {
   readonly type: ObjectType;
 }
 
-export class ObjectParseError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "ObjectParseError";
-  }
-}
-
 const decoder = new TextDecoder();
-
-/**
- * A tree entry's mode, as Git writes it: octal, unpadded, and compared as bytes
- * because a tree has one of these per file in the directory and all but the
- * subtrees exist only to be skipped.
- */
-export const TREE_MODE = "40000";
-/** A submodule. The commit it names lives in another repository, not ours. */
-export const GITLINK_MODE = "160000";
-
-const modeIs = (bytes: Uint8Array, from: number, to: number, mode: string): boolean => {
-  if (to - from !== mode.length) {
-    return false;
-  }
-  for (let at = 0; at < mode.length; at += 1) {
-    if (bytes[from + at] !== mode.charCodeAt(at)) {
-      return false;
-    }
-  }
-  return true;
-};
 
 /**
  * The header of a commit or a tag: its lines up to the first blank one, each
@@ -146,40 +122,15 @@ const tagLinks = (bytes: Uint8Array): readonly ObjectLink[] => {
  */
 const treeLinks = (bytes: Uint8Array, includeBlobs: boolean): readonly ObjectLink[] => {
   const links: ObjectLink[] = [];
-  let at = 0;
 
-  while (at < bytes.length) {
-    const space = bytes.indexOf(0x20, at);
-    if (space === -1) {
-      throw new ObjectParseError("A tree entry has no mode.");
-    }
-
-    // The name runs to the NUL, and the twenty raw bytes of the object id run
-    // from just past it.
-    const nul = bytes.indexOf(0x00, space);
-    if (nul === -1 || nul + 21 > bytes.length) {
-      throw new ObjectParseError("A tree entry ends mid-way.");
-    }
-
-    const oid = toHex(bytes.subarray(nul + 1, nul + 21));
-    if (modeIs(bytes, at, space, TREE_MODE)) {
-      links.push({
-        oid,
-        type: "tree",
-      });
-    } else if (!modeIs(bytes, at, space, GITLINK_MODE)) {
-      // Decoding only here keeps a string allocation off the entry that is
-      // simply a file, which is most of them.
-      const mode = decoder.decode(bytes.subarray(at, space));
-      if (!/^[0-7]{5,6}$/.test(mode)) {
-        throw new ObjectParseError(`"${mode}" is not a tree entry mode.`);
-      }
+  for (const entry of treeEntries(bytes)) {
+    if (entry.mode === TREE_MODE) {
+      links.push({ oid: entry.oid, type: "tree" });
+    } else if (entry.mode !== GITLINK_MODE) {
       if (includeBlobs) {
-        links.push({ oid, type: "blob" });
+        links.push({ oid: entry.oid, type: "blob" });
       }
     }
-
-    at = nul + 21;
   }
 
   return links;

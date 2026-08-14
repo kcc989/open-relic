@@ -86,6 +86,10 @@ export class RepositoryObject extends DurableObject {
     return this.#store.readObject(oid);
   }
 
+  readBlob(oid: string): Promise<ReadableStream<Uint8Array> | null> {
+    return this.#store.readBlob(oid);
+  }
+
   /**
    * Leaves the storage empty, which is the point: a Durable Object is only
    * reclaimed once its storage is empty, so re-creating the schema here — even

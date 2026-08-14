@@ -164,6 +164,60 @@ export class ObjectStore implements PackSink {
     };
   }
 
+  /**
+   * Return one stored chunk at a time, so a maximum-size object never becomes
+   * one serialized RPC value on its way from the Durable Object to the Worker.
+   */
+  async readStream(
+    oid: string,
+    expectedType: PackBase["type"],
+  ): Promise<ReadableStream<Uint8Array> | null> {
+    const row = await this.describe(oid);
+    if (row === null || row.type !== expectedType) {
+      return null;
+    }
+
+    let index = 0;
+    let read = 0;
+
+    return new ReadableStream<Uint8Array>({
+      pull: (controller) => {
+        if (index === row.chunkCount) {
+          if (read !== row.size) {
+            controller.error(
+              new ObjectStoreError(
+                `Object ${oid} holds ${read} bytes where its row declares ${row.size}.`,
+              ),
+            );
+          } else {
+            controller.close();
+          }
+          return;
+        }
+
+        const key = chunkKey(OBJECT_PREFIX, oid, index);
+        const chunk = this.#kv.get<Uint8Array>(key);
+        if (chunk === undefined) {
+          controller.error(new ObjectStoreError(`Chunk ${key} is missing.`));
+          return;
+        }
+
+        index += 1;
+        read += chunk.length;
+        if (read > row.size) {
+          controller.error(
+            new ObjectStoreError(
+              `Object ${oid} holds more bytes than its row declares (${row.size}).`,
+            ),
+          );
+          return;
+        }
+
+        controller.enqueue(chunk);
+      },
+    });
+  }
+
   async describe(oid: string): Promise<ObjectDescription | null> {
     const rows = await this.#db
       .select({
