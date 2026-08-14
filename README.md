@@ -3,627 +3,111 @@
 An open-source, self-hostable implementation of
 [Cloudflare Artifacts](https://developers.cloudflare.com/artifacts/) — versioned,
 Git-speaking storage — built on Cloudflare Durable Objects and running on your
-own Cloudflare account, with no access to the Artifacts product.
+own Cloudflare account.
 
 Compatibility is the specification, not a feature: a client written against
 Artifacts should work against an installation with nothing changed but the host.
 [ADR-0001](./docs/adr/0001-wire-compatible-with-cloudflare-artifacts.md) records
-what that binds us to, and where the API below does not match yet.
+what that binds us to, and where the API does not match yet.
 
-**`git push`, `git clone`, `git fetch`, repository forks, and public HTTPS
-imports work.** The namespace and repository APIs are implemented, and a Git
-client can round-trip branches over authenticated Git Smart HTTP. Repository
-contents are readable through both immutable object ids and branch-, tag-, or
-commit-resolved paths.
+`git push`, `git clone`, `git fetch` (protocol v1 and v2), repository forks, and
+public HTTPS imports work. The namespace, repository, token, and content APIs are
+implemented; the remaining endpoints in the manifest answer `501`.
 
-- Hono routes for every REST and Git Smart HTTP endpoint in the initial API
-- Effect v4 as the typed stub service boundary
-- Drizzle as the ORM over Durable Object SQLite, with generated migrations
-- Alchemy v2 for the Cloudflare Worker and SQLite-backed Durable Objects
-- Bun workspaces for the API app and shared endpoint contracts
-- The Cloudflare v4 envelope on every response, success or failure
+## Architecture
 
-## The wire
-
-Artifacts documents its REST routes relative to `/accounts/$ACCOUNT_ID`, hung off
-`https://api.cloudflare.com/client/v4`. An installation is single-tenant and is
-nothing but Artifacts, so it serves the same endpoints at the root — `POST
-/namespaces/:namespace/repos`, not `POST
-/client/v4/accounts/:id/artifacts/namespaces/:namespace/repos`. Everything from
-`/namespaces` rightward matches Artifacts exactly, as does every body, field
-name, status code, and error shape. The base URL is the one thing a client
-changes, which is the same thing it already changes for the host.
-
-Every JSON response is the v4 envelope:
-
-```json
-{ "result": {}, "success": true, "errors": [], "messages": [] }
-```
-
-Every route rooted at `/namespaces` is the installation's control plane and
-requires `Authorization: Bearer $OPEN_RELIC_API_TOKEN`. Configure the same long,
-random value on the Worker and in the client. This API token is distinct from
-the short-lived, repository-scoped `art_v1_…` Git tokens; an unset API token
-closes the control plane rather than opening it.
-
-Generate the value from a cryptographically secure random source. This command
-uses 32 random bytes and encodes them as 64 hexadecimal characters:
-
-```sh
-openssl rand -hex 32
-```
-
-An explicitly configured value shorter than 32 UTF-8 bytes is rejected during
-planning and deployment. Rotate the API token by replacing the
-`OPEN_RELIC_API_TOKEN` deployment value and redeploying; the old value stops
-working as soon as the new Worker is live.
-
-An empty value, including the placeholder in `.env.example`, is treated as
-unconfigured: local development can start, but the REST API remains closed and
-`/healthz` reports that the installation is unavailable.
-
-A failure keeps the shape and moves into `errors`, using
-[Artifacts' documented codes](https://developers.cloudflare.com/artifacts/api/errors/):
-
-```json
-{
-  "result": null,
-  "success": false,
-  "errors": [{ "code": 10200, "message": "No namespace named \"nope\" exists." }],
-  "messages": []
-}
-```
-
-A rejected field carries a JSON pointer at it in `errors[].source.pointer`.
-
-Direct object reads use the same immutable SHA-1 names as Git:
-
-- `GET /namespaces/:namespace/repos/:repo/commit/:hash` returns parsed commit metadata.
-- `GET /namespaces/:namespace/repos/:repo/tree/:hash` returns the tree's entries and modes.
-- `GET /namespaces/:namespace/repos/:repo/blob/:hash` returns the stored bytes as
-  `application/octet-stream` rather than a JSON envelope.
-
-Resolved content reads share Git revision and nested-tree traversal:
-
-- `GET /namespaces/:namespace/repos/:repo/log?ref=&limit=&offset=` returns commit history,
-  with at most 1,000 commits per page and an offset no greater than 10,000.
-- `GET /namespaces/:namespace/repos/:repo/file?ref=&path=` returns file bytes as
-  `application/octet-stream`.
-- `GET /namespaces/:namespace/repos/:repo/raw/:ref/*` returns the same bytes with
-  a content type inferred from the path.
-
-Lists answer with a bare array in `result` and their paging state beside it in
-`result_info`. Cursors are keyset, not offset — the cursor carries the sort key
-of the last row handed out — so a repository created mid-walk cannot shift rows
-onto a page the client has already seen. `cursor` is empty once the last page has
-been handed out.
-
-A cursor names a position in one ordering of one filtered set, so it also
-carries the `sort`, `direction`, and `search` it was issued under. Replaying it
-against a different query is a `400`, not a quietly different page: comparing a
-stored `created_at` against a name would let every row through and hand back
-page one again under a fresh cursor. A cursor the service did not issue is a
-`400` for the same reason — an empty page would be indistinguishable from a
-finished list.
-
-```json
-{ "result_info": { "cursor": "eyJ2IjoiLi4uIn0", "per_page": 20, "count": 20 } }
-```
-
-## Monorepo
+An installation is a single Cloudflare Worker in front of two SQLite-backed
+Durable Object classes.
 
 ```text
-.
-├── alchemy.run.ts                 # Cloudflare deployment stack
-├── drizzle.config.ts              # drizzle-kit output for the registry object
-├── drizzle.repository.config.ts   # drizzle-kit output for a repository object
-├── apps/api
-│   ├── drizzle/registry/          # Generated migrations (committed)
-│   ├── drizzle/repository/
-│   └── src/db/                    # Drizzle schema, one per Durable Object
-└── packages/contracts             # Shared endpoint manifest and response types
+Git / REST client
+        │
+        ▼
+  Worker (Hono)            apps/api/src/app.ts
+   ├── REST routes         v4 envelope, bearer API token
+   └── Git Smart HTTP      /git/:namespace/:repo.git, art_v1_… Git tokens
+        │  RPC (streams cross this boundary)
+        ├──────────────► NamespaceRegistryObject   one per installation
+        │                namespaces, repository index, Git tokens
+        └──────────────► RepositoryObject          one per repository
+                         HEAD, refs, objects, deltas, sweep state
 ```
 
-`packages/contracts` names the implemented endpoints in
-`IMPLEMENTED_ENDPOINT_IDS`. The router skips stub registration for those ids and
-the test suite asserts `501` for the complement, so the manifest, the router,
-and the tests cannot drift apart.
-
-## Namespaces
-
-A namespace owns repositories the way a GitHub user or organization does. Every
-namespace in the installation lives in a single SQLite-backed Durable Object,
-`NamespaceRegistryObject`, bound as `NAMESPACES` and addressed by the fixed name
-`registry`. One object rather than one per namespace, because allocating a slug
-has to be a single serialized decision and listing namespaces has to see all of
-them; `onConflictDoNothing().returning()` makes the uniqueness check and the
-insert one statement.
-
-Artifacts creates a namespace implicitly with its first repository and documents
-only list and get. Explicit create and delete are ours; they sit on methods
-Artifacts has not spoken for on those paths.
-
-| Endpoint                         | Behavior                                                                                 |
-| -------------------------------- | ---------------------------------------------------------------------------------------- |
-| `POST /namespaces`               | `201` with a `Location` header, `409` if the slug is taken, `400` if the body is invalid |
-| `GET /namespaces?limit=&cursor=` | `200`, ordered by slug, with `result_info`                                               |
-| `GET /namespaces/:namespace`     | `200` or `404`                                                                           |
-| `DELETE /namespaces/:namespace`  | `200` with `{ "slug": … }` or `404`; takes the namespace's repositories with it          |
-
-The delete answers `200`, not the `202` a repository delete answers, because it
-really has finished: the index rows and the objects behind them are gone by the
-time it replies.
-
-A slug is lowercase alphanumerics with interior hyphens, at most 39 characters,
-and may not be one of the reserved segments of the HTTP surface (`api`, `git`,
-`healthz`, `static`, `well-known`). It is validated in
-`packages/contracts` so clients can apply the same rule before a round trip.
-
-```sh
-curl -X POST http://localhost:1337/namespaces \
-  -H "Authorization: Bearer $OPEN_RELIC_API_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"slug":"acme","display_name":"Acme, Inc."}'
-```
-
-## Repositories
-
-A repository gets a Durable Object of its own, `RepositoryObject`, bound as
-`REPOSITORIES`. A repository is what Git operations serialize on — a push has to
-apply against one consistent view of the refs — and what grows without bound, so
-it gets an object rather than a share of the registry.
-
-Nothing addresses a repository object by name. Creating one mints a Durable
-Object id, and the registry stores that id in a `repositories` row keyed by
-`(namespace, name)`: the namespace object points at the repository object, and
-resolving `acme/demo` is one lookup in the registry followed by a stub. Naming
-therefore lives entirely in the registry, so a future rename or transfer moves a
-row and not a byte of Git data.
-
-The split is metadata against contents. The registry row holds what the API
-answers with, which keeps listing a namespace one query instead of a fan-out of
-RPCs. The repository object holds what Git owns — `HEAD`, refs, objects, retained
-deltas, and sweep checkpoints. A bare repository starts with HEAD before its
-first ref; the index row and that initial Git state are written on creation.
-
-`HEAD` is stored the way Git stores it: the literal bytes of the `.git/HEAD`
-file — `ref: refs/heads/main\n` when symbolic, a bare 40-hex object id when
-detached — under one key in the object's synchronous KV storage. The API's
-`default_branch` is parsed back out of it, so a repository has one authority for
-`HEAD` rather than a branch column beside it, and a detached `HEAD` needs no
-schema change to be expressible. See
-[ADR-0003](./docs/adr/0003-head-is-the-literal-git-file.md). The registry's
-`repositories.default_branch` stays what it already was — a denormalized copy
-that keeps listing a namespace one query.
-
-Multi-step creation reserves the registry row with a repository status before
-copying. A fork stays `forking` until its object, ref, HEAD, and initial-token
-writes are complete; targeted REST access returns `409/10303` in that window.
-An import stays `importing` and returns `409/10302` while its durable alarm-backed
-job is running. A transient upstream failure clears the incomplete Git data and
-restarts the whole import, up to three attempts. Terminal failure deletes the
-row and cascaded tokens, then destroys the incomplete repository object so the
-name can be retried from scratch.
-
-| Endpoint                                                                   | Behavior                                                                                                                                                         |
-| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /namespaces/:namespace/repos`                                        | `200` with `{id, name, description, default_branch, remote, token}`, `404` if the namespace is unknown, `409` if the name is taken, `400` if the body is invalid |
-| `GET /namespaces/:namespace/repos?limit=&cursor=&search=&sort=&direction=` | `200` with `result_info`, `404` if the namespace is unknown                                                                                                      |
-| `GET /namespaces/:namespace/repos/:repo`                                   | `200` or `404`                                                                                                                                                   |
-| `DELETE /namespaces/:namespace/repos/:repo`                                | `202` with `{ "id": … }` or `404`; discards the repository object's storage                                                                                      |
-| `POST /namespaces/:namespace/repos/:repo/fork`                             | `201` after one stable reachable snapshot is copied into an independent repository; `409` while a source or target is still forking                              |
-| `POST /namespaces/:namespace/repos/:repo/import`                           | `201` after a durable public-HTTPS import, with the actual branch, normalized source, object count, remote, and one-day write token                              |
-
-A create answers with a deliberately narrower shape than a list or get: the
-identity, the remote to clone from, and the one token it will not show again.
-List and get carry the full `RepoInfo` — `id`, `name`, `description`,
-`default_branch`, `created_at`, `updated_at`, `last_push_at`, `source`,
-`read_only` — plus `remote`. `last_push_at` is stamped by a push that moved a
-ref; `source` is `null` for an empty create and records the stable fork address
-or normalized `git:https://…git` import source for copied repositories.
-
-`sort` is one of `created_at`, `updated_at`, `last_push_at`, or `name`,
-defaulting to `created_at` descending. `search` filters on an infix of the name.
-`limit` defaults to 50 and caps at 200.
-
-The remote is built from the host the request arrived on, so an installation
-advertises whatever host the client actually reached it at. The returned token
-is a persisted, write-scoped `art_v1_<40 hex>?expires=<unix seconds>` token for
-that repository. Only its SHA-256 digest is stored; its plaintext is returned
-once in the create response and cannot be recovered later.
-
-A name is lowercase alphanumerics with interior dots, underscores, and hyphens,
-at most 100 characters, and may not end in `.git` — `/git/:namespace/:repo.git`
-appends that suffix itself. `default_branch` defaults to `main` and is checked
-against a conservative subset of `git check-ref-format`.
-
-Deleting a namespace deletes its repositories in the same transaction and hands
-back the object ids, which the route then discards; an index row and the object
-it points at are never removed by the same layer.
-
-A full fork copies HEAD, every ref, and the union of objects reachable from
-those roots. `default_branch_only` narrows the refs and reachability walk to the
-branch named by HEAD. The source repository holds its operation gate for the
-copy and transfers one resolved object at a time to the target, keeping memory
-bounded by object size while excluding concurrent pushes from the captured
-snapshot. Orphans are not copied.
-
-```sh
-curl -X POST http://localhost:1337/namespaces/acme/repos \
-  -H "Authorization: Bearer $OPEN_RELIC_API_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"demo","description":"Anvil firmware"}'
-```
-
-## Tokens
-
-Git tokens are repository-scoped credentials with `read` or `write` scope and an
-expiry. They live in the registry so a Git request can be refused before the
-repository is resolved. Revocation is retained as state for token listings;
-deleting a repository or namespace cascades to its tokens.
-
-| Endpoint                                                               | Behavior                                                               |
-| ---------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `POST /namespaces/:namespace/tokens`                                   | Mints for the body’s `repo`; defaults to write scope and a 24-hour TTL |
-| `GET /namespaces/:namespace/repos/:repo/tokens?state=&per_page=&page=` | Lists metadata and offset pagination; never returns plaintext          |
-| `DELETE /namespaces/:namespace/tokens/:id`                             | Revokes the token and returns `{ "id": … }`                            |
-
-```sh
-curl -X POST http://localhost:1337/namespaces/acme/tokens \
-  -H "Authorization: Bearer $OPEN_RELIC_API_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"repo":"demo","scope":"write","ttl":3600}'
-```
-
-## Git Smart HTTP
-
-A repository's remote is `/git/:namespace/:repo.git`, and the first thing any
-Git client asks it for is an **advertisement**: the refs the server holds and
-the capabilities it supports. The push side of the protocol is implemented, from
-that advertisement through to the refs a push moves.
-
-```sh
-curl 'http://localhost:1337/git/acme/demo.git/info/refs?service=git-receive-pack' \
-  -H "Authorization: Bearer $OPEN_RELIC_TOKEN"
-```
-
-```text
-001f# service=git-receive-pack
-0000
-00be0000000000000000000000000000000000000000 capabilities^{}\0report-status report-status-v2 delete-refs …
-0000
-```
-
-A repository with no refs answers with the zero-id `capabilities^{}` line rather
-than an empty body, which is how a client tells a fresh repository from a server
-that failed to answer. Refs are advertised in byte order by full name, with the
-capabilities hung off the first line. `HEAD` is not advertised and annotated
-tags are not peeled — both belong to the upload-pack advertisement.
-
-| Capability                   | Why                                                                   |
-| ---------------------------- | --------------------------------------------------------------------- |
-| `report-status`              | Per-ref accept or reject, which is how a push reports anything at all |
-| `report-status-v2`           | The extensible status form used by current Git clients                |
-| `delete-refs`                | A zero new object id deletes the named ref                            |
-| `side-band-64k`              | Progress and errors alongside the response                            |
-| `atomic`                     | All requested ref changes apply, or none do                           |
-| `ofs-delta`                  | Offset deltas in the pack                                             |
-| `push-options`               | Opaque receive-hook options are accepted before the pack              |
-| `object-format=sha1`         | The only hash we store                                                |
-| `agent=open-relic/<version>` | Identifies the server in a client's trace                             |
-
-The absence of `no-thin` is also a promise: a ref-delta may name a base object
-the repository already holds.
-
-An advertisement is Git's protocol rather than JSON, so it is the one response
-that is not a v4 envelope. Failures on this path still are — a Git client reads
-the status code and little else, and there is no reason for a second error
-shape.
-
-The path from a request to a repository is: the Worker authorizes the token for
-`namespace/repo`, resolves that name in the registry, and calls a named RPC
-method on the repository object, which returns a stream of pkt-lines.
-`RepositoryObject`'s `fetch` handler is not part of that path and answers `501`.
-See [ADR-0004](./docs/adr/0004-git-reaches-a-repository-over-rpc.md).
-
-Bearer authentication uses the full Git token returned by the REST API. HTTP Basic
-uses any non-empty username and the token secret — the `art_v1_…` half before
-`?expires=` — as its password. A push requires write scope; missing, expired,
-revoked, read-scoped, or differently repository-scoped Git tokens are refused before the
-repository lookup.
-
-```sh
-git -c http.extraHeader="Authorization: Bearer $OPEN_RELIC_TOKEN" \
-  push "$OPEN_RELIC_REMOTE" HEAD:main
-```
-
-Refs live in a `refs` table in the repository object rather than as Git's loose
-files plus `packed-refs`: that split exists because of a filesystem, and a push
-has to move several refs in one transaction.
-
-## Push
-
-`POST /git/:namespace/:repo.git/git-receive-pack` is the other half. The body is
-the client's ref update commands as pkt-lines, then a flush, then the pack; the
-response is `report-status`, one line per ref.
-
-```text
-0000000000000000000000000000000000000000 <new> refs/heads/main\0report-status side-band-64k …
-0000
-PACK…
-```
-
-```text
-000eunpack ok
-0017ok refs/heads/main
-0000
-```
-
-A push is read in one pass by `RepositoryStore.receivePack`, and the order is
-the design:
-
-1. **Read the commands.** The capabilities travel on the first one and apply to
-   the whole push.
-2. **Read push options**, when negotiated, as a pkt-line section before the
-   pack. They are validated and consumed; there are no receive hooks to consume
-   them yet.
-3. **Screen each command** against the refs we hold — malformed names, a ref
-   named twice, a create of something that exists, or an update/delete from a
-   value the ref no longer has. This is pure policy and lives in
-   `git/receive-pack.ts`; nothing here reads object storage.
-4. **Read the pack** into the object store, streaming. A push whose commands are
-   all deletes carries no pack, so none is waited for.
-5. **Walk what the push claims.** From each non-delete value, out through commits,
-   trees, and tags, confirming the repository holds every one. The walk stops at
-   objects a previous push already proved, so the cost of a push is
-   proportional to what it added rather than to the history.
-6. **Move the refs** in one transaction. Without `atomic`, valid commands still
-   apply when a sibling is rejected. With it, one rejection marks every other
-   command `atomic push failure` and none apply.
-
-**Blobs are skipped in the walk.** They are the expensive half of any real
-repository — most of the objects and nearly all of the bytes — and a pack that
-parsed completely already implies them: every entry was inflated, hashed, and
-written. What the walk is looking for is the shape a truncated or hand-made pack
-gets wrong, which is a commit or tree naming something that was never sent.
-
-Objects written by a push that then fails are left in place. A ref is the only
-thing that makes an object reachable, so orphans are a storage cost rather than
-a correctness problem; sweeping them is separate work.
-
-Deletes are ordinary conditional commands, and a force update is accepted when
-its old value still matches. A plain Git client rejects a non-fast-forward
-locally; `--force` is what makes it send that same old/new command to the server.
-
-| `ng` reason                                 | When                                              |
-| ------------------------------------------- | ------------------------------------------------- |
-| `missing necessary objects`                 | The connectivity walk found a gap                 |
-| `the ref has moved since it was advertised` | The old value is not what we hold                 |
-| `funny refname`                             | Not under `refs/`, or not a name Git would create |
-| `atomic push failure`                       | A sibling command in an atomic push was rejected  |
-| `n/a (unpacker error)`                      | The pack could not be read; `unpack` says why     |
-
-HEAD retargets in exactly one case: the repository held no refs at all and the
-push created exactly one branch. That is `git init && git push -u origin master`
-against a repository created with a different default, where a HEAD naming a
-branch nobody will push is a repository no clone can check out. Any other push
-leaves it alone — which branch a repository is _for_ is not a push's to decide
-once there is anything to decide between. The registry's `default_branch` and
-`last_push_at` are stamped afterwards, outside the transaction: they are copies
-for the REST surface, and a stamp that fails leaves them stale rather than
-leaving a ref half-moved.
-
-## Clone and fetch
-
-Upload-pack advertises `HEAD` and the repository's refs, then walks the closure
-of each `want` and subtracts the closure of the client's `have` lines. A clone
-therefore receives the full reachable repository, while an incremental fetch
-receives only the objects added since its common base.
-
-The response is generated as it is pulled: the pack header, one object or delta
-at a time, then the incremental SHA-1 trailer. It crosses the repository RPC
-boundary and the Worker as a `ReadableStream`; no complete pack is assembled in
-memory. Objects are currently zlib-framed with stored deflate blocks. That is a
-valid Git pack and keeps the writer runtime-portable; choosing a compression
-strategy is a later performance change rather than a wire change.
-
-When the requesting client has a persisted delta's base and negotiated
-`thin-pack`, upload-pack emits the stored delta as a `ref-delta` instead of
-inflating the full object onto the wire. If the base is not among the client's
-reachable `have` objects, the resolved object is sent whole.
-
-Protocol v1 is supported explicitly: a request carrying `Git-Protocol:
-version=1` receives the `version 1` marker before the advertisement. Protocol v2
-is deferred. A v2 request receives the truthful v0 advertisement, so Git
-automatically falls back instead of being promised `ls-refs` or v2 `fetch`.
-Repositories imported with a shallow history persist the boundary commits the
-way Git persists its `shallow` file. Upload-pack advertises those boundaries,
-stops its graph walk at them, and a clone remains shallow rather than failing on
-an intentionally absent parent. Ordinary repositories still do not advertise
-client-requested shallow or deepen support. `filter` and `include-tag` remain
-unsupported, matching Artifacts.
-
-## Outbound branch fetch
-
-`RepositoryObject.importBranch` is the storage-side operation behind the REST
-import workflow. It acts as a small protocol-v1 Smart HTTP client: discover
-the remote HEAD or select one requested branch, negotiate full or shallow
-history, and hand the response stream directly to `readPack`. Only after the
-pack is complete and its selected history is connected does one transaction
-write the branch ref, shallow boundaries, and HEAD. The method returns the
-actual branch, tip, and pack object count so the REST workflow can publish the
-verified create result and copy the actual `default_branch` into the registry.
-
-The repository object persists the import command and attempt count before it
-arms an alarm, so the work survives the initiating HTTP connection and object
-eviction. A retry deliberately has no per-object cursor: it reclaims the prior
-attempt and fetches the selected branch again. Once the object is complete, the
-repository object atomically moves the registry status from `importing` to
-`ready`; an alarm can perform that publication even when the initiating Worker
-request is gone.
-
-Outbound requests accept only HTTPS remotes without URL user information.
-Literal loopback, private, and link-local destinations are refused, including
-on each of at most three manually followed redirects. Requests carry neither
-credentials nor cookies, and errors omit the remote URL because its query is
-sensitive. No Git binary, checkout, or whole-pack buffer is involved.
-
-## Objects and packs
-
-`readPack` is what a push is built on: it takes the byte stream of a Git pack and
-leaves the repository holding every object the pack carried, named by SHA-1.
-Streams cross the RPC boundary, so a pack reaches the object without the Worker
-buffering it.
-
-Resolved Objects are stored inflated: metadata in the `objects` table, bytes in
-the object's synchronous KV storage under `o:<oid>:<n>`, split into 1.5 MiB
-chunks because Durable Object storage caps a key and its value together at 2
-MB. A reusable zlib Pack representation lives under `z:<oid>:<n>`. When an
-Object has a retained **Delta**, its raw instructions and compressed Pack
-representation live under `d:<oid>:<n>` and `zd:<oid>:<n>` with the base's hash
-in `object_deltas`; Upload-pack reuses them when the base is available. See
-[ADR-0002](./docs/adr/0002-git-objects-are-chunked-rows-in-the-repository-object.md)
-and [ADR-0006](./docs/adr/0006-resolved-objects-and-pack-representations-are-a-hybrid.md).
-
-An `objects` row begins incomplete and is invisible to reads until all of those
-rows and chunks exist. If the Durable Object reports `SQLITE_FULL`, the pending
-representation is removed in one storage transaction and receive-pack rejects
-the Pack through report-status. If cleanup is interrupted, the hidden row stays
-enumerable so a retry or Sweep can finish it. Objects completed earlier in that
-Pack remain Orphans and are reclaimed by the normal Sweep.
-
-The parse is a single streaming pass, and that is the whole point of storing
-objects this way. Each resolved object is written the moment it is complete, so
-a delta resolves by reading its base back out of storage rather than by holding
-the pack in memory: peak residency is one object, one base, and one stream
-chunk, independent of pack size. `apps/api/test/pack.test.ts` measures that
-directly — a pack four times longer is read with no more in flight. A rewrite
-that buffered the pack would pass every other test and lose the reason the store
-looks like this.
-
-Object writes also persist parsed graph edges. Upload-pack walks those small SQL
-rows and batches retained-Delta metadata reads during Pack planning instead of
-loading every commit and tree again or issuing one query per object. After Sweep
-finishes, its mark set remains as the reachability index for that ref version;
-bounded alarm turns then backfill Pack representations and select useful Deltas
-without delaying pushes. Forks preserve a retained Delta when its base belongs
-to the copied snapshot.
-
-| Module                     | What it is                                                                                                 |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `src/pack.ts`              | The pack reader: entry headers, `ofs-delta` and `ref-delta` resolution, the trailing checksum              |
-| `src/object-store.ts`      | Objects as chunked rows, and the sink the pack is read into                                                |
-| `src/connectivity.ts`      | What a commit, tree, or tag names, and the walks that answer "is it all here" and "is this a fast-forward" |
-| `src/inflate.ts`           | A resumable zlib decompressor                                                                              |
-| `src/sha1.ts`              | Incremental SHA-1                                                                                          |
-| `src/delta.ts`             | Git's copy/insert delta encoding                                                                           |
-| `src/git/pkt-line.ts`      | Git's framing, written and read — and the hand-off from the commands to the pack behind them               |
-| `src/git/receive-pack.ts`  | The push conversation: commands in, `report-status` out, and what this server accepts                      |
-| `src/git/upload-pack.ts`   | Fetch negotiation, reachability subtraction, and the streaming pack writer                                 |
-| `src/git/remote-branch.ts` | Credentialless Smart HTTP discovery and one-branch outbound fetch                                          |
-| `src/repository-store.ts`  | The order all of it happens in, and the transaction at the end                                             |
-
-`DecompressionStream("deflate")` cannot do this job: a pack is a concatenation
-of zlib streams with no length prefix, so the next object can only be found by
-being told how many input bytes the last stream consumed, which the platform
-stream hides. `crypto.subtle.digest` is likewise whole-buffer only, and the
-pack's trailing checksum covers a stream we never buffer. Both are hand-written
-for that reason and for no other.
-
-Residency is bounded rather than merely small, because every size in a pack is a
-number the sender chose and is read before a byte of the object arrives. An
-entry declaring more than `MAX_OBJECT_BYTES`, and a delta declaring a result
-larger than that, are refused on the header — before the buffer is allocated, so
-the answer is an `object-too-large` rejection rather than the runtime killing
-the object. The limit is 32 MiB because resolving a delta holds three of these
-at once; lifting it means inflating whole objects straight into chunks instead
-of into one buffer, since only a delta's base genuinely has to be resident.
-
-Both delta encodings resolve, including chains several deep. A thin ref-delta
-can read its base from an earlier push through the same object-store seam; a
-base absent from both the pack and repository remains a `missing-base` error.
-
-Failures are a `PackError` with a code, and the code is a Git fact rather than
-an HTTP one — the object owns Git and the Worker owns the envelope, so push maps
-these onto Artifacts' documented codes when it lands:
-
-| `PackError.code`                                                                                                   | Artifacts code         |
-| ------------------------------------------------------------------------------------------------------------------ | ---------------------- |
-| `object-too-large`                                                                                                 | `memoryLimit` (10402)  |
-| `not-a-pack`, `unsupported-version`, `truncated`, `checksum-mismatch`, `trailing-bytes`, `missing-base`, `corrupt` | `invalidInput` (10100) |
-
-That `memoryLimit` exists in Artifacts' own list is the corroboration for the
-ceiling above: refusing an object too big to hold is a documented answer, not an
-invention of ours.
-
-`apps/api/test/fixtures` holds packs written by a real Git client, alongside the
-object ids that client reported; `fixtures/generate.sh` rebuilds them. Agreeing
-with Git about what its own objects are called is the only test that matters
-here, so it runs against both delta encodings.
-
-## Database
-
-Drizzle is the ORM. Each Durable Object class has its own storage, so each has
-its own schema, its own drizzle-kit config, and its own migrations folder:
+- **Worker** — Hono router. Authorizes the request, resolves `namespace/repo` in
+  the registry, and calls a named RPC method on the repository object. Owns the
+  Cloudflare v4 response envelope; Git responses are pkt-lines rather than JSON.
+- **`NamespaceRegistryObject`** (`NAMESPACES`, fixed name `registry`) — every
+  namespace in the installation, plus the `(namespace, name)` → repository object
+  id index and the Git tokens. One object, because allocating a slug has to be a
+  single serialized decision and listing has to see all of them.
+- **`RepositoryObject`** (`REPOSITORIES`) — one per repository, addressed only by
+  the id stored in the registry. Holds what Git owns and what grows without
+  bound. Naming lives entirely in the registry, so a rename moves a row and not a
+  byte of Git data. See
+  [ADR-0004](./docs/adr/0004-git-reaches-a-repository-over-rpc.md).
+
+### Storage
+
+Each Durable Object class has its own Drizzle schema, drizzle-kit config, and
+committed migrations, applied by the object itself inside
+`blockConcurrencyWhile`.
 
 | Object                    | Schema                                 | Migrations                     |
 | ------------------------- | -------------------------------------- | ------------------------------ |
 | `NamespaceRegistryObject` | `apps/api/src/db/registry-schema.ts`   | `apps/api/drizzle/registry/`   |
 | `RepositoryObject`        | `apps/api/src/db/repository-schema.ts` | `apps/api/drizzle/repository/` |
 
-```sh
-bun run db:generate    # drizzle-kit generate, once per config
+Git bytes are the exception to the schema. `HEAD` is stored as the literal bytes
+of the `.git/HEAD` file
+([ADR-0003](./docs/adr/0003-head-is-the-literal-git-file.md)); object bytes,
+pack representations, and retained deltas are chunked KV values beside the SQL
+rows that describe them
+([ADR-0002](./docs/adr/0002-git-objects-are-chunked-rows-in-the-repository-object.md),
+[ADR-0006](./docs/adr/0006-resolved-objects-and-pack-representations-are-a-hybrid.md)).
+KV and SQL are one SQLite database inside the object, so a row and a file written
+in the same storage turn commit together.
+
+### Git modules
+
+Packs are read and written in a single streaming pass, so peak residency is one
+object rather than one pack.
+
+| Module                     | What it is                                                       |
+| -------------------------- | ---------------------------------------------------------------- |
+| `src/pack.ts`              | Pack reader: entry headers, `ofs-delta`/`ref-delta`, checksum    |
+| `src/object-store.ts`      | Objects as chunked rows, and the sink a pack is read into        |
+| `src/connectivity.ts`      | What an object names, and the reachability walks over that       |
+| `src/inflate.ts`           | A resumable zlib decompressor                                    |
+| `src/sha1.ts`              | Incremental SHA-1                                                |
+| `src/delta.ts`             | Git's copy/insert delta encoding                                 |
+| `src/git/pkt-line.ts`      | Git's framing, written and read                                  |
+| `src/git/receive-pack.ts`  | The push conversation: commands in, `report-status` out          |
+| `src/git/upload-pack.ts`   | Fetch negotiation and the streaming pack writer                  |
+| `src/git/remote-branch.ts` | Credentialless Smart HTTP discovery and outbound branch fetch    |
+| `src/sweep.ts`             | Reachability sweep, orphan reclamation, delta selection          |
+| `src/repository-store.ts`  | The order all of it happens in, and the transaction at the end   |
+
+### Monorepo
+
+```text
+.
+├── alchemy.run.ts                 # The only description of the deployed system
+├── drizzle.config.ts              # drizzle-kit output for the registry object
+├── drizzle.repository.config.ts   # drizzle-kit output for a repository object
+├── apps/api                       # Worker, Durable Objects, Git implementation
+├── packages/contracts             # Shared endpoint manifest and response types
+└── docs/adr                       # Architecture decisions
 ```
 
-That writes the SQL, a snapshot, and a `migrations.js` bundle — all **committed**.
-There is no network-connected database to push to, so each Durable Object applies
-its own migrations: it builds `drizzle(ctx.storage)` and calls the
-`durable-sqlite` migrator inside `blockConcurrencyWhile`, so no request can reach
-a half-migrated schema, on first start or after an eviction. `migrations.js`
-imports each `.sql` file directly; Alchemy's bundler maps `.sql` to a text module
-for exactly this case, so no wrangler-style `rules` config or codegen step is
-needed.
+`packages/contracts` names the implemented endpoints in
+`IMPLEMENTED_ENDPOINT_IDS`. The router skips stub registration for those ids and
+the test suite asserts `501` for the complement, so the manifest, the router, and
+the tests cannot drift apart.
 
-The named RPC methods are one inherited implementation over two storage
-adapters. Durable Object classes provide `drizzle(ctx.storage)`; the local
-`NamespaceRegistry`, `RepositoryIndex`, `TokenRegistry`, and `RepositoryStore`
-classes provide the same operations over any synchronous drizzle SQLite
-database. Tests use `bun:sqlite` and migrate it from the same `drizzle/` folder,
-so the queries and generated schema run for real without a Workers runtime —
-the only thing they skip is the RPC hop.
-
-Git bytes are the exception to the schema. `RepositoryStore` also takes the
-synchronous KV half of the same storage, because `HEAD` is stored as the file
-Git writes rather than as columns, and because an object's bytes are chunks
-rather than a column; the tests hand it a `Map` that structured-clones the way
-the real thing does. KV and SQL are one SQLite database inside the object, so a
-row and a file written in the same storage turn commit together.
-
-The registry's transactions run synchronously (`.all()` rather than `await`)
-because the driver is synchronous: a transaction body that yielded would commit
-before it finished.
-
-## Infrastructure
-
-`alchemy.run.ts` is the only description of the deployed system. It declares the
-`Api` Worker (bundled from `apps/api/src/index.ts`), the `Namespaces` and
-`Repositories` Durable Object namespaces bound to it as `NAMESPACES` and
-`REPOSITORIES`, Workers Observability, and a five-minute CPU limit. There is no
-`wrangler.toml`; Alchemy owns the Worker script, bindings, migrations, and
-`workers.dev` subdomain. It creates new Durable Object classes as
-`new_sqlite_classes`, which is where both objects' SQLite storage comes from.
-
-Bindings flow back into the application as types. The stack exports
-
-```ts
-export type ApiEnv = Cloudflare.InferEnv<typeof ApiWorker>;
-```
-
-and `apps/api/src/app.ts` builds its router as `new Hono<{ Bindings: ApiEnv }>()`,
-so `context.env.NAMESPACES` is typed as
-`DurableObjectNamespace<NamespaceRegistryObject>` — the registry's RPC methods
-are typed at the call site — and any new binding added to the stack shows up on
-`context.env` without a hand-maintained `Env` interface.
+`alchemy.run.ts` declares the Worker, both Durable Object namespaces,
+observability, and CPU limits — there is no `wrangler.toml`. Its exported
+`ApiEnv` types `context.env` in the router, so bindings and RPC methods are typed
+at the call site.
 
 ## Development
 
@@ -631,8 +115,7 @@ Requires [Bun](https://bun.sh/) and a Cloudflare account for Alchemy commands.
 
 ```sh
 bun install
-bun run check
-bun run plan
+bun run check      # typecheck, lint, format, test
 bun run dev
 ```
 
@@ -643,66 +126,25 @@ bun alchemy login   # or copy .env.example to .env and use an API token
 bun run deploy
 ```
 
-To deploy an isolated stage and exercise the real Workers and Durable Objects
-runtime with real Git repositories, follow the
-[Cloudflare smoke-testing runbook](./docs/cloudflare-smoke-testing.md). Its
-script removes all temporary clones on exit and destroys the smoke stage by
-default.
-
-To compare an arbitrary public GitHub repository across GitHub, hosted
-Cloudflare Artifacts, and a deployed Open Relic installation, follow the
-[Git host benchmarking runbook](./docs/git-host-benchmarking.md). The tracked
-harness records push, clone, integrity, pack-size, and incremental-fetch
-measurements and removes its disposable repositories by default.
-
-### Test coverage
-
-`bun test` requires `git` on `PATH` and fails at startup when it is missing. The
-real-client tests serve the runtime-agnostic Hono application over a local HTTP
-socket, create a repository through the same application, and have a real Git
-binary push into it. They cover create, delete, force, atomic, push options, and
-a captured thin ref-delta against a blob from the previous push. Pkt-line
-encoding and pack reading remain independently covered by table-driven tests,
-including pack fixtures generated by Git itself.
-
-This does not run inside the Workers runtime. It covers the router, protocol,
-pack reader, migrations, and repository behavior, but not the deployed
-Worker-to-Durable-Object RPC hop, runtime stream transfer across that hop,
-`drizzle-orm/durable-sqlite`, or `DurableObjectState.storage.kv`. The in-process
-tests use Bun's Web APIs, `bun:sqlite`, and a structured-cloning Map in their
-place, so Workers-specific stream, digest, and storage behavior remains
-uncovered here.
-
-### Stages
-
 Every command takes `--stage`, and Alchemy derives a distinct Worker name and
-Durable Object namespace per stage, so stages never share state. `--stage`
-defaults to `dev_$USER`, which is what `bun run deploy` and `bun run dev` use.
+Durable Object namespaces per stage, so stages never share state. `--stage`
+defaults to `dev_$USER`. CI deploys the `prod` stage from `main`.
 
-```sh
-bun run plan:prod      # alchemy plan --stage prod
-bun run deploy:prod    # alchemy deploy --stage prod
-bun run tail           # stream live Worker logs
-bun run destroy        # tear down the current stage
-```
+Protected routes require `Authorization: Bearer $OPEN_RELIC_API_TOKEN`; generate
+it with `openssl rand -hex 32`. An unset or too-short value fails closed —
+`/healthz` is the only unauthenticated endpoint and reports `503` in that case.
 
-CI deploys the `prod` stage from `main` via `.github/workflows/deploy.yml`. It
-needs `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, and
-`OPEN_RELIC_API_TOKEN` as repository secrets in a `prod` environment. Generate
-the API token as shown above. The Cloudflare token needs Workers
-Scripts:Edit, Workers Subdomain:Edit, Workers Observability:Edit, and Account
-Settings:Read.
+`bun test` requires `git` on `PATH`. Tests run the Hono application in-process
+against `bun:sqlite` and a real Git binary, so they cover the router, protocol,
+pack reader, and migrations, but not the Workers runtime or the RPC hop.
 
-`GET /healthz` is the sole unauthenticated endpoint. It reports readiness when
-the API token is valid:
+## Documentation
 
-```json
-{ "service": "open-relic", "status": "ok" }
-```
-
-If the binding is absent, empty, or shorter than 32 UTF-8 bytes, protected
-routes fail closed with `401` and `/healthz` answers `503` with `status` set to
-`"unavailable"`.
-
-The remaining repository content operations are registered from the manifest
-in `packages/contracts/src/index.ts`, answer `501`, and are covered by tests.
+- [CONTEXT.md](./CONTEXT.md) — the domain vocabulary shared by the API, the Git
+  protocol, and the storage beneath both
+- [docs/adr](./docs/adr) — architecture decisions
+- [Cloudflare smoke-testing runbook](./docs/cloudflare-smoke-testing.md) —
+  exercise a real stage with real Git repositories
+- [Git host benchmarking runbook](./docs/git-host-benchmarking.md) — compare
+  against GitHub and hosted Artifacts
+- [AGENTS.md](./AGENTS.md) — guide for coding agents
