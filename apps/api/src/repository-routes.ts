@@ -23,7 +23,7 @@ import {
   type RepoSortField,
   type RepoWithRemote,
   type SortDirection,
-} from "@open-relic/contracts";
+} from "./contracts.ts";
 import { Schema } from "effect";
 import type { Hono } from "hono";
 

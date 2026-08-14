@@ -1,4 +1,4 @@
-import { GIT_REPOSITORY_PATH, repositoryNameFromPath } from "@open-relic/contracts";
+import { GIT_REPOSITORY_PATH, repositoryNameFromPath } from "./contracts.ts";
 import type { Hono } from "hono";
 
 import type { ApiEnv } from "../../../alchemy.run.ts";

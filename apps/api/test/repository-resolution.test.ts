@@ -1,4 +1,4 @@
-import { ERROR_CODES, type RepoInfo } from "@open-relic/contracts";
+import { ERROR_CODES, type RepoInfo } from "../src/contracts.ts";
 import { describe, expect, test } from "bun:test";
 
 import type { AuthorizeGitRequest } from "../src/git/authorization.ts";

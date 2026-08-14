@@ -2,7 +2,7 @@
 
 How the engineering skills should consume this repo's domain documentation when exploring the codebase.
 
-This is a **single-context** repo: one `CONTEXT.md` and one `docs/adr/` at the root, covering the whole system. Despite the Bun workspaces layout (`apps/api`, `packages/contracts`), Open Relic is one bounded context — a Git service — not several.
+This is a **single-context** repo: one `CONTEXT.md` and one `docs/adr/` at the root, covering the whole system. Open Relic is one bounded context — a Git service — not several.
 
 ## Before exploring, read these
 
@@ -21,8 +21,7 @@ If any of these files don't exist, **proceed silently**. Don't flag their absenc
 │   │   ├── 0001-durable-object-per-repository.md
 │   │   └── 0002-effect-as-the-service-boundary.md
 │   └── agents/
-├── apps/api/
-└── packages/contracts/
+└── apps/api/
 ```
 
 If this repo ever splits into genuinely separate contexts, the multi-context layout is a root `CONTEXT-MAP.md` pointing at one `CONTEXT.md` per context, with context-scoped `docs/adr/` alongside each. Switch by re-running `/setup-matt-pocock-skills` or editing this file.

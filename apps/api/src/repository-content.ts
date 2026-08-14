@@ -3,7 +3,7 @@ import {
   type CommitInfo,
   type TreeEntryInfo,
   type TreeEntryType,
-} from "@open-relic/contracts";
+} from "./contracts.ts";
 
 import { isObjectId } from "./object.ts";
 import { ObjectParseError } from "./object-parse.ts";

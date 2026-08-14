@@ -3,7 +3,7 @@ import {
   type CreateNamespaceRequest,
   type CreateRepoRequest,
   type CreateRepoResult,
-} from "@open-relic/contracts";
+} from "../../src/contracts.ts";
 import { eq } from "drizzle-orm";
 
 import type { RepositoryObjects } from "../../src/bindings.ts";

@@ -6,7 +6,7 @@
  * whether the objects arrived — is the repository's, and lives beside it.
  */
 
-import { validateBranchName } from "@open-relic/contracts";
+import { validateBranchName } from "../contracts.ts";
 
 import { concat } from "../bytes.ts";
 import { ZERO_OID } from "../object.ts";

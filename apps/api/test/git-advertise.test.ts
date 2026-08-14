@@ -1,4 +1,4 @@
-import { ERROR_CODES, type CreateTokenResult } from "@open-relic/contracts";
+import { ERROR_CODES, type CreateTokenResult } from "../src/contracts.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { createGitTestApp, type TestApp } from "./support/app.ts";

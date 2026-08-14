@@ -4,7 +4,7 @@ import {
   NAMESPACES_PATH,
   type ImportRepoResult,
   type RepoWithRemote,
-} from "@open-relic/contracts";
+} from "../src/contracts.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { concat } from "../src/bytes.ts";

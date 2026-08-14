@@ -1,4 +1,4 @@
-import { ERROR_CODES } from "@open-relic/contracts";
+import { ERROR_CODES } from "./contracts.ts";
 import { DurableObject } from "cloudflare:workers";
 import { drizzle, type DrizzleSqliteDODatabase } from "drizzle-orm/durable-sqlite";
 import { migrate } from "drizzle-orm/durable-sqlite/migrator";

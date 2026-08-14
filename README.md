@@ -95,14 +95,11 @@ object rather than one pack.
 ├── drizzle.config.ts              # drizzle-kit output for the registry object
 ├── drizzle.repository.config.ts   # drizzle-kit output for a repository object
 ├── apps/api                       # Worker, Durable Objects, Git implementation
-├── packages/contracts             # Shared endpoint manifest and response types
 └── docs/adr                       # Architecture decisions
 ```
 
-`packages/contracts` names the implemented endpoints in
-`IMPLEMENTED_ENDPOINT_IDS`. The router skips stub registration for those ids and
-the test suite asserts `501` for the complement, so the manifest, the router, and
-the tests cannot drift apart.
+`apps/api/src/contracts.ts` keeps the HTTP endpoint manifest, wire response
+types, and shared validation rules with the Worker that owns them.
 
 `alchemy.run.ts` declares the Worker, both Durable Object namespaces,
 observability, and CPU limits — there is no `wrangler.toml`. Its exported

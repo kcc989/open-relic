@@ -5,7 +5,7 @@ import {
   REPOSITORY_NAME_MAX_LENGTH,
   type CreateRepoResult,
   type RepoWithRemote,
-} from "@open-relic/contracts";
+} from "../src/contracts.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { createTestApp, type TestApp } from "./support/app.ts";

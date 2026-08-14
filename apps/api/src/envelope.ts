@@ -4,7 +4,7 @@ import {
   type ApiError,
   type EndpointId,
   type ResultInfo,
-} from "@open-relic/contracts";
+} from "./contracts.ts";
 
 /**
  * Every JSON response on the REST surface goes through here. Artifacts wraps

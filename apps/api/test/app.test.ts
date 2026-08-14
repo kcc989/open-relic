@@ -3,7 +3,7 @@ import {
   GIT_HTTP_ENDPOINTS,
   REST_ENDPOINTS,
   isImplementedEndpoint,
-} from "@open-relic/contracts";
+} from "../src/contracts.ts";
 import { describe, expect, test } from "bun:test";
 
 import { createApp } from "../src/app.ts";

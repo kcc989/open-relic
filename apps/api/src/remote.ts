@@ -1,4 +1,4 @@
-import { gitRemotePath } from "@open-relic/contracts";
+import { gitRemotePath } from "./contracts.ts";
 
 /**
  * Artifacts hands the remote to the caller rather than having the caller build

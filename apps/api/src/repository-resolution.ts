@@ -1,4 +1,4 @@
-import type { TokenScope } from "@open-relic/contracts";
+import type { TokenScope } from "./contracts.ts";
 
 import type { ApiEnv } from "../../../alchemy.run.ts";
 import {

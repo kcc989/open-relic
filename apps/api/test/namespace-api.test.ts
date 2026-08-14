@@ -3,7 +3,7 @@ import {
   NAMESPACES_PATH,
   NAMESPACE_SLUG_MAX_LENGTH,
   type NamespaceInfo,
-} from "@open-relic/contracts";
+} from "../src/contracts.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { createTestApp, type TestApp } from "./support/app.ts";

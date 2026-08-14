@@ -1,4 +1,4 @@
-import type { CommitInfo } from "@open-relic/contracts";
+import type { CommitInfo } from "./contracts.ts";
 import { asc, eq, sql } from "drizzle-orm";
 
 import { findMissingObject, linksToFetch, type WalkOptions } from "./connectivity.ts";

@@ -1,4 +1,4 @@
-import { ERROR_CODES, NAMESPACES_PATH, type ApiError } from "@open-relic/contracts";
+import { ERROR_CODES, NAMESPACES_PATH, type ApiError } from "./contracts.ts";
 import type { Hono } from "hono";
 import mime from "mime";
 

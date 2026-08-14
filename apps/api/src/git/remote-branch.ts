@@ -1,4 +1,4 @@
-import { validateBranchName } from "@open-relic/contracts";
+import { validateBranchName } from "../contracts.ts";
 
 import { concat } from "../bytes.ts";
 import { isObjectId } from "../object.ts";

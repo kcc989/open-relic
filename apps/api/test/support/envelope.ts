@@ -1,4 +1,4 @@
-import type { ApiEnvelope, ResultInfo } from "@open-relic/contracts";
+import type { ApiEnvelope, ResultInfo } from "../../src/contracts.ts";
 
 /**
  * Every REST response is a v4 envelope, so the tests read one through here

@@ -3,7 +3,7 @@ import {
   type TokenInfo,
   type TokenListState,
   type TokenScope,
-} from "@open-relic/contracts";
+} from "./contracts.ts";
 import { and, count, desc, eq, gt, isNotNull, isNull, lte, type SQL } from "drizzle-orm";
 
 import type { SyncSqliteDatabase } from "./db/database.ts";

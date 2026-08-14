@@ -4,7 +4,7 @@ import {
   type CreateRepoResult,
   type CreateTokenResult,
   type TokenScope,
-} from "@open-relic/contracts";
+} from "../src/contracts.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { createGitTestApp, type TestApp } from "./support/app.ts";

@@ -6,7 +6,7 @@ import {
   TOKEN_TTL_MIN_SECONDS,
   type CreateTokenResult,
   type TokenInfo,
-} from "@open-relic/contracts";
+} from "../src/contracts.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import type { Json } from "../src/request-body.ts";
