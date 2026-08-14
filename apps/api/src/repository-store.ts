@@ -57,13 +57,64 @@ import type { ImportedBranch, ImportJob, ImportJobOutcome } from "./import-opera
 import { ObjectStore, RepositoryStorageExhaustedError } from "./object-store.ts";
 import type { ObjectType } from "./object.ts";
 import { ObjectParseError } from "./object-parse.ts";
-import { PackError, readPack, type PackBase, type PackObject } from "./pack.ts";
+import {
+  PackError,
+  createPackTimings,
+  readPack,
+  type PackBase,
+  type PackObject,
+  type PackTimings,
+} from "./pack.ts";
 import { parseCommit } from "./repository-content.ts";
 import { RepositoryRepacker, type RepackProgress } from "./repack.ts";
 import { RepositorySweeper, type SweepProgress } from "./sweep.ts";
 import { GITLINK_MODE, TREE_MODE, treeEntries, type ParsedTreeEntry } from "./tree-entry.ts";
 
 const TREE_NAME_DECODER = new TextDecoder();
+
+interface ReceivePackTimings {
+  readonly pack: PackTimings;
+  requestedAt: number;
+  gateWaitMs: number;
+  alarmMs: number;
+  commandsMs: number;
+  refsMs: number;
+  unpackMs: number;
+  verifyMs: number;
+  refUpdateMs: number;
+  responseMs: number;
+}
+
+const roundMs = (value: number): number => Number(value.toFixed(2));
+
+const receivePackTimingLog = (timings: ReceivePackTimings) => ({
+  totalMs: roundMs(performance.now() - timings.requestedAt),
+  gateWaitMs: roundMs(timings.gateWaitMs),
+  alarmMs: roundMs(timings.alarmMs),
+  commandsMs: roundMs(timings.commandsMs),
+  refsMs: roundMs(timings.refsMs),
+  unpackMs: roundMs(timings.unpackMs),
+  bodyIngressMs: roundMs(timings.pack.bodyIngressMs),
+  inflateMs: roundMs(timings.pack.inflateMs),
+  hashMs: roundMs(timings.pack.hashMs),
+  deltaApplyMs: roundMs(timings.pack.deltaApplyMs),
+  storageReadMs: roundMs(timings.pack.storageReadMs),
+  storageWriteMs: roundMs(timings.pack.storageWriteMs),
+  storageCommitMs: roundMs(timings.pack.storageCommitMs),
+  linkIndexMs: roundMs(timings.pack.linkIndexMs),
+  resolvedBytesStored: timings.pack.resolvedBytesStored,
+  compressedBytesStored: timings.pack.compressedBytesStored,
+  deltaBytesStored: timings.pack.deltaBytesStored,
+  linksStored: timings.pack.linksStored,
+  verifyMs: roundMs(timings.verifyMs),
+  refUpdateMs: roundMs(timings.refUpdateMs),
+  responseMs: roundMs(timings.responseMs),
+  bodyBytes: timings.pack.bodyBytes,
+  bodyChunks: timings.pack.bodyChunks,
+  objects: timings.pack.objects,
+  deltas: timings.pack.deltas,
+  recentBaseHits: timings.pack.recentBaseHits,
+});
 
 interface QueuedCommit {
   readonly commit: CommitInfo;
@@ -511,9 +562,28 @@ export const withRepositoryStore = <TBase extends RepositoryStorageConstructor>(
       body: ReadableStream<Uint8Array>,
       before: Promise<void> = Promise.resolve(),
     ): Promise<ReceivePackOutcome> {
+      const timings: ReceivePackTimings = {
+        pack: createPackTimings(),
+        requestedAt: performance.now(),
+        gateWaitMs: 0,
+        alarmMs: 0,
+        commandsMs: 0,
+        refsMs: 0,
+        unpackMs: 0,
+        verifyMs: 0,
+        refUpdateMs: 0,
+        responseMs: 0,
+      };
       return this.#exclusive(async () => {
+        timings.gateWaitMs = performance.now() - timings.requestedAt;
+        const alarmStarted = performance.now();
         await before;
-        return this.#receivePack(body);
+        timings.alarmMs = performance.now() - alarmStarted;
+        try {
+          return await this.#receivePack(body, timings);
+        } finally {
+          console.log(`Git receive-pack timings ${JSON.stringify(receivePackTimingLog(timings))}`);
+        }
       });
     }
 
@@ -687,11 +757,15 @@ export const withRepositoryStore = <TBase extends RepositoryStorageConstructor>(
       await this.#exclusive(remove);
     }
 
-    async #receivePack(body: ReadableStream<Uint8Array>): Promise<ReceivePackOutcome> {
+    async #receivePack(
+      body: ReadableStream<Uint8Array>,
+      timings: ReceivePackTimings,
+    ): Promise<ReceivePackOutcome> {
       const lines = new PktLineReader(body);
 
       let commands: readonly ReceivePackCommand[];
       let capabilities: readonly string[];
+      const commandsStarted = performance.now();
       try {
         ({ commands, capabilities } = await readReceivePackRequest(lines));
         if (capabilities.includes(PUSH_OPTIONS_CAPABILITY)) {
@@ -708,8 +782,11 @@ export const withRepositoryStore = <TBase extends RepositoryStorageConstructor>(
           return this.#refuse(error.message, [REPORT_STATUS_CAPABILITY]);
         }
         throw error;
+      } finally {
+        timings.commandsMs += performance.now() - commandsStarted;
       }
 
+      const refsStarted = performance.now();
       const current = await this.#refMap();
       const messages: string[] = [];
 
@@ -726,12 +803,14 @@ export const withRepositoryStore = <TBase extends RepositoryStorageConstructor>(
           rejections.set(at, rejected(command.name, reason));
         }
       });
+      timings.refsMs += performance.now() - refsStarted;
 
       // A push with nothing but deletes carries no pack, so waiting for one would
       // wait for a body the client has already finished sending.
       if (commands.some((command) => !isDelete(command))) {
+        const unpackStarted = performance.now();
         try {
-          await readPack(lines.rest(), this.#objects);
+          await readPack(lines.rest(), this.#objects, timings.pack);
         } catch (error) {
           if (
             !(error instanceof PackError) &&
@@ -746,6 +825,8 @@ export const withRepositoryStore = <TBase extends RepositoryStorageConstructor>(
             capabilities,
             commands.map((command) => rejected(command.name, REJECTIONS.unpacker)),
           );
+        } finally {
+          timings.unpackMs += performance.now() - unpackStarted;
         }
       } else {
         await lines.cancel();
@@ -758,6 +839,7 @@ export const withRepositoryStore = <TBase extends RepositoryStorageConstructor>(
       };
       const updates: PendingUpdate[] = [];
 
+      const verifyStarted = performance.now();
       for (const update of pending) {
         const verdict = await this.#verify(update.command, walk);
 
@@ -771,6 +853,7 @@ export const withRepositoryStore = <TBase extends RepositoryStorageConstructor>(
           messages.push(verdict.message);
         }
       }
+      timings.verifyMs += performance.now() - verifyStarted;
 
       if (capabilities.includes(ATOMIC_CAPABILITY) && rejections.size > 0) {
         return {
@@ -791,18 +874,23 @@ export const withRepositoryStore = <TBase extends RepositoryStorageConstructor>(
 
       const retargetedTo = this.#retarget(current, updates);
       if (updates.length > 0) {
+        const updateStarted = performance.now();
         await this.#applyUpdates(updates, retargetedTo);
+        timings.refUpdateMs += performance.now() - updateStarted;
       }
 
+      const responseStarted = performance.now();
+      const report = receivePackResult(
+        {
+          unpack: UNPACK_OK,
+          refs: commands.map((command, at) => rejections.get(at) ?? accepted(command.name)),
+          messages,
+        },
+        capabilities,
+      );
+      timings.responseMs += performance.now() - responseStarted;
       return {
-        report: receivePackResult(
-          {
-            unpack: UNPACK_OK,
-            refs: commands.map((command, at) => rejections.get(at) ?? accepted(command.name)),
-            messages,
-          },
-          capabilities,
-        ),
+        report,
         accepted: updates.length > 0,
         retargetedTo,
       };

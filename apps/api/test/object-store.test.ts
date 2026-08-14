@@ -12,7 +12,7 @@ import {
   createTestRepositoryStorage,
   type TestRepositoryStorage,
 } from "./support/database.ts";
-import { blob as gitBlob, tree, treeEntry } from "./support/git-objects.ts";
+import { blob as gitBlob, commit, tree, treeEntry } from "./support/git-objects.ts";
 
 const openHandles: Array<() => void> = [];
 
@@ -167,6 +167,17 @@ test("an object that arrived whole has no delta", async () => {
   expect(await objects.readDelta(written.oid)).toBeNull();
 });
 
+test("publishes a supplied compressed Pack representation byte-for-byte", async () => {
+  const objects = store();
+  const contents = filled(8_192, 17);
+  const compressed = new Uint8Array(deflateSync(contents, { level: 1 }));
+  const written = { ...blob(contents), compressed };
+
+  await objects.write(written);
+
+  expect((await objects.readFullPackEntry(written.oid))?.compressed).toEqual(compressed);
+});
+
 test("writing an object twice leaves one copy", async () => {
   const objects = store();
   const written = blob(utf8("written twice"));
@@ -227,7 +238,33 @@ test("batches delta and reachability metadata below Cloudflare SQLite's bind lim
   const oids = written.map(({ oid }) => oid);
 
   expect(await objects.readDeltaBases(oids)).toEqual(new Map());
+  expect((await objects.readPackMetadata(oids)).size).toBe(oids.length);
   expect((await objects.readIndexedObjects(oids)).size).toBe(oids.length);
+});
+
+test("finds candidate Objects in a client's indexed closure without returning the closure", async () => {
+  const objects = store();
+  const contents = gitBlob("reachable contents\n");
+  const root = tree([treeEntry("README.md", contents)]);
+  const first = commit({ tree: root, message: "First" });
+  const second = commit({ tree: root, parents: [first], message: "Second" });
+  for (const object of [contents, root, first, second]) {
+    await objects.write({ ...object, delta: null });
+  }
+
+  expect(
+    await objects.readReachableObjects(
+      new Set([second.oid]),
+      new Set([first.oid, contents.oid, "f".repeat(40)]),
+    ),
+  ).toEqual(new Set([first.oid, contents.oid]));
+  expect(
+    await objects.readReachableObjects(
+      new Set([second.oid]),
+      new Set([first.oid, contents.oid]),
+      new Set([second.oid]),
+    ),
+  ).toEqual(new Set([contents.oid]));
 });
 
 test("a store reopened on the same storage sees the objects", async () => {
@@ -550,7 +587,10 @@ test("reclaim removes object chunks, metadata, and a persisted delta", async () 
     oid,
     type: "blob",
     bytes: resolved,
-    delta: { baseOid: "9d5c1f2b8a4e7c0d3f6b1a8e5c2d9f0b7a4e6c31", bytes: rawDelta },
+    delta: {
+      baseOid: "9d5c1f2b8a4e7c0d3f6b1a8e5c2d9f0b7a4e6c31",
+      bytes: rawDelta,
+    },
   });
 
   expect(await objects.reclaim(oid)).toEqual({

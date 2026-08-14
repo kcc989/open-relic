@@ -3,7 +3,10 @@ import { deflateSync } from "node:zlib";
 
 import { delimiterPkt, flushPkt, pktLine } from "../src/git/pkt-line.ts";
 import { uploadPackResultStream } from "../src/git/upload-pack.ts";
-import { RepositoryStorageExhaustedError } from "../src/object-store.ts";
+import {
+  RepositoryStorageExhaustedError,
+  type PackRepresentationMetadata,
+} from "../src/object-store.ts";
 import { readPack, type PackBase, type PackObject } from "../src/pack.ts";
 import { createGitTestApp, type TestApp } from "./support/app.ts";
 import { blob, commit, tag, tree, treeEntry } from "./support/git-objects.ts";
@@ -334,6 +337,63 @@ describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
     expect(reads.get(README.oid)).toBeUndefined();
   });
 
+  test("reads planned compressed entries without per-object SQL fallbacks", async () => {
+    const fixtures = [FIRST, ROOT, README];
+    const objects = new Map(
+      fixtures.map((object) => [object.oid, { type: object.type, bytes: object.bytes }]),
+    );
+    const metadata = new Map<string, PackRepresentationMetadata>(
+      fixtures.map((object) => {
+        const compressed = new Uint8Array(deflateSync(object.bytes));
+        return [
+          object.oid,
+          {
+            oid: object.oid,
+            type: object.type,
+            size: object.bytes.length,
+            full: { size: compressed.length, chunkCount: 1 },
+            delta: null,
+          },
+        ];
+      }),
+    );
+    const cached = new Set<string>();
+    const request = concat(pktLine(`want ${FIRST.oid}\n`), flushPkt(), pktLine("done\n"));
+
+    await new Response(
+      uploadPackResultStream(
+        streamOf(request),
+        {
+          has: async (oid) => objects.has(oid),
+          read: async (oid) => objects.get(oid) ?? null,
+          readDeltaBase: async () => {
+            throw new Error("per-object delta planning should not run");
+          },
+          readDelta: async () => {
+            throw new Error("authoritative Delta fallback should not run");
+          },
+          readFullPackEntry: async () => {
+            throw new Error("per-object full-entry SQL fallback should not run");
+          },
+          readPackMetadata: async () => metadata,
+          readCachedPackEntry: (entry) => {
+            cached.add(entry.oid);
+            const object = objects.get(entry.oid)!;
+            return {
+              kind: "full",
+              type: object.type,
+              size: object.bytes.length,
+              compressed: new Uint8Array(deflateSync(object.bytes)),
+            };
+          },
+        },
+        new Set([FIRST.oid]),
+      ),
+    ).arrayBuffer();
+
+    expect(cached).toEqual(new Set(fixtures.map(({ oid }) => oid)));
+  });
+
   test("plans an object once when several tree entries reach the same oid in one frontier", async () => {
     const shared = blob("shared file\n");
     const root = tree([treeEntry("one.txt", shared), treeEntry("two.txt", shared)]);
@@ -367,7 +427,7 @@ describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
     expect(new Set(received)).toEqual(new Set([tip.oid, root.oid, shared.oid]));
   });
 
-  test("stops the wanted walk when it reaches the client's known closure", async () => {
+  test("stops at common haves without enumerating the client's known closure", async () => {
     const objects = new Map(
       [FIRST, ROOT, README, SECOND, SECOND_ROOT, REVISED].map((object) => [
         object.oid,
@@ -398,8 +458,8 @@ describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
       ),
     ).arrayBuffer();
 
-    expect(reads.get(FIRST.oid)).toBe(1);
-    expect(reads.get(ROOT.oid)).toBe(1);
+    expect(reads.get(FIRST.oid)).toBeUndefined();
+    expect(reads.get(ROOT.oid)).toBeUndefined();
     expect(reads.get(README.oid)).toBeUndefined();
   });
 

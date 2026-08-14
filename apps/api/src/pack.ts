@@ -3,8 +3,9 @@
  *
  * Every object is handed to the sink the moment it is complete, so a delta
  * resolves by reading its base back out of storage rather than out of a table
- * of everything seen so far. Peak residency is one object, one base, and one
- * stream chunk — independent of how long the pack is. That is the property
+ * of everything seen so far. A small, bounded recent-base window avoids that
+ * storage read for nearby deltas. Peak residency stays independent of how long
+ * the pack is. That is the property
  * [ADR-0002](../../../docs/adr/0002-git-objects-are-chunked-rows-in-the-repository-object.md)
  * bought the chunked object store to get, so a buffering rewrite of this file
  * would pass its tests and lose the point.
@@ -57,6 +58,8 @@ export interface PackObject {
   readonly bytes: Uint8Array;
   /** `null` when the object arrived whole. */
   readonly delta: PackDelta | null;
+  /** The entry's reusable zlib stream, captured while the Pack is read. */
+  readonly compressed?: Uint8Array;
 }
 
 export interface PackBase {
@@ -70,18 +73,92 @@ export interface PackBase {
  */
 export interface PackSink {
   readonly read: (oid: string) => Promise<PackBase | null>;
-  readonly write: (object: PackObject) => Promise<void>;
+  readonly write: (object: PackObject, timings?: PackTimings) => Promise<void>;
 }
 
 export interface PackSummary {
   readonly objectCount: number;
 }
 
+/** Aggregate receive-pack phases; one log record is emitted per request. */
+export interface PackTimings {
+  bodyIngressMs: number;
+  bodyBytes: number;
+  bodyChunks: number;
+  inflateMs: number;
+  hashMs: number;
+  deltaApplyMs: number;
+  storageReadMs: number;
+  storageWriteMs: number;
+  storageCommitMs: number;
+  linkIndexMs: number;
+  resolvedBytesStored: number;
+  compressedBytesStored: number;
+  deltaBytesStored: number;
+  linksStored: number;
+  objects: number;
+  deltas: number;
+  recentBaseHits: number;
+}
+
+export const createPackTimings = (): PackTimings => ({
+  bodyIngressMs: 0,
+  bodyBytes: 0,
+  bodyChunks: 0,
+  inflateMs: 0,
+  hashMs: 0,
+  deltaApplyMs: 0,
+  storageReadMs: 0,
+  storageWriteMs: 0,
+  storageCommitMs: 0,
+  linkIndexMs: 0,
+  resolvedBytesStored: 0,
+  compressedBytesStored: 0,
+  deltaBytesStored: 0,
+  linksStored: 0,
+  objects: 0,
+  deltas: 0,
+  recentBaseHits: 0,
+});
+
 const PACK_SIGNATURE = "PACK";
 const HEADER_BYTES = 12;
 const TRAILER_BYTES = 20;
 const OID_BYTES = 20;
 const SUPPORTED_VERSIONS = new Set([2, 3]);
+const RECENT_BASE_BYTES = 4 * 1_024 * 1_024;
+const RECENT_BASE_COUNT = 256;
+
+class RecentPackBases {
+  readonly #entries = new Map<string, PackBase>();
+  #bytes = 0;
+
+  read(oid: string): PackBase | null {
+    return this.#entries.get(oid) ?? null;
+  }
+
+  remember(oid: string, object: PackBase): void {
+    const previous = this.#entries.get(oid);
+    if (previous !== undefined) {
+      this.#entries.delete(oid);
+      this.#bytes -= previous.bytes.length;
+    }
+    if (object.bytes.length > RECENT_BASE_BYTES) {
+      return;
+    }
+
+    this.#entries.set(oid, object);
+    this.#bytes += object.bytes.length;
+    while (this.#entries.size > RECENT_BASE_COUNT || this.#bytes > RECENT_BASE_BYTES) {
+      const oldest = this.#entries.entries().next().value;
+      if (oldest === undefined) {
+        break;
+      }
+      this.#entries.delete(oldest[0]);
+      this.#bytes -= oldest[1].bytes.length;
+    }
+  }
+}
 
 const objectTypeForKind = (kind: number): ObjectType | undefined => {
   switch (kind) {
@@ -110,14 +187,16 @@ const EMPTY = new Uint8Array(0);
  */
 class PackStream {
   readonly #reader: ReadableStreamDefaultReader<Uint8Array>;
+  readonly #timings: PackTimings;
   readonly #hasher = new Sha1();
   #buffer: Uint8Array = EMPTY;
   #held: Uint8Array = EMPTY;
   #exhausted = false;
   #position = 0;
 
-  constructor(body: ReadableStream<Uint8Array>) {
+  constructor(body: ReadableStream<Uint8Array>, timings: PackTimings) {
     this.#reader = body.getReader();
+    this.#timings = timings;
   }
 
   /** Bytes consumed from the start of the pack — an entry's own offset. */
@@ -187,11 +266,15 @@ class PackStream {
       return false;
     }
 
+    const started = performance.now();
     const { done, value } = await this.#reader.read();
+    this.#timings.bodyIngressMs += performance.now() - started;
     if (done || value === undefined) {
       this.#exhausted = true;
       return false;
     }
+    this.#timings.bodyBytes += value.length;
+    this.#timings.bodyChunks += 1;
 
     this.#hold(value);
 
@@ -213,20 +296,25 @@ class PackStream {
    * its own checksum does not cover.
    */
   #hold(chunk: Uint8Array): void {
-    if (chunk.length >= TRAILER_BYTES) {
-      this.#hasher.update(this.#held);
-      this.#hasher.update(chunk.subarray(0, chunk.length - TRAILER_BYTES));
-      this.#held = chunk.slice(chunk.length - TRAILER_BYTES);
-      return;
+    const started = performance.now();
+    try {
+      if (chunk.length >= TRAILER_BYTES) {
+        this.#hasher.update(this.#held);
+        this.#hasher.update(chunk.subarray(0, chunk.length - TRAILER_BYTES));
+        this.#held = chunk.slice(chunk.length - TRAILER_BYTES);
+        return;
+      }
+
+      const combined = new Uint8Array(this.#held.length + chunk.length);
+      combined.set(this.#held, 0);
+      combined.set(chunk, this.#held.length);
+
+      const keep = Math.min(TRAILER_BYTES, combined.length);
+      this.#hasher.update(combined.subarray(0, combined.length - keep));
+      this.#held = combined.slice(combined.length - keep);
+    } finally {
+      this.#timings.hashMs += performance.now() - started;
     }
-
-    const combined = new Uint8Array(this.#held.length + chunk.length);
-    combined.set(this.#held, 0);
-    combined.set(chunk, this.#held.length);
-
-    const keep = Math.min(TRAILER_BYTES, combined.length);
-    this.#hasher.update(combined.subarray(0, combined.length - keep));
-    this.#held = combined.slice(combined.length - keep);
   }
 }
 
@@ -288,12 +376,45 @@ const readBackOffset = async (stream: PackStream): Promise<number> => {
   return offset;
 };
 
-const inflateEntry = async (stream: PackStream, size: number): Promise<Uint8Array> => {
+interface InflatedEntry {
+  readonly bytes: Uint8Array;
+  readonly compressed: Uint8Array;
+}
+
+const compressedPrefix = (parts: readonly Uint8Array[], length: number): Uint8Array => {
+  const bytes = new Uint8Array(length);
+  let at = 0;
+
+  for (const part of parts) {
+    const remaining = length - at;
+    if (remaining <= 0) {
+      break;
+    }
+    const copied = part.subarray(0, remaining);
+    bytes.set(copied, at);
+    at += copied.length;
+  }
+
+  return bytes;
+};
+
+const inflateEntry = async (
+  stream: PackStream,
+  size: number,
+  timings: PackTimings,
+): Promise<InflatedEntry> => {
   const inflater = new Inflater(size);
+  const compressedParts: Uint8Array[] = [];
+  let compressedLength = 0;
+  const started = performance.now();
+  const ingressBefore = timings.bodyIngressMs;
 
   try {
     while (!inflater.done) {
-      inflater.push(await stream.takeBuffered());
+      const chunk = await stream.takeBuffered();
+      compressedParts.push(chunk);
+      compressedLength += chunk.length;
+      inflater.push(chunk);
     }
   } catch (error) {
     if (error instanceof InflateError) {
@@ -303,10 +424,16 @@ const inflateEntry = async (stream: PackStream, size: number): Promise<Uint8Arra
       );
     }
     throw error;
+  } finally {
+    timings.inflateMs += performance.now() - started - (timings.bodyIngressMs - ingressBefore);
   }
 
   stream.unread(inflater.leftover);
-  return inflater.output;
+  compressedLength -= inflater.leftover.length;
+  return {
+    bytes: inflater.output,
+    compressed: compressedPrefix(compressedParts, compressedLength),
+  };
 };
 
 const equal = (left: Uint8Array, right: Uint8Array): boolean =>
@@ -315,8 +442,9 @@ const equal = (left: Uint8Array, right: Uint8Array): boolean =>
 export const readPack = async (
   body: ReadableStream<Uint8Array>,
   sink: PackSink,
+  timings: PackTimings = createPackTimings(),
 ): Promise<PackSummary> => {
-  const stream = new PackStream(body);
+  const stream = new PackStream(body, timings);
   const header = await stream.take(HEADER_BYTES);
   const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
 
@@ -334,6 +462,7 @@ export const readPack = async (
   // Offsets are how `ofs-delta` names its base, so the parse has to remember
   // where each entry began. One entry per object, not per byte.
   const oidByOffset = new Map<number, string>();
+  const recentBases = new RecentPackBases();
 
   for (let index = 0; index < objectCount; index += 1) {
     const offset = stream.position;
@@ -350,13 +479,13 @@ export const readPack = async (
         );
       }
 
-      oidByOffset.set(offset, await resolve(stream, sink, size, baseOid));
+      oidByOffset.set(offset, await resolve(stream, sink, recentBases, timings, size, baseOid));
       continue;
     }
 
     if (kind === REF_DELTA) {
       const baseOid = toHex(await stream.take(OID_BYTES));
-      oidByOffset.set(offset, await resolve(stream, sink, size, baseOid));
+      oidByOffset.set(offset, await resolve(stream, sink, recentBases, timings, size, baseOid));
       continue;
     }
 
@@ -365,9 +494,18 @@ export const readPack = async (
       throw new PackError("corrupt", `Pack entry type ${kind} is not a thing.`);
     }
 
-    const bytes = await inflateEntry(stream, size);
-    const oid = hashObject(type, bytes);
-    await sink.write({ oid, type, bytes, delta: null });
+    const entry = await inflateEntry(stream, size, timings);
+    const hashStarted = performance.now();
+    const oid = hashObject(type, entry.bytes);
+    timings.hashMs += performance.now() - hashStarted;
+    const writeStarted = performance.now();
+    await sink.write(
+      { oid, type, bytes: entry.bytes, delta: null, compressed: entry.compressed },
+      timings,
+    );
+    timings.storageWriteMs += performance.now() - writeStarted;
+    timings.objects += 1;
+    recentBases.remember(oid, { type, bytes: entry.bytes });
     oidByOffset.set(offset, oid);
   }
 
@@ -376,7 +514,10 @@ export const readPack = async (
   if (!(await stream.atEnd())) {
     throw new PackError("trailing-bytes", "The pack carries bytes past its trailer.");
   }
-  if (!equal(trailer, stream.digest())) {
+  const digestStarted = performance.now();
+  const digest = stream.digest();
+  timings.hashMs += performance.now() - digestStarted;
+  if (!equal(trailer, digest)) {
     throw new PackError("checksum-mismatch", "The pack's trailing checksum does not match.");
   }
 
@@ -387,11 +528,21 @@ export const readPack = async (
 const resolve = async (
   stream: PackStream,
   sink: PackSink,
+  recentBases: RecentPackBases,
+  timings: PackTimings,
   size: number,
   baseOid: string,
 ): Promise<string> => {
-  const delta = await inflateEntry(stream, size);
-  const base = await sink.read(baseOid);
+  const delta = await inflateEntry(stream, size, timings);
+  const recent = recentBases.read(baseOid);
+  let base = recent;
+  if (base === null) {
+    const readStarted = performance.now();
+    base = await sink.read(baseOid);
+    timings.storageReadMs += performance.now() - readStarted;
+  } else {
+    timings.recentBaseHits += 1;
+  }
 
   if (base === null) {
     throw new PackError(
@@ -401,8 +552,9 @@ const resolve = async (
   }
 
   let bytes: Uint8Array;
+  const deltaStarted = performance.now();
   try {
-    bytes = applyDelta(base.bytes, delta);
+    bytes = applyDelta(base.bytes, delta.bytes);
   } catch (error) {
     if (error instanceof DeltaError) {
       throw new PackError(
@@ -411,9 +563,27 @@ const resolve = async (
       );
     }
     throw error;
+  } finally {
+    timings.deltaApplyMs += performance.now() - deltaStarted;
   }
 
+  const hashStarted = performance.now();
   const oid = hashObject(base.type, bytes);
-  await sink.write({ oid, type: base.type, bytes, delta: { baseOid, bytes: delta } });
+  timings.hashMs += performance.now() - hashStarted;
+  const writeStarted = performance.now();
+  await sink.write(
+    {
+      oid,
+      type: base.type,
+      bytes,
+      delta: { baseOid, bytes: delta.bytes },
+      compressed: delta.compressed,
+    },
+    timings,
+  );
+  timings.storageWriteMs += performance.now() - writeStarted;
+  timings.objects += 1;
+  timings.deltas += 1;
+  recentBases.remember(oid, { type: base.type, bytes });
   return oid;
 };

@@ -8,6 +8,8 @@
 export interface SyncKv {
   get(key: string): string | undefined;
   get<T>(key: string): T | undefined;
+  /** SQLite-backed Durable Objects can fetch up to 128 explicit keys in one await. */
+  getMany?<T>(keys: readonly string[]): Promise<ReadonlyMap<string, T>>;
   put(key: string, value: string): void;
   put<T>(key: string, value: T): void;
   delete(key: string): void;

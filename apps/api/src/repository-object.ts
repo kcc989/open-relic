@@ -6,6 +6,7 @@ import { migrate } from "drizzle-orm/durable-sqlite/migrator";
 import migrations from "../drizzle/repository/migrations.js";
 import type { ApiEnv } from "../../../alchemy.run.ts";
 import { repositoryIndexFromEnv } from "./bindings.ts";
+import type { SyncKv } from "./db/kv.ts";
 import { fail } from "./envelope.ts";
 import {
   ImportOperation,
@@ -29,13 +30,22 @@ import type { SweepProgress } from "./sweep.ts";
 
 class DurableRepositoryStorage extends DurableObject implements RepositoryStorage {
   readonly [REPOSITORY_DATABASE]: DrizzleSqliteDODatabase;
-  readonly [REPOSITORY_KV]: DurableObjectStorage["kv"];
+  readonly [REPOSITORY_KV]: SyncKv;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
 
     this[REPOSITORY_DATABASE] = drizzle(ctx.storage);
-    this[REPOSITORY_KV] = ctx.storage.kv;
+    const kv = ctx.storage.kv;
+    this[REPOSITORY_KV] = {
+      get: <T>(key: string): T | undefined => kv.get<T>(key),
+      getMany: <T>(keys: readonly string[]): Promise<ReadonlyMap<string, T>> =>
+        ctx.storage.get<T>([...keys], { noCache: true }),
+      put: <T>(key: string, value: T): void => kv.put(key, value),
+      delete: (key: string): void => {
+        kv.delete(key);
+      },
+    };
 
     ctx.blockConcurrencyWhile(async () => {
       migrate(this[REPOSITORY_DATABASE], migrations);

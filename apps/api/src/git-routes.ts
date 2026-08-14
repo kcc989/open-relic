@@ -83,14 +83,25 @@ export const registerGitRoutes = (
     const service = context.req.query("service");
 
     if (service === UPLOAD_PACK_SERVICE) {
+      const started = performance.now();
       const found = await resolve(context, "read");
       if (found instanceof Response) {
         return found;
       }
+      const resolvedAt = performance.now();
+      const protocolVersion = uploadProtocolVersion(context);
 
       const advertisement = await repositoryObjects(context.env)
         .get(found.durableObjectId)
-        .advertiseUploadPack(uploadProtocolVersion(context));
+        .advertiseUploadPack(protocolVersion);
+      console.log(
+        `Git upload-pack advertisement timings ${JSON.stringify({
+          totalMs: Number((performance.now() - started).toFixed(2)),
+          resolveMs: Number((resolvedAt - started).toFixed(2)),
+          repositoryMs: Number((performance.now() - resolvedAt).toFixed(2)),
+          protocolVersion,
+        })}`,
+      );
 
       return new Response(advertisement, {
         headers: {
@@ -109,14 +120,23 @@ export const registerGitRoutes = (
       );
     }
 
+    const started = performance.now();
     const found = await resolve(context, "write");
     if (found instanceof Response) {
       return found;
     }
+    const resolvedAt = performance.now();
 
     const advertisement = await repositoryObjects(context.env)
       .get(found.durableObjectId)
       .advertiseReceivePack();
+    console.log(
+      `Git receive-pack advertisement timings ${JSON.stringify({
+        totalMs: Number((performance.now() - started).toFixed(2)),
+        resolveMs: Number((resolvedAt - started).toFixed(2)),
+        repositoryMs: Number((performance.now() - resolvedAt).toFixed(2)),
+      })}`,
+    );
 
     return new Response(advertisement, {
       headers: {
@@ -127,10 +147,12 @@ export const registerGitRoutes = (
   });
 
   app.post(`${GIT_REPOSITORY_PATH}/git-receive-pack`, async (context) => {
+    const started = performance.now();
     const found = await resolve(context, "write");
     if (found instanceof Response) {
       return found;
     }
+    const resolvedAt = performance.now();
 
     // The one refusal that needs the repository itself, which is why it is here
     // rather than in the authorization seam.
@@ -151,6 +173,7 @@ export const registerGitRoutes = (
     const outcome = await repositoryObjects(context.env)
       .get(found.durableObjectId)
       .receivePack(body);
+    const repositoryAt = performance.now();
 
     if (outcome.accepted) {
       // After the refs moved, and outside the transaction that moved them. The
@@ -170,6 +193,16 @@ export const registerGitRoutes = (
         // Deliberately swallowed: see above.
       }
     }
+    const recordedAt = performance.now();
+    console.log(
+      `Git receive-pack route timings ${JSON.stringify({
+        totalMs: Number((recordedAt - started).toFixed(2)),
+        resolveMs: Number((resolvedAt - started).toFixed(2)),
+        repositoryMs: Number((repositoryAt - resolvedAt).toFixed(2)),
+        recordPushMs: Number((recordedAt - repositoryAt).toFixed(2)),
+        accepted: outcome.accepted,
+      })}`,
+    );
 
     return new Response(outcome.report, {
       headers: {
