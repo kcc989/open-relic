@@ -72,20 +72,20 @@ in the same storage turn commit together.
 Packs are read and written in a single streaming pass, so peak residency is one
 object rather than one pack.
 
-| Module                     | What it is                                                       |
-| -------------------------- | ---------------------------------------------------------------- |
-| `src/pack.ts`              | Pack reader: entry headers, `ofs-delta`/`ref-delta`, checksum    |
-| `src/object-store.ts`      | Objects as chunked rows, and the sink a pack is read into        |
-| `src/connectivity.ts`      | What an object names, and the reachability walks over that       |
-| `src/inflate.ts`           | A resumable zlib decompressor                                    |
-| `src/sha1.ts`              | Incremental SHA-1                                                |
-| `src/delta.ts`             | Git's copy/insert delta encoding                                 |
-| `src/git/pkt-line.ts`      | Git's framing, written and read                                  |
-| `src/git/receive-pack.ts`  | The push conversation: commands in, `report-status` out          |
-| `src/git/upload-pack.ts`   | Fetch negotiation and the streaming pack writer                  |
-| `src/git/remote-branch.ts` | Credentialless Smart HTTP discovery and outbound branch fetch    |
-| `src/sweep.ts`             | Reachability sweep, orphan reclamation, delta selection          |
-| `src/repository-store.ts`  | The order all of it happens in, and the transaction at the end   |
+| Module                     | What it is                                                     |
+| -------------------------- | -------------------------------------------------------------- |
+| `src/pack.ts`              | Pack reader: entry headers, `ofs-delta`/`ref-delta`, checksum  |
+| `src/object-store.ts`      | Objects as chunked rows, and the sink a pack is read into      |
+| `src/connectivity.ts`      | What an object names, and the reachability walks over that     |
+| `src/inflate.ts`           | A resumable zlib decompressor                                  |
+| `src/sha1.ts`              | Incremental SHA-1                                              |
+| `src/delta.ts`             | Git's copy/insert delta encoding                               |
+| `src/git/pkt-line.ts`      | Git's framing, written and read                                |
+| `src/git/receive-pack.ts`  | The push conversation: commands in, `report-status` out        |
+| `src/git/upload-pack.ts`   | Fetch negotiation and the streaming pack writer                |
+| `src/git/remote-branch.ts` | Credentialless Smart HTTP discovery and outbound branch fetch  |
+| `src/sweep.ts`             | Reachability sweep, orphan reclamation, delta selection        |
+| `src/repository-store.ts`  | The order all of it happens in, and the transaction at the end |
 
 ### Monorepo
 
