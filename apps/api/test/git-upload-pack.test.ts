@@ -30,17 +30,23 @@ const UPLOAD = "http://local.test/git/acme/demo.git/git-upload-pack";
 
 let harness: TestApp;
 
-const post = (path: string, body: Uint8Array<ArrayBuffer>) =>
-  harness.app.request(
+const post = (path: string, body: Uint8Array<ArrayBuffer>, contentEncoding?: string) => {
+  const headers = new Headers({
+    Authorization: `Bearer ${harness.repositoryToken}`,
+    "Content-Type": "application/x-git-upload-pack-request",
+  });
+  if (contentEncoding !== undefined) {
+    headers.set("Content-Encoding", contentEncoding);
+  }
+
+  return harness.app.request(
     new Request(path, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${harness.repositoryToken}`,
-        "Content-Type": "application/x-git-upload-pack-request",
-      },
+      headers,
       body,
     }),
   );
+};
 
 beforeEach(async () => {
   harness = await createGitTestApp();
@@ -86,6 +92,21 @@ const packFromSideband = (bytes: Uint8Array): Uint8Array => {
 };
 
 describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
+  test("inflates a gzip-encoded negotiation request", async () => {
+    const request = concat(
+      pktLine(`want ${FIRST.oid} side-band-64k\n`),
+      flushPkt(),
+      pktLine("done\n"),
+    );
+    const compressed = Uint8Array.from(Bun.gzipSync(request));
+    const response = await post(UPLOAD, compressed, "gzip");
+    const bytes = new Uint8Array(await response.arrayBuffer());
+
+    expect(response.status).toBe(200);
+    expect(new TextDecoder().decode(packetPayloads(bytes)[0])).toBe("NAK\n");
+    expect(new TextDecoder().decode(packFromSideband(bytes).subarray(0, 4))).toBe("PACK");
+  });
+
   test("advertises an annotated tag followed immediately by its peeled target", async () => {
     const response = await harness.app.request(
       "http://local.test/git/acme/demo.git/info/refs?service=git-upload-pack",

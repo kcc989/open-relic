@@ -16,20 +16,31 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: prod
+    env:
+      DEPLOY_CONFIGURED: ${{ secrets.CLOUDFLARE_ACCOUNT_ID != '' && secrets.CLOUDFLARE_API_TOKEN != '' && secrets.OPEN_RELIC_API_TOKEN != '' }}
     steps:
+      - name: Skip deployment without production credentials
+        if: env.DEPLOY_CONFIGURED != 'true'
+        run: echo "Deployment skipped because the prod environment is not configured."
+
       - uses: actions/checkout@v4
+        if: env.DEPLOY_CONFIGURED == 'true'
 
       - uses: oven-sh/setup-bun@v2
+        if: env.DEPLOY_CONFIGURED == 'true'
         with:
           bun-version: 1.2.7
 
-      - run: bun install --frozen-lockfile
+      - if: env.DEPLOY_CONFIGURED == 'true'
+        run: bun install --frozen-lockfile
 
-      - run: bun run check
+      - if: env.DEPLOY_CONFIGURED == 'true'
+        run: bun run check
 
       # `--yes` accepts the Cloudflare state-store bootstrap/upgrade prompt,
       # which cannot be answered interactively here.
-      - run: bun alchemy deploy --stage prod --yes
+      - if: env.DEPLOY_CONFIGURED == 'true'
+        run: bun alchemy deploy --stage prod --yes
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
