@@ -8,19 +8,44 @@ import { describe, expect, test } from "bun:test";
 
 import { createApp } from "../src/app.ts";
 import { allowControlPlane } from "../src/control-plane-authorization.ts";
+import { envWithApiToken } from "./support/env.ts";
 import { envelope, errorCode } from "./support/envelope.ts";
 
 const app = createApp({ authorizeControlPlane: allowControlPlane });
 
 describe("health", () => {
-  test("reports that the worker is running", async () => {
-    const response = await app.request("http://local.test/healthz");
+  test("reports that the installation is ready", async () => {
+    const response = await app.request(
+      "http://local.test/healthz",
+      undefined,
+      envWithApiToken("a".repeat(32)),
+    );
     const body = await response.json();
 
     expect(response.status).toBe(200);
     expect(body).toEqual({
       service: "open-relic",
       status: "ok",
+    });
+  });
+
+  test("reports an unavailable installation when the API token is missing or weak", async () => {
+    const missing = await app.request("http://local.test/healthz");
+    const weak = await app.request(
+      "http://local.test/healthz",
+      undefined,
+      envWithApiToken("a".repeat(31)),
+    );
+
+    expect(missing.status).toBe(503);
+    expect(await missing.json<{ service: string; status: string }>()).toEqual({
+      service: "open-relic",
+      status: "unavailable",
+    });
+    expect(weak.status).toBe(503);
+    expect(await weak.json<{ service: string; status: string }>()).toEqual({
+      service: "open-relic",
+      status: "unavailable",
     });
   });
 });

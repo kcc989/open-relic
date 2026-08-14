@@ -170,7 +170,7 @@ describe("POST /git/:namespace/:repo.git/git-receive-pack", () => {
   });
 });
 
-describe("repo-scoped token authorization", () => {
+describe("repository-scoped Git token authorization", () => {
   const createToken = async (scope: TokenScope, ttl = 3600): Promise<CreateTokenResult> =>
     result<CreateTokenResult>(
       await harness.app.request(

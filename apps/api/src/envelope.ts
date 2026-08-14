@@ -78,10 +78,7 @@ const authenticationRequired = (message: string, challenge: string): Response =>
   );
 
 export const controlPlaneAuthenticationRequired = (): Response =>
-  authenticationRequired(
-    "A valid installation API token is required.",
-    'Bearer realm="Open Relic control plane"',
-  );
+  authenticationRequired("A valid API token is required.", "Bearer");
 
 export const gitAuthenticationRequired = (message: string): Response =>
   authenticationRequired(message, 'Basic realm="Open Relic Git"');

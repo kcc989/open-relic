@@ -3,6 +3,7 @@ import * as Cloudflare from "alchemy/Cloudflare";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 
+import { apiTokenForDeployment } from "./apps/api/src/api-token.ts";
 import type { NamespaceRegistryObject } from "./apps/api/src/namespace-registry-object.ts";
 import type { RepositoryObject } from "./apps/api/src/repository-object.ts";
 
@@ -28,7 +29,7 @@ export const ApiWorker = Cloudflare.Worker("Api", {
     }),
     // A secret-text binding: Alchemy redacts it from plans and state, while an
     // empty or absent value makes the entire REST control plane fail closed.
-    OPEN_RELIC_API_TOKEN: Redacted.make(process.env.OPEN_RELIC_API_TOKEN ?? ""),
+    OPEN_RELIC_API_TOKEN: Redacted.make(apiTokenForDeployment(process.env.OPEN_RELIC_API_TOKEN)),
   },
   observability: {
     enabled: true,

@@ -18,14 +18,14 @@ Two surfaces, both documented:
   at the root; see "The base path" below), the Cloudflare v4 envelope
   (`{result, success, errors, messages}`, `result_info` for pagination), and
   v4-shaped errors (`{code, message}`), not RFC 9457. The installation verifies
-  the request's Bearer value against its configured installation API token,
+  the request's Bearer value against its configured API token,
   standing in for Cloudflare's account-level API token check.
 - **Git Smart HTTP** — `https://<host>/git/:namespace/:repo.git`. Fetch negotiates
   protocol v1 or v2; push is v1 only, matching Artifacts, which does not support
   receive-pack over v2. `filter` and `include-tag` are unsupported there, so they
   are unsupported here.
 
-Repo-scoped bearer tokens are the Git credential: `art_v1_<40 hex>?expires=<unix
+Repository-scoped bearer Git tokens are the credential: `art_v1_<40 hex>?expires=<unix
 seconds>`, presented as `Authorization: Bearer …` or as HTTP Basic `x:<secret>`,
 with `read` and `write` scopes.
 
@@ -46,7 +46,7 @@ behavior that has not been built at all rather than behavior built differently:
 | Fork, import | routes registered, answer `501`       | copy repositories and import one remote branch            |
 | `source`     | always `null` — nothing writes it yet | set by import                                             |
 
-These closed with the reshaping of the REST surface and repo-scoped token
+These closed with the reshaping of the REST surface and Git token
 authorization: the path shape, the v4 envelope, `result_info` pagination,
 `errors[]` in place of RFC 9457 problem
 documents, the contents path spellings, token creation on the namespace, `202`

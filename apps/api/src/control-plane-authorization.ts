@@ -1,6 +1,5 @@
 import type { ApiEnv } from "../../../alchemy.run.ts";
-
-export const CONTROL_PLANE_TOKEN_VARIABLE = "OPEN_RELIC_API_TOKEN";
+import { matchesApiToken } from "./api-token.ts";
 
 export interface ControlPlaneAuthorizationRequest {
   readonly env: ApiEnv;
@@ -19,35 +18,14 @@ const bearerToken = (request: Request): string | null => {
   return /^Bearer\s+(.+)$/i.exec(authorization)?.[1] ?? null;
 };
 
-const sameToken = (left: string, right: string): boolean => {
-  const leftBytes = new TextEncoder().encode(left);
-  const rightBytes = new TextEncoder().encode(right);
-  if (leftBytes.length !== rightBytes.length) {
-    return false;
-  }
-
-  let difference = 0;
-  for (let index = 0; index < leftBytes.length; index += 1) {
-    difference |= leftBytes[index]! ^ rightBytes[index]!;
-  }
-  return difference === 0;
-};
-
 /**
  * The installation's control-plane credential. It is distinct from a
- * repo-scoped Git token and protects every route rooted at `/namespaces`.
+ * repository-scoped Git token and protects every route rooted at `/namespaces`.
  */
-export const authorizeInstallationApiToken: AuthorizeControlPlaneRequest = ({ env, request }) => {
-  // SAFETY: an unset Worker secret is absent at runtime even though ApiEnv names the binding.
-  const configured = (env as Partial<ApiEnv> | undefined)?.[CONTROL_PLANE_TOKEN_VARIABLE];
+export const authorizeApiToken: AuthorizeControlPlaneRequest = async ({ env, request }) => {
   const presented = bearerToken(request);
 
-  return (
-    configured !== undefined &&
-    configured.length > 0 &&
-    presented !== null &&
-    sameToken(configured, presented)
-  );
+  return presented !== null && (await matchesApiToken(env, presented));
 };
 
 /** Test-only seam for suites whose subject is below control-plane authentication. */
