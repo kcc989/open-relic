@@ -112,6 +112,16 @@ _Avoid_: partial pack
 An object expressed as edits against another object, its _base_, rather than in
 full.
 
+**Pack representation**:
+A reusable compressed whole-object or Delta entry from which Upload-pack can
+compose a Pack. It is derived storage, never the authority for an Object.
+_Avoid_: cached object, packed object
+
+**Repack**:
+A bounded background pass that selects cheaper Pack representations for
+reachable Objects.
+_Avoid_: Sweep, garbage collection
+
 **Advertisement**:
 The server's opening reply to a Git client, listing the refs it holds and the
 capabilities it supports.

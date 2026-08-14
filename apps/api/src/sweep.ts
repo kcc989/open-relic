@@ -33,7 +33,7 @@ export interface SweepProgress {
   readonly reachableObjects: number;
   readonly reclaimedObjects: number;
   readonly reclaimedChunks: number;
-  /** Inflated object bytes plus persisted delta bytes; storage overhead is excluded. */
+  /** Resolved, Delta, and compressed payload bytes; storage overhead is excluded. */
   readonly reclaimedBytes: number;
 }
 
@@ -269,13 +269,12 @@ export class RepositorySweeper {
       .limit(1);
 
     if (left === undefined) {
-      await this.#db.transaction((tx) => {
-        tx.delete(sweepReachable).run();
-        tx.update(sweepState)
-          .set({ phase: "complete", completedAt: new Date().toISOString() })
-          .where(eq(sweepState.id, SWEEP_STATE_ID))
-          .run();
-      });
+      // Keep the completed mark set as the repository's current reachability
+      // index. The next ref version clears and rebuilds it before any deletion.
+      await this.#db
+        .update(sweepState)
+        .set({ phase: "complete", completedAt: new Date().toISOString() })
+        .where(eq(sweepState.id, SWEEP_STATE_ID));
     }
   }
 

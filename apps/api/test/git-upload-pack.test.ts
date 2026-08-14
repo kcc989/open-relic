@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { deflateSync } from "node:zlib";
 
 import { delimiterPkt, flushPkt, pktLine } from "../src/git/pkt-line.ts";
 import { uploadPackResultStream } from "../src/git/upload-pack.ts";
+import { RepositoryStorageExhaustedError } from "../src/object-store.ts";
 import { readPack, type PackBase, type PackObject } from "../src/pack.ts";
 import { createGitTestApp, type TestApp } from "./support/app.ts";
 import { blob, commit, tag, tree, treeEntry } from "./support/git-objects.ts";
@@ -284,6 +286,87 @@ describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
     await reader.cancel();
   });
 
+  test("batches delta planning and emits cached full entries without rereading object bytes", async () => {
+    const objects = new Map(
+      [FIRST, ROOT, README].map((object) => [
+        object.oid,
+        { type: object.type, bytes: object.bytes },
+      ]),
+    );
+    const reads = new Map<string, number>();
+    const planned: string[][] = [];
+    const request = concat(pktLine(`want ${FIRST.oid}\n`), flushPkt(), pktLine("done\n"));
+
+    await new Response(
+      uploadPackResultStream(
+        streamOf(request),
+        {
+          has: async (oid) => objects.has(oid),
+          read: async (oid) => {
+            reads.set(oid, (reads.get(oid) ?? 0) + 1);
+            return objects.get(oid) ?? null;
+          },
+          readDeltaBase: async () => {
+            throw new Error("per-object delta lookup should not run");
+          },
+          readDeltaBases: async (oids) => {
+            planned.push([...oids]);
+            return new Map();
+          },
+          readDelta: async () => null,
+          readFullPackEntry: async (oid) => {
+            const object = objects.get(oid);
+            return object === undefined
+              ? null
+              : {
+                  type: object.type,
+                  size: object.bytes.length,
+                  compressed: new Uint8Array(deflateSync(object.bytes)),
+                };
+          },
+        },
+        new Set([FIRST.oid]),
+      ),
+    ).arrayBuffer();
+
+    expect(planned).toHaveLength(1);
+    expect(new Set(planned[0])).toEqual(new Set([FIRST.oid, ROOT.oid, README.oid]));
+    expect(reads.get(README.oid)).toBeUndefined();
+  });
+
+  test("plans an object once when several tree entries reach the same oid in one frontier", async () => {
+    const shared = blob("shared file\n");
+    const root = tree([treeEntry("one.txt", shared), treeEntry("two.txt", shared)]);
+    const tip = commit({ tree: root, message: "Shared blob" });
+    const objects = new Map(
+      [tip, root, shared].map((object) => [object.oid, { type: object.type, bytes: object.bytes }]),
+    );
+    const request = concat(pktLine(`want ${tip.oid}\n`), flushPkt(), pktLine("done\n"));
+    const response = uploadPackResultStream(
+      streamOf(request),
+      {
+        has: async (oid) => objects.has(oid),
+        read: async (oid) => objects.get(oid) ?? null,
+        readDeltaBase: async () => null,
+        readDelta: async () => null,
+      },
+      new Set([tip.oid]),
+    );
+    const bytes = new Uint8Array(await new Response(response).arrayBuffer());
+    const pack = bytes.subarray(bytes.indexOf(0x50));
+    const received: string[] = [];
+
+    await readPack(streamOf(pack), {
+      read: async (oid) => objects.get(oid) ?? null,
+      write: async (object) => {
+        received.push(object.oid);
+      },
+    });
+
+    expect(received).toHaveLength(3);
+    expect(new Set(received)).toEqual(new Set([tip.oid, root.oid, shared.oid]));
+  });
+
   test("stops the wanted walk when it reaches the client's known closure", async () => {
     const objects = new Map(
       [FIRST, ROOT, README, SECOND, SECOND_ROOT, REVISED].map((object) => [
@@ -539,6 +622,58 @@ describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
     await new Response(response).arrayBuffer();
 
     expect(reads.get(DELTA_RESULT.oid)).toBeUndefined();
+  });
+
+  test("falls back to authoritative full and Delta bytes when cache publication is full", async () => {
+    const delta = buildDelta(DELTA_BASE.bytes.length, DELTA_RESULT.bytes.length, [
+      insertInstruction(DELTA_RESULT.bytes),
+    ]);
+    const fixtures = [DELTA_COMMIT, DELTA_ROOT, DELTA_BASE, DELTA_RESULT, FIRST, ROOT, README];
+    const objects = new Map(
+      fixtures.map((object) => [object.oid, { type: object.type, bytes: object.bytes }]),
+    );
+    const request = concat(
+      pktLine(`want ${DELTA_COMMIT.oid} side-band-64k ofs-delta\n`),
+      flushPkt(),
+      pktLine("done\n"),
+    );
+    const response = uploadPackResultStream(
+      streamOf(request),
+      {
+        has: async (oid) => objects.has(oid),
+        read: async (oid) => objects.get(oid) ?? null,
+        readDeltaBase: async (oid) => (oid === DELTA_RESULT.oid ? DELTA_BASE.oid : null),
+        readDelta: async (oid) =>
+          oid === DELTA_RESULT.oid ? { baseOid: DELTA_BASE.oid, bytes: delta } : null,
+        readFullPackEntry: async () => {
+          throw new RepositoryStorageExhaustedError();
+        },
+        readDeltaPackEntry: async () => {
+          throw new RepositoryStorageExhaustedError();
+        },
+      },
+      new Set([DELTA_COMMIT.oid]),
+    );
+    const bytes = new Uint8Array(await new Response(response).arrayBuffer());
+    const pack = packFromSideband(bytes);
+    const held = new Map<string, PackBase>();
+    const received: PackObject[] = [];
+
+    await readPack(streamOf(pack), {
+      read: async (oid) => held.get(oid) ?? null,
+      write: async (object) => {
+        received.push(object);
+        held.set(object.oid, { type: object.type, bytes: object.bytes });
+      },
+    });
+
+    expect(new Set(received.map(({ oid }) => oid))).toEqual(
+      new Set(fixtures.map(({ oid }) => oid)),
+    );
+    expect(received.find(({ oid }) => oid === DELTA_RESULT.oid)?.delta).toEqual({
+      baseOid: DELTA_BASE.oid,
+      bytes: delta,
+    });
   });
 
   test("writes a full object when its persisted delta base is absent from client and pack", async () => {

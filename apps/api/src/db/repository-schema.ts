@@ -1,4 +1,4 @@
-import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 import { OBJECT_TYPES } from "../object.ts";
 
@@ -59,6 +59,11 @@ export const objects = sqliteTable("objects", {
   type: text("type", { enum: OBJECT_TYPES }).notNull(),
   size: integer("size").notNull(),
   chunkCount: integer("chunk_count").notNull(),
+  /** The reusable zlib stream for a full Pack entry, under `z:<oid>:<n>`. */
+  compressedSize: integer("compressed_size"),
+  compressedChunkCount: integer("compressed_chunk_count"),
+  /** Whether `object_links` contains the successfully parsed outgoing graph. */
+  linksIndexed: integer("links_indexed", { mode: "boolean" }).notNull().default(false),
   /** Readers ignore a row until every resolved and retained-delta chunk exists. */
   complete: integer("complete", { mode: "boolean" }).notNull().default(true),
 });
@@ -77,9 +82,33 @@ export const objectDeltas = sqliteTable("object_deltas", {
   baseOid: text("base_oid").notNull(),
   size: integer("size").notNull(),
   chunkCount: integer("chunk_count").notNull(),
+  /** The reusable zlib stream for the delta Pack entry, under `zd:<oid>:<n>`. */
+  compressedSize: integer("compressed_size"),
+  compressedChunkCount: integer("compressed_chunk_count"),
 });
 
 export type ObjectDeltaRow = typeof objectDeltas.$inferSelect;
+
+/**
+ * Parsed Git graph edges. They make reachability walks proportional to ids and
+ * small SQL rows instead of repeatedly loading and parsing commit/tree bytes.
+ */
+export const objectLinks = sqliteTable(
+  "object_links",
+  {
+    sourceOid: text("source_oid")
+      .notNull()
+      .references(() => objects.oid, { onDelete: "cascade" }),
+    targetOid: text("target_oid").notNull(),
+    targetType: text("target_type", { enum: OBJECT_TYPES }).notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.sourceOid, table.targetOid] }),
+    index("object_links_target_oid_idx").on(table.targetOid),
+  ],
+);
+
+export type ObjectLinkRow = typeof objectLinks.$inferSelect;
 
 export const SWEEP_PHASES = ["mark", "sweep", "complete"] as const;
 
@@ -112,4 +141,22 @@ export const sweepReachable = sqliteTable("sweep_reachable", {
   /** Null only for a ref root, whose type is learned from its own metadata. */
   expectedType: text("expected_type", { enum: OBJECT_TYPES }),
   pending: integer("pending", { mode: "boolean" }).notNull(),
+});
+
+/** One bounded background re-delta pass over a stable reachable snapshot. */
+export const repackState = sqliteTable("repack_state", {
+  id: text("id").primaryKey(),
+  refVersion: integer("ref_version").notNull(),
+  cursor: text("cursor"),
+  completedAt: text("completed_at"),
+});
+
+export const REPACK_STATE_ID = "repack";
+
+/** A full-object candidate per type/size bucket; selected deltas never become bases. */
+export const repackCandidates = sqliteTable("repack_candidates", {
+  bucket: text("bucket").primaryKey(),
+  oid: text("oid")
+    .notNull()
+    .references(() => objects.oid, { onDelete: "cascade" }),
 });

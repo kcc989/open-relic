@@ -59,6 +59,7 @@ import type { ObjectType } from "./object.ts";
 import { ObjectParseError } from "./object-parse.ts";
 import { PackError, readPack, type PackBase, type PackObject } from "./pack.ts";
 import { parseCommit } from "./repository-content.ts";
+import { RepositoryRepacker, type RepackProgress } from "./repack.ts";
 import { RepositorySweeper, type SweepProgress } from "./sweep.ts";
 import { GITLINK_MODE, TREE_MODE, treeEntries, type ParsedTreeEntry } from "./tree-entry.ts";
 
@@ -179,6 +180,7 @@ export interface ForkTarget {
   readonly writeForkObject: (
     object: ForkObject,
     bytes: ReadableStream<Uint8Array>,
+    deltaBytes?: ReadableStream<Uint8Array>,
   ) => Promise<void>;
   readonly completeFork: (state: ForkState) => Promise<void>;
 }
@@ -187,7 +189,66 @@ export interface ForkObject {
   readonly oid: string;
   readonly type: ObjectType;
   readonly size: number;
+  readonly delta: { readonly baseOid: string; readonly size: number } | null;
 }
+
+const emptyByteStream = (): ReadableStream<Uint8Array> =>
+  new ReadableStream<Uint8Array>({
+    type: "bytes",
+    start(controller) {
+      controller.close();
+    },
+  });
+
+const byteStream = (bytes: Uint8Array): ReadableStream<Uint8Array> =>
+  new ReadableStream<Uint8Array>({
+    type: "bytes",
+    start(controller) {
+      // workerd rejects zero-length chunks in byte streams.
+      if (bytes.byteLength > 0) {
+        const transferable =
+          bytes.buffer instanceof ArrayBuffer
+            ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+            : new Uint8Array(bytes);
+        controller.enqueue(transferable);
+      }
+      controller.close();
+    },
+  });
+
+const readForkBytes = async (
+  oid: string,
+  representation: "object" | "delta",
+  size: number,
+  stream: ReadableStream<Uint8Array>,
+): Promise<Uint8Array> => {
+  const contents = new Uint8Array(size);
+  const reader = stream.getReader();
+  let at = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) {
+        break;
+      }
+      if (at + next.value.length > contents.length) {
+        await reader.cancel(`Fork ${representation} exceeded its declared size.`);
+        throw new ForkError(`Fork ${representation} ${oid} exceeded its declared size.`);
+      }
+      contents.set(next.value, at);
+      at += next.value.length;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  if (at !== contents.length) {
+    throw new ForkError(
+      `Fork ${representation} ${oid} held ${at} bytes where it declared ${size}.`,
+    );
+  }
+  return contents;
+};
 
 export interface ForkOutcome {
   readonly objects: number;
@@ -258,6 +319,7 @@ export const withRepositoryStore = <TBase extends RepositoryStorageConstructor>(
     readonly #db: SyncSqliteDatabase;
     readonly #kv: SyncKv;
     readonly #objects: ObjectStore;
+    readonly #repacker: RepositoryRepacker;
     readonly #sweeper: RepositorySweeper;
     #operation = Promise.resolve();
 
@@ -266,6 +328,7 @@ export const withRepositoryStore = <TBase extends RepositoryStorageConstructor>(
       this.#db = this[REPOSITORY_DATABASE];
       this.#kv = this[REPOSITORY_KV];
       this.#objects = new ObjectStore(this.#db, this.#kv);
+      this.#repacker = new RepositoryRepacker(this.#db, this.#objects);
       this.#sweeper = new RepositorySweeper(this.#db, this.#objects);
     }
 
@@ -490,22 +553,38 @@ export const withRepositoryStore = <TBase extends RepositoryStorageConstructor>(
         await afterSnapshot();
 
         const copied = new Set<string>();
+        const copyOrder: string[] = [];
         while (pending.length > 0) {
-          const oid = pending.pop()!;
-          if (copied.has(oid)) {
-            continue;
+          const frontier = pending.splice(Math.max(0, pending.length - 98)).reverse();
+          const candidates = frontier.filter((oid) => !copied.has(oid));
+          const indexed = await this.#objects.readIndexedObjects(candidates);
+          for (const oid of candidates) {
+            if (copied.has(oid)) {
+              continue;
+            }
+            const graph = indexed.get(oid);
+            if (graph === undefined) {
+              const object = await this.#objects.read(oid);
+              if (object === null) {
+                throw new ForkError(`Reachable source object ${oid} is missing.`);
+              }
+              pending.push(...linksToFetch(object.type, object.bytes).map((link) => link.oid));
+            } else {
+              pending.push(...graph.links.map((link) => link.oid));
+            }
+            copied.add(oid);
+            copyOrder.push(oid);
           }
+        }
 
+        for (const oid of copyOrder) {
           const object = await this.#objects.read(oid);
           if (object === null) {
-            throw new ForkError(`Reachable source object ${oid} is missing.`);
+            throw new ForkError(`Reachable source object ${oid} vanished during its fork.`);
           }
-          copied.add(oid);
-
-          for (const link of linksToFetch(object.type, object.bytes)) {
-            pending.push(link.oid);
-          }
-
+          const storedDelta = await this.#objects.readDelta(oid);
+          const delta =
+            storedDelta !== null && copied.has(storedDelta.baseOid) ? storedDelta : null;
           const transferable =
             object.bytes.buffer instanceof ArrayBuffer
               ? new Uint8Array(
@@ -516,18 +595,14 @@ export const withRepositoryStore = <TBase extends RepositoryStorageConstructor>(
               : new Uint8Array(object.bytes);
 
           await target.writeForkObject(
-            { oid, type: object.type, size: object.bytes.length },
-            new ReadableStream<Uint8Array>({
-              type: "bytes",
-              start(controller) {
-                // workerd rejects zero-length chunks in byte streams. Closing
-                // without enqueueing still represents an empty Git object.
-                if (transferable.byteLength > 0) {
-                  controller.enqueue(transferable);
-                }
-                controller.close();
-              },
-            }),
+            {
+              oid,
+              type: object.type,
+              size: object.bytes.length,
+              delta: delta === null ? null : { baseOid: delta.baseOid, size: delta.bytes.length },
+            },
+            byteStream(transferable),
+            delta === null ? undefined : byteStream(delta.bytes),
           );
         }
 
@@ -542,33 +617,30 @@ export const withRepositoryStore = <TBase extends RepositoryStorageConstructor>(
     }
 
     /** The target side of a fork; it owns fresh object rows and chunk values. */
-    async writeForkObject(object: ForkObject, bytes: ReadableStream<Uint8Array>): Promise<void> {
-      const contents = new Uint8Array(object.size);
-      const reader = bytes.getReader();
-      let at = 0;
-      try {
-        while (true) {
-          const next = await reader.read();
-          if (next.done) {
-            break;
-          }
-          if (at + next.value.length > contents.length) {
-            await reader.cancel("Fork object exceeded its declared size.");
-            throw new ForkError(`Fork object ${object.oid} exceeded its declared size.`);
-          }
-          contents.set(next.value, at);
-          at += next.value.length;
-        }
-      } finally {
-        reader.releaseLock();
-      }
-
-      if (at !== contents.length) {
-        throw new ForkError(
-          `Fork object ${object.oid} held ${at} bytes where it declared ${object.size}.`,
-        );
-      }
-      await this.#objects.write({ ...object, bytes: contents, delta: null } satisfies PackObject);
+    async writeForkObject(
+      object: ForkObject,
+      bytes: ReadableStream<Uint8Array>,
+      deltaBytes?: ReadableStream<Uint8Array>,
+    ): Promise<void> {
+      const contents = await readForkBytes(object.oid, "object", object.size, bytes);
+      const delta =
+        object.delta === null
+          ? null
+          : {
+              baseOid: object.delta.baseOid,
+              bytes: await readForkBytes(
+                object.oid,
+                "delta",
+                object.delta.size,
+                deltaBytes ?? emptyByteStream(),
+              ),
+            };
+      await this.#objects.write({
+        oid: object.oid,
+        type: object.type,
+        bytes: contents,
+        delta,
+      } satisfies PackObject);
     }
 
     /**
@@ -603,6 +675,11 @@ export const withRepositoryStore = <TBase extends RepositoryStorageConstructor>(
         await after(progress);
         return progress;
       });
+    }
+
+    /** Advance one bounded cache-backfill and re-delta selection batch. */
+    async repack(batchSize?: number): Promise<RepackProgress> {
+      return this.#exclusive(() => this.#repacker.step(batchSize));
     }
 
     /** Keep deletion ordered after any active push or sweep, including its alarm re-arm. */

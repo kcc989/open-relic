@@ -3,6 +3,7 @@
 import { createDeflate } from "node:zlib";
 
 import { commitParents, linksToFetch } from "../connectivity.ts";
+import { RepositoryStorageExhaustedError, type IndexedObject } from "../object-store.ts";
 import type { PackBase, PackDelta } from "../pack.ts";
 import { isObjectId, type ObjectType } from "../object.ts";
 import { Sha1, fromHex } from "../sha1.ts";
@@ -27,6 +28,22 @@ const SIDE_BAND_64K = "side-band-64k";
 const THIN_PACK = "thin-pack";
 const DATA_BAND = 1;
 
+const readOptionalCache = async <T>(
+  read: (() => Promise<T | null>) | undefined,
+): Promise<T | null> => {
+  if (read === undefined) {
+    return null;
+  }
+  try {
+    return await read();
+  } catch (error) {
+    if (error instanceof RepositoryStorageExhaustedError) {
+      return null;
+    }
+    throw error;
+  }
+};
+
 export class UploadPackError extends Error {
   constructor(message: string) {
     super(message);
@@ -48,6 +65,20 @@ export interface UploadPackObjectSource {
   readonly read: (oid: string) => Promise<PackBase | null>;
   readonly readDeltaBase: (oid: string) => Promise<string | null>;
   readonly readDelta: (oid: string) => Promise<PackDelta | null>;
+  readonly readDeltaBases?: (oids: readonly string[]) => Promise<ReadonlyMap<string, string>>;
+  readonly readFullPackEntry?: (oid: string) => Promise<{
+    readonly type: ObjectType;
+    readonly size: number;
+    readonly compressed: Uint8Array;
+  } | null>;
+  readonly readDeltaPackEntry?: (oid: string) => Promise<{
+    readonly baseOid: string;
+    readonly size: number;
+    readonly compressed: Uint8Array;
+  } | null>;
+  readonly readIndexedObjects?: (
+    oids: readonly string[],
+  ) => Promise<ReadonlyMap<string, IndexedObject>>;
 }
 
 const readRequest = async (body: ReadableStream<Uint8Array>): Promise<UploadPackRequest> => {
@@ -148,13 +179,49 @@ const reachable = async (
   const objects: string[] = [];
 
   while (pending.length > 0) {
-    const { oid, type } = pending.pop()!;
-    if (held.has(oid) || stopAt.has(oid)) {
-      continue;
-    }
+    const frontier = pending.splice(Math.max(0, pending.length - 100)).reverse();
+    const frontierOids = new Set<string>();
+    const candidates = frontier.filter(({ oid }) => {
+      if (held.has(oid) || stopAt.has(oid) || frontierOids.has(oid)) {
+        return false;
+      }
+      frontierOids.add(oid);
+      return true;
+    });
+    const indexed =
+      source.readIndexedObjects === undefined
+        ? new Map<string, IndexedObject>()
+        : await source.readIndexedObjects(candidates.map(({ oid }) => oid));
 
-    if (type === "blob") {
-      if (!(await source.has(oid))) {
+    for (const { oid, type } of candidates) {
+      const indexedObject = indexed.get(oid);
+
+      if (type === "blob") {
+        if (indexedObject === undefined && !(await source.has(oid))) {
+          if (missingIsError) {
+            throw new UploadPackError(`The wanted object ${oid} does not exist.`);
+          }
+          continue;
+        }
+
+        held.add(oid);
+        objects.push(oid);
+        continue;
+      }
+
+      if (indexedObject !== undefined) {
+        held.add(oid);
+        objects.push(oid);
+        const links =
+          shallow.has(oid) && indexedObject.type === "commit"
+            ? indexedObject.links.filter((link) => link.type !== "commit")
+            : indexedObject.links;
+        pending.push(...links);
+        continue;
+      }
+
+      const object = await source.read(oid);
+      if (object === null) {
         if (missingIsError) {
           throw new UploadPackError(`The wanted object ${oid} does not exist.`);
         }
@@ -163,21 +230,9 @@ const reachable = async (
 
       held.add(oid);
       objects.push(oid);
-      continue;
-    }
-
-    const object = await source.read(oid);
-    if (object === null) {
-      if (missingIsError) {
-        throw new UploadPackError(`The wanted object ${oid} does not exist.`);
+      for (const link of linksToFetch(object.type, object.bytes, shallow.has(oid))) {
+        pending.push(link);
       }
-      continue;
-    }
-
-    held.add(oid);
-    objects.push(oid);
-    for (const link of linksToFetch(object.type, object.bytes, shallow.has(oid))) {
-      pending.push(link);
     }
   }
 
@@ -246,8 +301,19 @@ const orderPack = async (
   const dependents = new Map<string, string[]>();
   const dependentOids = new Set<string>();
 
+  const storedBases =
+    source.readDeltaBases === undefined
+      ? new Map(
+          await Promise.all(
+            oids.map(async (oid) => [oid, await source.readDeltaBase(oid)] as const),
+          ).then((entries) =>
+            entries.filter((entry): entry is readonly [string, string] => entry[1] !== null),
+          ),
+        )
+      : await source.readDeltaBases(oids);
+
   for (const oid of oids) {
-    const baseOid = await source.readDeltaBase(oid);
+    const baseOid = storedBases.get(oid) ?? null;
     if (baseOid === null) {
       continue;
     }
@@ -316,21 +382,51 @@ async function* packBytes(
     const baseIsAvailable =
       plannedBase !== undefined &&
       (emitted.has(plannedBase) || (thin && clientObjects.has(plannedBase)));
-    const storedDelta = baseIsAvailable ? await source.readDelta(oid) : null;
-    const delta = storedDelta !== null && storedDelta.baseOid === plannedBase ? storedDelta : null;
+    const cachedDelta = baseIsAvailable
+      ? await readOptionalCache(
+          source.readDeltaPackEntry === undefined
+            ? undefined
+            : () => source.readDeltaPackEntry!(oid),
+        )
+      : null;
+    const storedDelta =
+      baseIsAvailable && cachedDelta === null ? await source.readDelta(oid) : null;
+    const delta =
+      cachedDelta !== null && cachedDelta.baseOid === plannedBase
+        ? cachedDelta
+        : storedDelta !== null && storedDelta.baseOid === plannedBase
+          ? {
+              baseOid: storedDelta.baseOid,
+              size: storedDelta.bytes.length,
+              compressed: null,
+              bytes: storedDelta.bytes,
+            }
+          : null;
     let header: Uint8Array;
-    let bytes: Uint8Array;
+    let bytes: Uint8Array | null;
+    let compressed: Uint8Array | null;
 
     if (delta === null) {
-      const object = await source.read(oid);
-      if (object === null) {
-        throw new UploadPackError(`Object ${oid} vanished while its pack was being written.`);
+      const cached = await readOptionalCache(
+        source.readFullPackEntry === undefined ? undefined : () => source.readFullPackEntry!(oid),
+      );
+      if (cached !== null) {
+        header = entryHeader(PACK_KINDS[cached.type], cached.size);
+        bytes = null;
+        compressed = cached.compressed;
+      } else {
+        const object = await source.read(oid);
+        if (object === null) {
+          throw new UploadPackError(`Object ${oid} vanished while its pack was being written.`);
+        }
+        header = entryHeader(PACK_KINDS[object.type], object.bytes.length);
+        bytes = object.bytes;
+        compressed = null;
       }
-      header = entryHeader(PACK_KINDS[object.type], object.bytes.length);
-      bytes = object.bytes;
     } else {
-      header = entryHeader(REF_DELTA, delta.bytes.length);
-      bytes = delta.bytes;
+      header = entryHeader(REF_DELTA, delta.size);
+      bytes = "bytes" in delta ? delta.bytes : null;
+      compressed = delta.compressed;
     }
 
     yield* emit(header);
@@ -338,8 +434,12 @@ async function* packBytes(
       yield* emit(fromHex(delta.baseOid));
     }
 
-    for await (const chunk of deflate(bytes)) {
-      yield* emit(chunk);
+    if (compressed !== null) {
+      yield* emit(compressed);
+    } else {
+      for await (const chunk of deflate(bytes!)) {
+        yield* emit(chunk);
+      }
     }
 
     emitted.add(oid);

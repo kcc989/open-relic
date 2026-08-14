@@ -475,13 +475,15 @@ leaves the repository holding every object the pack carried, named by SHA-1.
 Streams cross the RPC boundary, so a pack reaches the object without the Worker
 buffering it.
 
-Objects are stored inflated: metadata in the `objects` table, bytes in the
-object's synchronous KV storage under `o:<oid>:<n>`, split into 1.5 MiB chunks
-because Durable Object storage caps a key and its value together at 2 MB. When
-an object arrived as a **delta**, the raw delta goes under `d:<oid>:<n>` with its
-base's hash in `object_deltas`; upload-pack reuses it when the client already has
-that base. The incoming pack passes through our hands exactly once. See
-[ADR-0002](./docs/adr/0002-git-objects-are-chunked-rows-in-the-repository-object.md).
+Resolved Objects are stored inflated: metadata in the `objects` table, bytes in
+the object's synchronous KV storage under `o:<oid>:<n>`, split into 1.5 MiB
+chunks because Durable Object storage caps a key and its value together at 2
+MB. A reusable zlib Pack representation lives under `z:<oid>:<n>`. When an
+Object has a retained **Delta**, its raw instructions and compressed Pack
+representation live under `d:<oid>:<n>` and `zd:<oid>:<n>` with the base's hash
+in `object_deltas`; Upload-pack reuses them when the base is available. See
+[ADR-0002](./docs/adr/0002-git-objects-are-chunked-rows-in-the-repository-object.md)
+and [ADR-0006](./docs/adr/0006-resolved-objects-and-pack-representations-are-a-hybrid.md).
 
 An `objects` row begins incomplete and is invisible to reads until all of those
 rows and chunks exist. If the Durable Object reports `SQLITE_FULL`, the pending
@@ -498,6 +500,14 @@ chunk, independent of pack size. `apps/api/test/pack.test.ts` measures that
 directly — a pack four times longer is read with no more in flight. A rewrite
 that buffered the pack would pass every other test and lose the reason the store
 looks like this.
+
+Object writes also persist parsed graph edges. Upload-pack walks those small SQL
+rows and batches retained-Delta metadata reads during Pack planning instead of
+loading every commit and tree again or issuing one query per object. After Sweep
+finishes, its mark set remains as the reachability index for that ref version;
+bounded alarm turns then backfill Pack representations and select useful Deltas
+without delaying pushes. Forks preserve a retained Delta when its base belongs
+to the copied snapshot.
 
 | Module                     | What it is                                                                                                 |
 | -------------------------- | ---------------------------------------------------------------------------------------------------------- |

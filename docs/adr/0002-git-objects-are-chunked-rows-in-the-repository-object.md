@@ -47,7 +47,8 @@ transaction. If cleanup itself is interrupted, the hidden row remains so a
 retry or Sweep can finish it. Objects completed earlier in the same failed Pack
 remain ordinary Orphans for the Sweep to reclaim.
 
-Objects are stored inflated rather than in the zlib form they arrived in. Reads
-and delta-base lookups are then free of an inflate, at a storage cost we would
-otherwise pay in CPU on a 30-second budget. Revisit if storage, not CPU, becomes
-the binding constraint.
+Resolved Objects are stored inflated so reads and delta-base lookups do not pay
+an inflate. They remain the authority, while derived zlib Pack representations
+are cached beside them so fetch does not repeatedly recompress the same bytes;
+[ADR-0006](./0006-resolved-objects-and-pack-representations-are-a-hybrid.md)
+records that hybrid rather than replacing this random-access structure.

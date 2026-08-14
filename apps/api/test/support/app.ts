@@ -23,6 +23,7 @@ import {
   type StoredImportJob,
 } from "../../src/import-operation.ts";
 import { NamespaceRegistry } from "../../src/namespace-registry.ts";
+import { ObjectStore } from "../../src/object-store.ts";
 import { RepositoryIndex, type RepositoryIndexClient } from "../../src/repository-index.ts";
 import {
   RepositoryStore,
@@ -109,9 +110,15 @@ class FakeRepositoryObject extends RepositoryStore implements RepositoryObjectCl
     return super.copyForkTo(target, options, this.#takeAfterForkSnapshot());
   }
 
-  override writeForkObject(object: ForkObject, bytes: ReadableStream<Uint8Array>): Promise<void> {
+  override writeForkObject(
+    object: ForkObject,
+    bytes: ReadableStream<Uint8Array>,
+    deltaBytes?: ReadableStream<Uint8Array>,
+  ): Promise<void> {
     const error = this.#takeForkWriteError();
-    return error === null ? super.writeForkObject(object, bytes) : Promise.reject(error);
+    return error === null
+      ? super.writeForkObject(object, bytes, deltaBytes)
+      : Promise.reject(error);
   }
 
   override async readObject(oid: string): Promise<PackBase | null> {
@@ -201,6 +208,11 @@ export class FakeRepositoryObjects implements RepositoryObjects {
   /** Stands in for the push that will write them once receive-pack lands. */
   seedRefs(durableObjectId: string, entries: Readonly<Record<string, string>>): Promise<void> {
     return seedRefs(this.#storageFor(durableObjectId).db, entries);
+  }
+
+  readDelta(durableObjectId: string, oid: string) {
+    const storage = this.#storageFor(durableObjectId);
+    return new ObjectStore(storage.db, storage.kv).readDelta(oid);
   }
 
   failNextForkWrite(error: Error): void {

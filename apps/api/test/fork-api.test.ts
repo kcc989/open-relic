@@ -14,6 +14,7 @@ import type { Json } from "../src/request-body.ts";
 import { createGitTestApp, type TestApp } from "./support/app.ts";
 import { errorCode, result } from "./support/envelope.ts";
 import { blob, commit, tag, tree, treeEntry, type GitObject } from "./support/git-objects.ts";
+import { buildDelta, buildPack, insertInstruction } from "./support/pack.ts";
 import { pushBody } from "./support/receive-pack.ts";
 
 const README = blob("Anvil firmware\n");
@@ -117,6 +118,37 @@ describe("POST /namespaces/:namespace/repos/:source/fork", () => {
       200,
     );
     expect(await targetClient().readObject(FIRST.oid)).not.toBeNull();
+  });
+
+  test("preserves a retained delta when its base is part of the fork snapshot", async () => {
+    const base = blob("shared fork base\n");
+    const revised = blob("shared fork result\n");
+    const root = tree([treeEntry("base.txt", base), treeEntry("revised.txt", revised)]);
+    const tip = commit({ tree: root, message: "Delta fork" });
+    const delta = buildDelta(base.bytes.length, revised.bytes.length, [
+      insertInstruction(revised.bytes),
+    ]);
+    const pack = buildPack([
+      { kind: "object", type: tip.type, bytes: tip.bytes },
+      { kind: "object", type: root.type, bytes: root.bytes },
+      { kind: "object", type: base.type, bytes: base.bytes },
+      { kind: "ref-delta", baseOid: base.oid, delta },
+    ]).bytes;
+    await harness.app.request(
+      new Request("http://local.test/git/acme/demo.git/git-receive-pack", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${harness.repositoryToken}` },
+        body: pushBody({ commands: [{ newOid: tip.oid, name: MAIN }], pack }),
+      }),
+    );
+
+    await fork({ name: "copy" });
+    const targetId = harness.objects.mintedIds.at(-1)!;
+
+    expect(await harness.objects.readDelta(targetId, revised.oid)).toEqual({
+      baseOid: base.oid,
+      bytes: delta,
+    });
   });
 
   test("default_branch_only copies HEAD, its branch, and only its reachable closure", async () => {

@@ -18,7 +18,11 @@ import {
   REPOSITORY_DATABASE,
   REPOSITORY_KV,
   withRepositoryStore,
+  type ForkState,
+  type ImportedBranch,
   type ReceivePackOutcome,
+  type RemoteBranchRequest,
+  type RemoteFetch,
   type RepositoryStorage,
 } from "./repository-store.ts";
 import type { SweepProgress } from "./sweep.ts";
@@ -100,6 +104,21 @@ export class RepositoryObject extends withRepositoryStore(DurableRepositoryStora
     return super.receivePack(body, scheduled);
   }
 
+  override async completeFork(state: ForkState): Promise<void> {
+    await super.completeFork(state);
+    await this.ctx.storage.setAlarm(Date.now());
+  }
+
+  override async importBranch(
+    request: RemoteBranchRequest,
+    fetchRemote: RemoteFetch = globalThis.fetch,
+  ): Promise<ImportedBranch> {
+    // Import can leave complete but unreachable objects when the remote fails
+    // late. Persist reclamation before the first network or storage await.
+    const scheduled = this.ctx.storage.setAlarm(Date.now());
+    return super.importBranch(request, fetchRemote, scheduled);
+  }
+
   /** Start or resume reclamation; alarms carry subsequent batches. */
   override async sweep(): Promise<SweepProgress> {
     return this.#advanceSweep();
@@ -115,7 +134,7 @@ export class RepositoryObject extends withRepositoryStore(DurableRepositoryStora
       await this.#importOperation.run();
       return;
     }
-    await this.#advanceSweep();
+    await this.#advanceMaintenance();
   }
 
   /**
@@ -139,6 +158,40 @@ export class RepositoryObject extends withRepositoryStore(DurableRepositoryStora
       } else {
         await this.ctx.storage.setAlarm(Date.now());
       }
+    });
+  }
+
+  async #advanceMaintenance(): Promise<void> {
+    // Once Repack has a stable Sweep index, continue it directly. Calling
+    // Sweep first would treat its completed checkpoint as a request to start a
+    // new walk and make every Repack batch pay for the whole repository again.
+    const activeRepack = await super.repack();
+    if (activeRepack.phase === "select") {
+      await this.ctx.storage.setAlarm(Date.now());
+      return;
+    }
+    if (activeRepack.justCompleted) {
+      console.log("Repository maintenance completed", {
+        repositoryObject: this.ctx.id.toString(),
+      });
+      return;
+    }
+    const sweep = await super.sweep();
+    if (sweep.phase !== "complete") {
+      await this.ctx.storage.setAlarm(Date.now());
+      return;
+    }
+
+    const repack = await super.repack();
+    if (repack.phase !== "complete") {
+      await this.ctx.storage.setAlarm(Date.now());
+      return;
+    }
+
+    console.log("Repository maintenance completed", {
+      repositoryObject: this.ctx.id.toString(),
+      reachableObjects: sweep.reachableObjects,
+      reclaimedObjects: sweep.reclaimedObjects,
     });
   }
 

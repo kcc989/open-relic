@@ -89,7 +89,11 @@ describe("marking from refs", () => {
       reclaimedBytes: orphanBytes.length + deltaBytes.length,
     });
     expect(progress.completedAt).not.toBeNull();
-    expect(await opened.db.select().from(sweepReachable)).toEqual([]);
+    expect(
+      (await opened.db.select().from(sweepReachable))
+        .map(({ oid, pending }) => ({ oid, pending }))
+        .sort((left, right) => left.oid.localeCompare(right.oid)),
+    ).toEqual([tip.oid, root.oid, readme.oid].sort().map((oid) => ({ oid, pending: false })));
   });
 
   test("marks an object shared by several refs only once", async () => {
