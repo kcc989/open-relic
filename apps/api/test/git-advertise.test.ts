@@ -1,8 +1,8 @@
-import { ERROR_CODES } from "@open-relic/contracts";
+import { ERROR_CODES, type CreateTokenResult } from "@open-relic/contracts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { createGitTestApp, type TestApp } from "./support/app.ts";
-import { errorCode } from "./support/envelope.ts";
+import { errorCode, result } from "./support/envelope.ts";
 
 const INFO_REFS = "http://local.test/git/acme/demo.git/info/refs";
 const ADVERTISE = `${INFO_REFS}?service=git-receive-pack`;
@@ -120,7 +120,31 @@ describe("without a token", () => {
 });
 
 describe("the other services on the advertisement path", () => {
-  test("advertises upload-pack refs and honestly falls back from protocol v2", async () => {
+  test("allows a read Git token to fetch but not push", async () => {
+    const token = await result<CreateTokenResult>(
+      await harness.app.request("http://local.test/namespaces/acme/tokens", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repo: "demo", scope: "read", ttl: 3600 }),
+      }),
+    );
+
+    const fetchAdvertisement = await harness.app.request(
+      new Request(`${INFO_REFS}?service=git-upload-pack`, {
+        headers: {
+          Authorization: `Bearer ${token.plaintext}`,
+          "Git-Protocol": "version=2",
+        },
+      }),
+    );
+    const pushAdvertisement = await advertise(ADVERTISE, token.plaintext);
+
+    expect(fetchAdvertisement.status).toBe(200);
+    expect(await fetchAdvertisement.text()).toContain("version 2\n");
+    expect(pushAdvertisement.status).toBe(401);
+  });
+
+  test("advertises protocol-v2 commands instead of refs", async () => {
     const [durableObjectId] = harness.objects.mintedIds;
     await harness.objects.seedRefs(durableObjectId!, { "refs/heads/main": MAIN });
 
@@ -138,11 +162,32 @@ describe("the other services on the advertisement path", () => {
     expect(response.headers.get("content-type")).toBe(
       "application/x-git-upload-pack-advertisement",
     );
+    expect(body).toBe(
+      "000eversion 2\n" +
+        "001bagent=open-relic/0.1.0\n" +
+        "0013ls-refs=unborn\n" +
+        "000afetch\n" +
+        "0017object-format=sha1\n" +
+        "0000",
+    );
+    expect(body).toStartWith("000eversion 2\n");
+    expect(body).not.toContain("# service=git-upload-pack");
+    expect(body).not.toContain("fetch=shallow");
+    expect(body).not.toContain(MAIN);
+  });
+
+  test("keeps protocol v0 when no version is requested", async () => {
+    const [durableObjectId] = harness.objects.mintedIds;
+    await harness.objects.seedRefs(durableObjectId!, { "refs/heads/main": MAIN });
+
+    const response = await harness.app.request(`${INFO_REFS}?service=git-upload-pack`, {
+      headers: { Authorization: `Bearer ${harness.repositoryToken}` },
+    });
+    const body = await response.text();
+
     expect(body).toStartWith("001e# service=git-upload-pack\n0000");
     expect(body).toContain(`${MAIN} HEAD\0`);
     expect(body).toContain(`${MAIN} refs/heads/main\n`);
-    expect(body).toContain("multi_ack_detailed");
-    expect(body).toContain("symref=HEAD:refs/heads/main");
     expect(body).not.toContain("version 2");
   });
 

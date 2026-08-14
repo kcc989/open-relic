@@ -10,6 +10,7 @@ import {
   UPLOAD_PACK_ADVERTISEMENT_CONTENT_TYPE,
   UPLOAD_PACK_RESULT_CONTENT_TYPE,
   UPLOAD_PACK_SERVICE,
+  type UploadProtocolVersion,
 } from "./git/advertisement.ts";
 import { GzipError, gunzip } from "./git/gzip.ts";
 import { RECEIVE_PACK_RESULT_CONTENT_TYPE } from "./git/receive-pack.ts";
@@ -19,7 +20,11 @@ import type { RepositoryResolver } from "./repository-resolution.ts";
 /** Just enough of Hono's context for the preamble both Git routes share. */
 type GitRouteContext = {
   readonly env: ApiEnv;
-  readonly req: { readonly raw: Request; param(name: string): string };
+  readonly req: {
+    readonly raw: Request;
+    header(name: string): string | undefined;
+    param(name: string): string;
+  };
 };
 
 /**
@@ -65,6 +70,13 @@ export const registerGitRoutes = (
     });
   };
 
+  const uploadProtocolVersion = (context: GitRouteContext): UploadProtocolVersion => {
+    const parameters = context.req.header("Git-Protocol")?.split(":") ?? [];
+    if (parameters.includes("version=2")) return 2;
+    if (parameters.includes("version=1")) return 1;
+    return 0;
+  };
+
   // Both advertisements share a path and are told apart by the service Git
   // names in the query string, so one route dispatches to two operations.
   app.get(`${GIT_REPOSITORY_PATH}/info/refs`, async (context) => {
@@ -78,9 +90,7 @@ export const registerGitRoutes = (
 
       const advertisement = await repositoryObjects(context.env)
         .get(found.durableObjectId)
-        .advertiseUploadPack(
-          context.req.header("Git-Protocol")?.split(":").includes("version=1") === true ? 1 : 0,
-        );
+        .advertiseUploadPack(uploadProtocolVersion(context));
 
       return new Response(advertisement, {
         headers: {
@@ -198,7 +208,7 @@ export const registerGitRoutes = (
 
     const result = await repositoryObjects(context.env)
       .get(found.durableObjectId)
-      .uploadPack(decoded);
+      .uploadPack(decoded, uploadProtocolVersion(context));
 
     return new Response(result, {
       headers: {
