@@ -16,6 +16,7 @@ import {
   type StoredImportJob,
 } from "./import-operation.ts";
 import type { PackBase } from "./pack.ts";
+import type { RepackProgress } from "./repack.ts";
 import {
   RepositoryStore,
   type ForkOptions,
@@ -126,12 +127,17 @@ export class RepositoryObject extends DurableObject {
     return this.#store.copyForkTo(target, options);
   }
 
-  writeForkObject(object: ForkObject, bytes: ReadableStream<Uint8Array>): Promise<void> {
-    return this.#store.writeForkObject(object, bytes);
+  writeForkObject(
+    object: ForkObject,
+    bytes: ReadableStream<Uint8Array>,
+    deltaBytes?: ReadableStream<Uint8Array>,
+  ): Promise<void> {
+    return this.#store.writeForkObject(object, bytes, deltaBytes);
   }
 
-  completeFork(state: ForkState): Promise<void> {
-    return this.#store.completeFork(state);
+  async completeFork(state: ForkState): Promise<void> {
+    await this.#store.completeFork(state);
+    await this.ctx.storage.setAlarm(Date.now());
   }
 
   async importBranch(request: RemoteBranchRequest): Promise<ImportedBranch> {
@@ -155,12 +161,16 @@ export class RepositoryObject extends DurableObject {
     return this.#advanceSweep();
   }
 
+  async repack(): Promise<RepackProgress> {
+    return this.#store.repack();
+  }
+
   override async alarm(): Promise<void> {
     if (await this.#importOperation.hasJob()) {
       await this.#importOperation.run();
       return;
     }
-    await this.#advanceSweep();
+    await this.#advanceMaintenance();
   }
 
   readObject(oid: string): Promise<PackBase | null> {
@@ -208,6 +218,40 @@ export class RepositoryObject extends DurableObject {
       } else {
         await this.ctx.storage.setAlarm(Date.now());
       }
+    });
+  }
+
+  async #advanceMaintenance(): Promise<void> {
+    // Once Repack has a stable Sweep index, continue it directly. Calling
+    // Sweep first would treat its completed checkpoint as a request to start a
+    // new walk and make every Repack batch pay for the whole repository again.
+    const activeRepack = await this.#store.repack();
+    if (activeRepack.phase === "select") {
+      await this.ctx.storage.setAlarm(Date.now());
+      return;
+    }
+    if (activeRepack.justCompleted) {
+      console.log("Repository maintenance completed", {
+        repositoryObject: this.ctx.id.toString(),
+      });
+      return;
+    }
+    const sweep = await this.#store.sweep();
+    if (sweep.phase !== "complete") {
+      await this.ctx.storage.setAlarm(Date.now());
+      return;
+    }
+
+    const repack = await this.#store.repack();
+    if (repack.phase !== "complete") {
+      await this.ctx.storage.setAlarm(Date.now());
+      return;
+    }
+
+    console.log("Repository maintenance completed", {
+      repositoryObject: this.ctx.id.toString(),
+      reachableObjects: sweep.reachableObjects,
+      reclaimedObjects: sweep.reclaimedObjects,
     });
   }
 

@@ -1,8 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
+import { eq } from "drizzle-orm";
+import { deflateSync, inflateSync } from "node:zlib";
 
 import { CHUNK_BYTES, ObjectStore, RepositoryStorageExhaustedError } from "../src/object-store.ts";
 import type { SyncKv } from "../src/db/kv.ts";
-import { objects as objectRows } from "../src/db/repository-schema.ts";
+import { objectLinks, objects as objectRows } from "../src/db/repository-schema.ts";
 import { hashObject } from "../src/object.ts";
 import type { PackObject } from "../src/pack.ts";
 import {
@@ -10,6 +12,7 @@ import {
   createTestRepositoryStorage,
   type TestRepositoryStorage,
 } from "./support/database.ts";
+import { blob as gitBlob, tree, treeEntry } from "./support/git-objects.ts";
 
 const openHandles: Array<() => void> = [];
 
@@ -48,6 +51,7 @@ const filled = (length: number, seed: number): Uint8Array => {
 };
 
 const storageFull = (): Error => createSqliteFullError();
+const cachedBytes = (bytes: Uint8Array): number => bytes.length + deflateSync(bytes).length;
 
 const failPutOnce = (kv: SyncKv, rejects: (key: string) => boolean): SyncKv => {
   let failed = false;
@@ -146,6 +150,12 @@ test("a delta and its base hash are kept alongside the resolved object", async (
 
   expect((await objects.read(oid))?.bytes).toEqual(resolved);
   expect(await objects.readDelta(oid)).toEqual({ baseOid, bytes: rawDelta });
+  expect([...inflateSync((await objects.readFullPackEntry(oid))!.compressed)]).toEqual([
+    ...resolved,
+  ]);
+  expect([...inflateSync((await objects.readDeltaPackEntry(oid))!.compressed)]).toEqual([
+    ...rawDelta,
+  ]);
 });
 
 test("an object that arrived whole has no delta", async () => {
@@ -165,6 +175,59 @@ test("writing an object twice leaves one copy", async () => {
   await objects.write(written);
 
   expect((await objects.read(written.oid))?.bytes).toEqual(written.bytes);
+});
+
+test("a completed object is deduplicated before its bytes are recompressed", async () => {
+  const objects = store();
+  const written = blob(utf8("already compressed"));
+  await objects.write(written);
+  const duplicate: PackObject = {
+    oid: written.oid,
+    type: written.type,
+    delta: null,
+    get bytes(): Uint8Array {
+      throw new Error("duplicate bytes were read");
+    },
+  };
+
+  await expect(objects.write(duplicate)).resolves.toBeUndefined();
+});
+
+test("deduplicates repeated graph edges during writes and index backfills", async () => {
+  const opened = storage();
+  const objects = new ObjectStore(opened.db, opened.kv);
+  const shared = gitBlob("shared contents\n");
+  const repeated = tree([treeEntry("one.txt", shared), treeEntry("two.txt", shared)]);
+  await objects.write({ ...repeated, delta: null });
+
+  expect((await objects.readIndexedObjects([repeated.oid])).get(repeated.oid)?.links).toEqual([
+    { oid: shared.oid, type: "blob" },
+  ]);
+
+  await opened.db.delete(objectLinks).where(eq(objectLinks.sourceOid, repeated.oid));
+  await opened.db
+    .update(objectRows)
+    .set({ linksIndexed: false })
+    .where(eq(objectRows.oid, repeated.oid));
+
+  expect(await objects.indexLinks(repeated.oid)).toBe(true);
+  expect((await objects.readIndexedObjects([repeated.oid])).get(repeated.oid)?.links).toEqual([
+    { oid: shared.oid, type: "blob" },
+  ]);
+});
+
+test("batches delta and reachability metadata below Cloudflare SQLite's bind limit", async () => {
+  const opened = createTestRepositoryStorage({ maxBoundValues: 100 });
+  openHandles.push(opened.close);
+  const objects = new ObjectStore(opened.db, opened.kv);
+  const written = Array.from({ length: 205 }, (_, at) => blob(utf8(`object ${at}`)));
+  for (const object of written) {
+    await objects.write(object);
+  }
+  const oids = written.map(({ oid }) => oid);
+
+  expect(await objects.readDeltaBases(oids)).toEqual(new Map());
+  expect((await objects.readIndexedObjects(oids)).size).toBe(oids.length);
 });
 
 test("a store reopened on the same storage sees the objects", async () => {
@@ -205,8 +268,8 @@ test("storage exhaustion during resolved chunks leaves nothing visible and a ret
   expect((await retry.read(written.oid))?.bytes).toEqual(written.bytes);
   expect(await retry.reclaim(written.oid)).toEqual({
     objects: 1,
-    chunks: 2,
-    bytes: written.bytes.length,
+    chunks: 3,
+    bytes: cachedBytes(written.bytes),
   });
   expect(opened.kv.get(`o:${written.oid}:0`)).toBeUndefined();
   expect(opened.kv.get(`o:${written.oid}:1`)).toBeUndefined();
@@ -270,8 +333,8 @@ test("interrupted cleanup remains discoverable for reclamation", async () => {
   const recovery = new ObjectStore(opened.db, opened.kv);
   expect(await recovery.reclaim(written.oid)).toEqual({
     objects: 1,
-    chunks: 2,
-    bytes: written.bytes.length,
+    chunks: 3,
+    bytes: cachedBytes(written.bytes),
   });
   expect(opened.kv.get(`o:${written.oid}:0`)).toBeUndefined();
   expect(opened.kv.get(`o:${written.oid}:1`)).toBeUndefined();
@@ -354,6 +417,102 @@ test("storage exhaustion while publishing metadata leaves chunks retryable", asy
   expect((await exhausted.read(written.oid))?.bytes).toEqual(written.bytes);
 });
 
+test("reclaim finds a full-entry cache left by interrupted publication cleanup", async () => {
+  const opened = storage();
+  const resolved = utf8("resolved bytes whose full cache is deferred");
+  const oid = hashObject("blob", resolved);
+  await new ObjectStore(opened.db, opened.kv).write({
+    oid,
+    type: "blob",
+    bytes: resolved,
+    delta: {
+      baseOid: "9d5c1f2b8a4e7c0d3f6b1a8e5c2d9f0b7a4e6c31",
+      bytes: utf8("retained delta"),
+    },
+  });
+  opened.client.run(`
+    CREATE TRIGGER fail_full_cache_publication
+    BEFORE UPDATE OF compressed_size ON objects
+    WHEN NEW.compressed_size IS NOT NULL
+    BEGIN
+      SELECT RAISE(ABORT, 'database or disk is full: SQLITE_FULL');
+    END
+  `);
+  let cleanupFailed = false;
+  const interruptedKv: SyncKv = {
+    get: <T>(key: string): T | undefined => opened.kv.get<T>(key),
+    put: <T>(key: string, value: T): void => opened.kv.put(key, value),
+    delete: (key: string): void => {
+      if (!cleanupFailed && key === `z:${oid}:0`) {
+        cleanupFailed = true;
+        throw new Error("cleanup interrupted");
+      }
+      opened.kv.delete(key);
+    },
+  };
+
+  await expect(
+    new ObjectStore(opened.db, interruptedKv).readFullPackEntry(oid),
+  ).rejects.toBeInstanceOf(RepositoryStorageExhaustedError);
+  const [staged] = await opened.db
+    .select({
+      compressedSize: objectRows.compressedSize,
+      compressedChunkCount: objectRows.compressedChunkCount,
+    })
+    .from(objectRows)
+    .where(eq(objectRows.oid, oid));
+  expect(staged).toEqual({ compressedSize: null, compressedChunkCount: 1 });
+  expect(opened.kv.get(`z:${oid}:0`)).toBeDefined();
+
+  opened.client.run("DROP TRIGGER fail_full_cache_publication");
+  await new ObjectStore(opened.db, opened.kv).reclaim(oid);
+  expect(opened.kv.get(`z:${oid}:0`)).toBeUndefined();
+});
+
+test("reclaim finds a Delta cache left by interrupted publication cleanup", async () => {
+  const opened = storage();
+  const resolved = utf8("resolved bytes with a retained delta");
+  const oid = hashObject("blob", resolved);
+  await new ObjectStore(opened.db, opened.kv).write({
+    oid,
+    type: "blob",
+    bytes: resolved,
+    delta: {
+      baseOid: "9d5c1f2b8a4e7c0d3f6b1a8e5c2d9f0b7a4e6c31",
+      bytes: utf8("delta cache bytes"),
+    },
+  });
+  opened.client.run(`
+    CREATE TRIGGER fail_delta_cache_publication
+    BEFORE UPDATE OF compressed_size ON object_deltas
+    WHEN NEW.compressed_size IS NOT NULL
+    BEGIN
+      SELECT RAISE(ABORT, 'database or disk is full: SQLITE_FULL');
+    END
+  `);
+  let cleanupFailed = false;
+  const interruptedKv: SyncKv = {
+    get: <T>(key: string): T | undefined => opened.kv.get<T>(key),
+    put: <T>(key: string, value: T): void => opened.kv.put(key, value),
+    delete: (key: string): void => {
+      if (!cleanupFailed && key === `zd:${oid}:0`) {
+        cleanupFailed = true;
+        throw new Error("cleanup interrupted");
+      }
+      opened.kv.delete(key);
+    },
+  };
+
+  await expect(
+    new ObjectStore(opened.db, interruptedKv).readDeltaPackEntry(oid),
+  ).rejects.toBeInstanceOf(RepositoryStorageExhaustedError);
+  expect(opened.kv.get(`zd:${oid}:0`)).toBeDefined();
+
+  opened.client.run("DROP TRIGGER fail_delta_cache_publication");
+  await new ObjectStore(opened.db, opened.kv).reclaim(oid);
+  expect(opened.kv.get(`zd:${oid}:0`)).toBeUndefined();
+});
+
 test("a retry repairs an incomplete row left by an interrupted write", async () => {
   const opened = storage();
   const written = blob(filled(CHUNK_BYTES + 7, 41));
@@ -373,8 +532,8 @@ test("a retry repairs an incomplete row left by an interrupted write", async () 
   expect((await retry.read(written.oid))?.bytes).toEqual(written.bytes);
   expect(await retry.reclaim(written.oid)).toEqual({
     objects: 1,
-    chunks: 2,
-    bytes: written.bytes.length,
+    chunks: 3,
+    bytes: cachedBytes(written.bytes),
   });
   expect(opened.kv.get(`o:${written.oid}:0`)).toBeUndefined();
   expect(opened.kv.get(`o:${written.oid}:1`)).toBeUndefined();

@@ -18,6 +18,7 @@ import {
   type StoredImportJob,
 } from "../../src/import-operation.ts";
 import { NamespaceRegistry } from "../../src/namespace-registry.ts";
+import { ObjectStore } from "../../src/object-store.ts";
 import { RepositoryIndex, type RepositoryIndexClient } from "../../src/repository-index.ts";
 import {
   RepositoryStore,
@@ -119,13 +120,13 @@ export class FakeRepositoryObjects implements RepositoryObjects {
         this.#afterForkSnapshot = null;
         return store.copyForkTo(target, options, afterSnapshot);
       },
-      writeForkObject: (object, bytes) => {
+      writeForkObject: (object, bytes, deltaBytes) => {
         const error = this.#forkWriteError;
         this.#forkWriteError = null;
         if (error !== null) {
           return Promise.reject(error);
         }
-        return store.writeForkObject(object, bytes);
+        return store.writeForkObject(object, bytes, deltaBytes);
       },
       completeFork: (state) => store.completeFork(state),
       readObject: async (oid) => {
@@ -174,6 +175,11 @@ export class FakeRepositoryObjects implements RepositoryObjects {
   /** Stands in for the push that will write them once receive-pack lands. */
   seedRefs(durableObjectId: string, entries: Readonly<Record<string, string>>): Promise<void> {
     return seedRefs(this.#storageFor(durableObjectId).db, entries);
+  }
+
+  readDelta(durableObjectId: string, oid: string) {
+    const storage = this.#storageFor(durableObjectId);
+    return new ObjectStore(storage.db, storage.kv).readDelta(oid);
   }
 
   failNextForkWrite(error: Error): void {

@@ -38,5 +38,6 @@ eligible for deletion.
 Completed state is retained as the latest reclamation report: reachable object
 count and reclaimed object, chunk, and payload-byte totals. Object and delta
 chunks, their SQL metadata, and those totals update in the same storage
-transaction. The completed mark set is discarded so the sweep does not leave
-one bookkeeping row behind for every live object.
+transaction. The completed mark set remains as the repository's reachability
+index for that ref version. A later ref version clears and rebuilds it before
+another object can be reclaimed.
