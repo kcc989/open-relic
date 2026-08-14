@@ -157,6 +157,11 @@ export interface UploadPackObjectSource {
     candidates: ReadonlySet<string>,
     shallow: ReadonlySet<string>,
   ) => Promise<ReadonlySet<string>>;
+  readonly readObjectClosure?: (
+    roots: ReadonlySet<string>,
+    stopAt: ReadonlySet<string>,
+    shallow: ReadonlySet<string>,
+  ) => Promise<readonly string[] | null>;
 }
 
 const readRequest = async (body: ReadableStream<Uint8Array>): Promise<UploadPackRequest> => {
@@ -247,6 +252,13 @@ const reachable = async (
   stopAt: ReadonlySet<string> = new Set(),
   shallow: ReadonlySet<string> = new Set(),
 ): Promise<ReachableObjects> => {
+  if (source.readObjectClosure !== undefined) {
+    const indexed = await source.readObjectClosure(new Set(roots), stopAt, shallow);
+    if (indexed !== null) {
+      return { objects: indexed, held: new Set(indexed) };
+    }
+  }
+
   const pending: { readonly oid: string; readonly type: ObjectType | null }[] = roots.map(
     (oid) => ({
       oid,
@@ -323,6 +335,9 @@ const heldObjects = async (
   source: UploadPackObjectSource,
 ): Promise<ReadonlySet<string>> => {
   const unique = [...new Set(oids)];
+  if (unique.length === 0) {
+    return new Set();
+  }
   const indexed =
     source.readIndexedObjects === undefined
       ? new Map<string, IndexedObject>()
@@ -355,6 +370,7 @@ const PACK_KINDS = {
 const REF_DELTA = 7;
 const PACK_REPRESENTATION_READ_BYTES = 8 * 1024 * 1024;
 const PACK_REPRESENTATION_READ_KEYS = 96;
+const PACK_REPRESENTATION_READ_AHEAD = 4;
 
 const entryHeader = (kind: number, size: number): Uint8Array => {
   const bytes: number[] = [];
@@ -386,6 +402,12 @@ interface PackOrder {
   readonly oids: readonly string[];
   readonly deltaBases: ReadonlyMap<string, string>;
   readonly metadata: ReadonlyMap<string, PackRepresentationMetadata>;
+}
+
+interface PackReadWindow {
+  readonly start: number;
+  readonly end: number;
+  readonly requests: readonly CachedPackEntryRequest[];
 }
 
 /**
@@ -472,6 +494,63 @@ const orderPack = async (
   return { oids: ordered, deltaBases, metadata };
 };
 
+/** Plan bounded reads once so window N+1 can overlap emission of window N. */
+const packReadWindows = (
+  order: PackOrder,
+  thin: boolean,
+  availableClientObjects: ReadonlySet<string>,
+): readonly PackReadWindow[] => {
+  const windows: PackReadWindow[] = [];
+  const available = new Set<string>();
+  let start = 0;
+
+  while (start < order.oids.length) {
+    const requests: CachedPackEntryRequest[] = [];
+    let compressedBytes = 0;
+    let keys = 0;
+    let end = start;
+
+    for (; end < order.oids.length; end += 1) {
+      const oid = order.oids[end]!;
+      const baseOid = order.deltaBases.get(oid);
+      const baseIsAvailable =
+        baseOid !== undefined &&
+        (available.has(baseOid) || (thin && availableClientObjects.has(baseOid)));
+      const metadata = order.metadata.get(oid);
+      const representation =
+        baseIsAvailable && metadata?.delta?.compressed !== null
+          ? metadata?.delta?.compressed
+          : metadata?.full;
+
+      if (
+        representation !== undefined &&
+        representation !== null &&
+        requests.length > 0 &&
+        (compressedBytes + representation.size > PACK_REPRESENTATION_READ_BYTES ||
+          keys + representation.chunkCount > PACK_REPRESENTATION_READ_KEYS)
+      ) {
+        break;
+      }
+
+      if (metadata !== undefined && representation !== undefined && representation !== null) {
+        requests.push({
+          metadata,
+          preferredBaseOid: baseIsAvailable ? baseOid : null,
+        });
+        compressedBytes += representation.size;
+        keys += representation.chunkCount;
+      }
+      available.add(oid);
+    }
+
+    const boundedEnd = Math.max(end, start + 1);
+    windows.push({ start, end: boundedEnd, requests });
+    start = boundedEnd;
+  }
+
+  return windows;
+};
+
 async function* packBytes(
   oids: readonly string[],
   clientObjects: ReadonlySet<string>,
@@ -506,55 +585,37 @@ async function* packBytes(
   const availableClientObjects = new Set([...clientObjects, ...reachableClientBases]);
   const emitted = new Set<string>();
   let prefetched = new Map<string, CachedPackEntry>();
-  let prefetchedUntil = 0;
+  const readWindows =
+    source.readCachedPackEntries === undefined
+      ? []
+      : packReadWindows(order, thin, availableClientObjects);
+  let readWindowAt = 0;
+  let nextReadWindow = 0;
+  const readWindow = (window: PackReadWindow): Promise<ReadonlyMap<string, CachedPackEntry>> =>
+    window.requests.length === 0
+      ? Promise.resolve(new Map())
+      : timedStorageRead(timings, () => source.readCachedPackEntries!(window.requests));
+  const prefetchedWindows = new Map<number, Promise<ReadonlyMap<string, CachedPackEntry>>>();
+  const fillReadAhead = (): void => {
+    while (
+      nextReadWindow < readWindows.length &&
+      nextReadWindow < readWindowAt + PACK_REPRESENTATION_READ_AHEAD
+    ) {
+      prefetchedWindows.set(nextReadWindow, readWindow(readWindows[nextReadWindow]!));
+      nextReadWindow += 1;
+    }
+  };
+  fillReadAhead();
 
   yield* emit(packHeader(order.oids.length));
 
   for (let index = 0; index < order.oids.length; index += 1) {
-    if (source.readCachedPackEntries !== undefined && index === prefetchedUntil) {
-      const requests: CachedPackEntryRequest[] = [];
-      const available = new Set(emitted);
-      let compressedBytes = 0;
-      let keys = 0;
-      let next = index;
-
-      for (; next < order.oids.length; next += 1) {
-        const candidateOid = order.oids[next]!;
-        const candidateBase = order.deltaBases.get(candidateOid);
-        const baseIsAvailable =
-          candidateBase !== undefined &&
-          (available.has(candidateBase) || (thin && availableClientObjects.has(candidateBase)));
-        const metadata = order.metadata.get(candidateOid);
-        const representation =
-          baseIsAvailable && metadata?.delta?.compressed !== null
-            ? metadata?.delta?.compressed
-            : metadata?.full;
-
-        if (
-          representation !== undefined &&
-          representation !== null &&
-          requests.length > 0 &&
-          (compressedBytes + representation.size > PACK_REPRESENTATION_READ_BYTES ||
-            keys + representation.chunkCount > PACK_REPRESENTATION_READ_KEYS)
-        ) {
-          break;
-        }
-
-        if (metadata !== undefined && representation !== undefined && representation !== null) {
-          requests.push({
-            metadata,
-            preferredBaseOid: baseIsAvailable ? candidateBase : null,
-          });
-          compressedBytes += representation.size;
-          keys += representation.chunkCount;
-        }
-        available.add(candidateOid);
-      }
-
-      prefetched = new Map(
-        await timedStorageRead(timings, () => source.readCachedPackEntries!(requests)),
-      );
-      prefetchedUntil = Math.max(next, index + 1);
+    const currentWindow = readWindows[readWindowAt];
+    if (currentWindow !== undefined && index === currentWindow.start) {
+      prefetched = new Map(await prefetchedWindows.get(readWindowAt)!);
+      prefetchedWindows.delete(readWindowAt);
+      readWindowAt += 1;
+      fillReadAhead();
     }
 
     const oid = order.oids[index]!;
@@ -673,14 +734,32 @@ async function* sideband(
 ): AsyncGenerator<Uint8Array> {
   yield prefix;
 
+  const payloadBytes = PKT_LINE_MAX_PAYLOAD_BYTES - 1;
+  const pending = new Uint8Array(payloadBytes);
+  let pendingBytes = 0;
   for await (const chunk of pack) {
-    for (let at = 0; at < chunk.length; at += PKT_LINE_MAX_PAYLOAD_BYTES - 1) {
-      const payload = chunk.subarray(at, at + PKT_LINE_MAX_PAYLOAD_BYTES - 1);
-      const banded = new Uint8Array(payload.length + 1);
-      banded[0] = DATA_BAND;
-      banded.set(payload, 1);
-      yield pktLine(banded);
+    let at = 0;
+    while (at < chunk.length) {
+      const copied = Math.min(payloadBytes - pendingBytes, chunk.length - at);
+      pending.set(chunk.subarray(at, at + copied), pendingBytes);
+      pendingBytes += copied;
+      at += copied;
+
+      if (pendingBytes === payloadBytes) {
+        const banded = new Uint8Array(PKT_LINE_MAX_PAYLOAD_BYTES);
+        banded[0] = DATA_BAND;
+        banded.set(pending, 1);
+        yield pktLine(banded);
+        pendingBytes = 0;
+      }
     }
+  }
+
+  if (pendingBytes > 0) {
+    const banded = new Uint8Array(pendingBytes + 1);
+    banded[0] = DATA_BAND;
+    banded.set(pending.subarray(0, pendingBytes), 1);
+    yield pktLine(banded);
   }
 
   yield flushPkt();

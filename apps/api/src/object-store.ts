@@ -566,55 +566,69 @@ export class ObjectStore implements PackSink {
     oids: readonly string[],
   ): Promise<ReadonlyMap<string, PackRepresentationMetadata>> {
     const metadata = new Map<string, PackRepresentationMetadata>();
-    for (let at = 0; at < oids.length; at += OBJECT_METADATA_BATCH_SIZE) {
-      const batch = oids.slice(at, at + OBJECT_METADATA_BATCH_SIZE);
-      if (batch.length === 0) {
-        continue;
-      }
-      const rows = await this.#db
-        .select({
-          oid: objects.oid,
-          type: objects.type,
-          size: objects.size,
-          fullCompressedSize: objects.compressedSize,
-          fullCompressedChunkCount: objects.compressedChunkCount,
-          deltaBaseOid: objectDeltas.baseOid,
-          deltaSize: objectDeltas.size,
-          deltaCompressedSize: objectDeltas.compressedSize,
-          deltaCompressedChunkCount: objectDeltas.compressedChunkCount,
-        })
-        .from(objects)
-        .leftJoin(objectDeltas, eq(objectDeltas.oid, objects.oid))
-        .where(and(inArray(objects.oid, batch), eq(objects.complete, true)));
+    if (oids.length === 0) {
+      return metadata;
+    }
 
-      for (const row of rows) {
-        metadata.set(row.oid, {
-          oid: row.oid,
-          type: row.type,
-          size: row.size,
-          full:
-            row.fullCompressedSize === null || row.fullCompressedChunkCount === null
-              ? null
-              : {
-                  size: row.fullCompressedSize,
-                  chunkCount: row.fullCompressedChunkCount,
-                },
-          delta:
-            row.deltaBaseOid === null || row.deltaSize === null
-              ? null
-              : {
-                  baseOid: row.deltaBaseOid,
-                  size: row.deltaSize,
-                  compressed:
-                    row.deltaCompressedSize === null || row.deltaCompressedChunkCount === null
-                      ? null
-                      : {
-                          size: row.deltaCompressedSize,
-                          chunkCount: row.deltaCompressedChunkCount,
-                        },
-                },
-        });
-      }
+    const rows = await this.#db.all<{
+      readonly oid: string;
+      readonly type: ObjectRow["type"];
+      readonly size: number;
+      readonly fullCompressedSize: number | null;
+      readonly fullCompressedChunkCount: number | null;
+      readonly deltaBaseOid: string | null;
+      readonly deltaSize: number | null;
+      readonly deltaCompressedSize: number | null;
+      readonly deltaCompressedChunkCount: number | null;
+    }>(sql`
+      with requested(oid) as (
+        select value from json_each(${JSON.stringify(oids)})
+      )
+      select
+        ${objects.oid} as oid,
+        ${objects.type} as type,
+        ${objects.size} as size,
+        ${objects.compressedSize} as fullCompressedSize,
+        ${objects.compressedChunkCount} as fullCompressedChunkCount,
+        ${objectDeltas.baseOid} as deltaBaseOid,
+        ${objectDeltas.size} as deltaSize,
+        ${objectDeltas.compressedSize} as deltaCompressedSize,
+        ${objectDeltas.compressedChunkCount} as deltaCompressedChunkCount
+      from requested
+      join ${objects}
+        on ${objects.oid} = requested.oid
+       and ${objects.complete} = true
+      left join ${objectDeltas}
+        on ${objectDeltas.oid} = ${objects.oid}
+    `);
+
+    for (const row of rows) {
+      metadata.set(row.oid, {
+        oid: row.oid,
+        type: row.type,
+        size: row.size,
+        full:
+          row.fullCompressedSize === null || row.fullCompressedChunkCount === null
+            ? null
+            : {
+                size: row.fullCompressedSize,
+                chunkCount: row.fullCompressedChunkCount,
+              },
+        delta:
+          row.deltaBaseOid === null || row.deltaSize === null
+            ? null
+            : {
+                baseOid: row.deltaBaseOid,
+                size: row.deltaSize,
+                compressed:
+                  row.deltaCompressedSize === null || row.deltaCompressedChunkCount === null
+                    ? null
+                    : {
+                        size: row.deltaCompressedSize,
+                        chunkCount: row.deltaCompressedChunkCount,
+                      },
+              },
+      });
     }
     return metadata;
   }
@@ -653,6 +667,82 @@ export class ObjectStore implements PackSink {
       join ${objects} on ${objects.oid} = candidate.value and ${objects.complete} = true
     `);
     return new Set(rows.map(({ oid }) => oid));
+  }
+
+  /**
+   * Resolve a complete indexed object closure in one SQLite graph walk.
+   *
+   * `null` means at least one reachable object is missing or predates the graph
+   * index, so callers must fall back to reading and parsing Objects. Objects in
+   * `stopAt` are client-owned boundaries: they are neither returned nor walked.
+   */
+  async readObjectClosure(
+    roots: ReadonlySet<string>,
+    stopAt: ReadonlySet<string> = new Set(),
+    shallow: ReadonlySet<string> = new Set(),
+  ): Promise<readonly string[] | null> {
+    if (roots.size === 0) {
+      return [];
+    }
+    const rows = await this.#db.all<{
+      readonly oid: string;
+      readonly complete: number | boolean | null;
+      readonly linksIndexed: number | boolean | null;
+    }>(sql`
+      with recursive
+        closure_roots(oid) as (
+          select value from json_each(${JSON.stringify([...roots])})
+        ),
+        closure_stops(oid) as (
+          select value from json_each(${JSON.stringify([...stopAt])})
+        ),
+        closure_shallow(oid) as (
+          select value from json_each(${JSON.stringify([...shallow])})
+        ),
+        reachable(oid) as (
+          select closure_roots.oid
+          from closure_roots
+          where not exists (
+            select 1 from closure_stops where closure_stops.oid = closure_roots.oid
+          )
+          union
+          select ${objectLinks.targetOid}
+          from reachable
+          join ${objects}
+            on ${objects.oid} = reachable.oid
+           and ${objects.complete} = true
+           and ${objects.linksIndexed} = true
+          join ${objectLinks}
+            on ${objectLinks.sourceOid} = reachable.oid
+          where not exists (
+            select 1
+            from closure_stops
+            where closure_stops.oid = ${objectLinks.targetOid}
+          )
+            and (
+              ${objectLinks.targetType} <> 'commit'
+              or not exists (
+                select 1 from closure_shallow where closure_shallow.oid = reachable.oid
+              )
+            )
+        )
+      select
+        reachable.oid as oid,
+        ${objects.complete} as complete,
+        ${objects.linksIndexed} as linksIndexed
+      from reachable
+      left join ${objects} on ${objects.oid} = reachable.oid
+    `);
+    if (
+      rows.some(
+        (row) =>
+          (row.complete !== true && row.complete !== 1) ||
+          (row.linksIndexed !== true && row.linksIndexed !== 1),
+      )
+    ) {
+      return null;
+    }
+    return rows.map(({ oid }) => oid);
   }
 
   /** Read one already-planned representation using only synchronous KV lookups. */
