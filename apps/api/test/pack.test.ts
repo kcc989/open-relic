@@ -1,8 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
+import { inflateSync } from "node:zlib";
 
 import { CHUNK_BYTES, ObjectStore } from "../src/object-store.ts";
 import { MAX_OBJECT_BYTES, hashObject, type ObjectType } from "../src/object.ts";
-import { PackError, readPack, type PackSummary } from "../src/pack.ts";
+import { PackError, readPack, type PackObject, type PackSummary } from "../src/pack.ts";
 import {
   buildDelta,
   buildPack,
@@ -73,6 +74,22 @@ test("reads whole objects and names them the way Git does", async () => {
   expect((await objects.read(oidOf("blob", contents)))?.bytes).toEqual(contents);
 });
 
+test("captures each incoming entry's compressed representation", async () => {
+  const contents = utf8("preserve this zlib stream\n");
+  const pack = buildPack([{ kind: "object", type: "blob", bytes: contents }]);
+  const written: PackObject[] = [];
+
+  await readPack(streamOf(pack.bytes, { chunkSize: 7 }), {
+    read: async () => null,
+    write: async (object) => {
+      written.push(object);
+    },
+  });
+
+  expect(written).toHaveLength(1);
+  expect(new Uint8Array(inflateSync(written[0]!.compressed!))).toEqual(Uint8Array.from(contents));
+});
+
 test("every object type keeps its type", async () => {
   const objects = store();
   const types: readonly ObjectType[] = ["commit", "tree", "blob", "tag"];
@@ -108,6 +125,37 @@ test("an ofs-delta resolves against an earlier object in the pack", async () => 
 
   const resolved = utf8("a base brand new object that a delta will");
   expect((await objects.read(oidOf("blob", resolved)))?.bytes).toEqual(resolved);
+});
+
+test("a nearby delta base is reused without reading it back from storage", async () => {
+  const base = utf8("a recently resolved base");
+  const baseOid = oidOf("blob", base);
+  const resolved = utf8("a recently resolved result");
+  const delta = buildDelta(base.length, resolved.length, [insertInstruction(resolved)]);
+  const written = new Map<string, PackObject>();
+
+  await readPack(
+    streamOf(
+      buildPack([
+        { kind: "object", type: "blob", bytes: base },
+        { kind: "ofs-delta", baseIndex: 0, delta },
+      ]).bytes,
+    ),
+    {
+      read: async (oid) => {
+        if (oid === baseOid) {
+          throw new Error("recent base was read back from storage");
+        }
+        const object = written.get(oid);
+        return object === undefined ? null : { type: object.type, bytes: object.bytes };
+      },
+      write: async (object) => {
+        written.set(object.oid, object);
+      },
+    },
+  );
+
+  expect(written.get(oidOf("blob", resolved))?.bytes).toEqual(resolved);
 });
 
 test("a ref-delta resolves against an object already in the repository", async () => {

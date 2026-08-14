@@ -35,6 +35,15 @@ export const createTestKv = (): SyncKv => {
 
   return {
     get: <T>(key: string): T | undefined => entries.get(key),
+    getMany: async <T>(keys: readonly string[]): Promise<ReadonlyMap<string, T>> => {
+      const found = new Map<string, T>();
+      for (const key of keys) {
+        if (entries.has(key)) {
+          found.set(key, entries.get(key));
+        }
+      }
+      return found;
+    },
     put: <T>(key: string, value: T): void => {
       entries.set(key, structuredClone(value));
     },

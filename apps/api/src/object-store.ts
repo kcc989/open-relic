@@ -13,7 +13,7 @@ import {
   sweepState,
   type ObjectRow,
 } from "./db/repository-schema.ts";
-import type { PackBase, PackDelta, PackObject, PackSink } from "./pack.ts";
+import type { PackBase, PackDelta, PackObject, PackSink, PackTimings } from "./pack.ts";
 
 /**
  * Durable Object storage caps a key and its value together at 2 MB, so an
@@ -109,6 +109,107 @@ export interface IndexedObject {
   readonly links: readonly ObjectLink[];
 }
 
+interface CompressedRepresentation {
+  readonly size: number;
+  readonly chunkCount: number;
+}
+
+export interface PackRepresentationMetadata {
+  readonly oid: string;
+  readonly type: ObjectRow["type"];
+  readonly size: number;
+  readonly full: CompressedRepresentation | null;
+  readonly delta: {
+    readonly baseOid: string;
+    readonly size: number;
+    readonly compressed: CompressedRepresentation | null;
+  } | null;
+}
+
+export type CachedPackEntry =
+  | {
+      readonly kind: "full";
+      readonly type: ObjectRow["type"];
+      readonly size: number;
+      readonly compressed: Uint8Array;
+    }
+  | {
+      readonly kind: "delta";
+      readonly baseOid: string;
+      readonly size: number;
+      readonly compressed: Uint8Array;
+    };
+
+export interface CachedPackEntryRequest {
+  readonly metadata: PackRepresentationMetadata;
+  readonly preferredBaseOid: string | null;
+}
+
+type CachedPackSelection =
+  | {
+      readonly oid: string;
+      readonly prefix: typeof COMPRESSED_OBJECT_PREFIX;
+      readonly size: number;
+      readonly chunkCount: number;
+      readonly entry: Omit<Extract<CachedPackEntry, { readonly kind: "full" }>, "compressed">;
+    }
+  | {
+      readonly oid: string;
+      readonly prefix: typeof COMPRESSED_DELTA_PREFIX;
+      readonly size: number;
+      readonly chunkCount: number;
+      readonly entry: Omit<Extract<CachedPackEntry, { readonly kind: "delta" }>, "compressed">;
+    };
+
+interface PreparedPackWrite {
+  readonly object: PackObject;
+  readonly objectChunks: number;
+  readonly deltaChunks: number;
+  readonly fullCompressed: Uint8Array | null;
+  readonly deltaCompressed: Uint8Array | null;
+  readonly compressedObjectChunks: number;
+  readonly compressedDeltaChunks: number;
+  readonly links: readonly ObjectLink[];
+  readonly linksIndexed: boolean;
+  readonly hasIncomingRepresentation: boolean;
+  claimed: boolean;
+}
+
+const selectCachedPackEntry = ({
+  metadata,
+  preferredBaseOid,
+}: CachedPackEntryRequest): CachedPackSelection | null => {
+  if (
+    preferredBaseOid !== null &&
+    metadata.delta?.baseOid === preferredBaseOid &&
+    metadata.delta.compressed !== null
+  ) {
+    return {
+      oid: metadata.oid,
+      prefix: COMPRESSED_DELTA_PREFIX,
+      size: metadata.delta.compressed.size,
+      chunkCount: metadata.delta.compressed.chunkCount,
+      entry: {
+        kind: "delta",
+        baseOid: preferredBaseOid,
+        size: metadata.delta.size,
+      },
+    };
+  }
+
+  if (metadata.full !== null) {
+    return {
+      oid: metadata.oid,
+      prefix: COMPRESSED_OBJECT_PREFIX,
+      size: metadata.full.size,
+      chunkCount: metadata.full.chunkCount,
+      entry: { kind: "full", type: metadata.type, size: metadata.size },
+    };
+  }
+
+  return null;
+};
+
 /**
  * Git objects as chunked rows in the repository's own Durable Object: metadata
  * in SQL, inflated bytes under `o:<oid>:<n>`, reusable compression under
@@ -133,113 +234,219 @@ export class ObjectStore implements PackSink {
    * its contents, so "already here" means "byte-identical", and rewriting the
    * chunks would cost megabytes to arrive where we are.
    */
-  async write(object: PackObject): Promise<void> {
-    let objectChunks = 0;
-    let deltaChunks = 0;
-    let fullCompressed: Uint8Array | null = null;
-    let compressedObjectChunks = 0;
-    const compressedDeltaChunks = 0;
-    let links: readonly ObjectLink[] = [];
-    let linksIndexed = false;
-    let claimed = false;
+  async write(object: PackObject, timings?: PackTimings): Promise<void> {
+    await this.writeBatch([object], timings);
+  }
 
-    try {
-      const existing = await this.#stored(object.oid);
-      if (existing?.complete) {
-        return;
-      }
-      if (existing !== null) {
-        await this.#discardIncomplete(existing);
-      }
+  /** Publish a bounded parser batch in one SQLite/KV transaction. */
+  async writeBatch(batch: readonly PackObject[], timings?: PackTimings): Promise<void> {
+    let pending = [...batch];
 
-      objectChunks = chunkCount(object.bytes.length);
-      deltaChunks = object.delta === null ? 0 : chunkCount(object.delta.bytes.length);
-      // Resolving a Delta already holds its instructions, base, and result.
-      // Defer both derived compressions to Repack. Whole objects can cache their
-      // full entry here, but only after the cheap completed-row deduplication.
-      fullCompressed = object.delta === null ? new Uint8Array(deflateSync(object.bytes)) : null;
-      compressedObjectChunks = fullCompressed === null ? 0 : chunkCount(fullCompressed.length);
-      try {
-        links = deduplicateLinks(linksToFetch(object.type, object.bytes));
-        linksIndexed = true;
-      } catch (error) {
-        if (!(error instanceof ObjectParseError)) {
-          throw error;
+    while (pending.length > 0) {
+      const prepared: PreparedPackWrite[] = [];
+      for (const object of pending) {
+        const hasIncomingRepresentation = object.compressed !== undefined;
+        if (!hasIncomingRepresentation) {
+          const readStarted = performance.now();
+          const existing = await this.#stored(object.oid);
+          if (timings !== undefined) {
+            timings.storageReadMs += performance.now() - readStarted;
+          }
+          if (existing?.complete) {
+            continue;
+          }
+          if (existing !== null) {
+            await this.#discardIncomplete(existing);
+          }
         }
-      }
 
-      const inserted = await this.#db
-        .insert(objects)
-        .values({
-          oid: object.oid,
-          type: object.type,
-          size: object.bytes.length,
-          chunkCount: objectChunks,
-          compressedSize: fullCompressed?.length ?? null,
-          compressedChunkCount: fullCompressed === null ? null : compressedObjectChunks,
-          linksIndexed,
-          complete: false,
-        })
-        .onConflictDoNothing()
-        .returning({ oid: objects.oid });
-
-      if (inserted.length === 0) {
-        return;
-      }
-      claimed = true;
-
-      this.#writeChunks(OBJECT_PREFIX, object.oid, object.bytes);
-      if (fullCompressed !== null) {
-        this.#writeChunks(COMPRESSED_OBJECT_PREFIX, object.oid, fullCompressed);
-      }
-
-      if (object.delta !== null) {
-        await this.#db.insert(objectDeltas).values({
-          oid: object.oid,
-          baseOid: object.delta.baseOid,
-          size: object.delta.bytes.length,
-          chunkCount: deltaChunks,
-          compressedSize: null,
-          compressedChunkCount: null,
-        });
-
-        this.#writeChunks(DELTA_PREFIX, object.oid, object.delta.bytes);
-      }
-
-      for (let at = 0; at < links.length; at += OBJECT_LINK_INSERT_BATCH_SIZE) {
-        await this.#db.insert(objectLinks).values(
-          links.slice(at, at + OBJECT_LINK_INSERT_BATCH_SIZE).map((link) => ({
-            sourceOid: object.oid,
-            targetOid: link.oid,
-            targetType: link.type,
-          })),
-        );
-      }
-
-      await this.#db
-        .update(objects)
-        .set({ complete: true })
-        .where(and(eq(objects.oid, object.oid), eq(objects.complete, false)));
-    } catch (error) {
-      const storageExhausted = error instanceof Error && isStorageExhaustion(error);
-      if (claimed) {
+        const objectChunks = chunkCount(object.bytes.length);
+        const deltaChunks = object.delta === null ? 0 : chunkCount(object.delta.bytes.length);
+        // A Pack reader supplies the exact zlib stream that arrived. Other writers
+        // still get a reusable representation without having to know Pack syntax.
+        const fullCompressed =
+          object.delta === null
+            ? (object.compressed ?? new Uint8Array(deflateSync(object.bytes)))
+            : null;
+        const deltaCompressed = object.delta === null ? null : (object.compressed ?? null);
+        const compressedObjectChunks =
+          fullCompressed === null ? 0 : chunkCount(fullCompressed.length);
+        const compressedDeltaChunks =
+          deltaCompressed === null ? 0 : chunkCount(deltaCompressed.length);
+        let links: readonly ObjectLink[] = [];
+        let linksIndexed = false;
+        const linksStarted = performance.now();
         try {
-          await this.#discardWrite(
-            object.oid,
-            objectChunks,
-            deltaChunks,
-            compressedObjectChunks,
-            compressedDeltaChunks,
-          );
-        } catch {
-          // Keep the write failure as the operation's result. An incomplete row
-          // remains hidden and lets a retry or sweep finish the cleanup.
+          links = deduplicateLinks(linksToFetch(object.type, object.bytes));
+          linksIndexed = true;
+        } catch (error) {
+          if (!(error instanceof ObjectParseError)) {
+            throw error;
+          }
+        } finally {
+          if (timings !== undefined) {
+            timings.linkIndexMs += performance.now() - linksStarted;
+          }
         }
+
+        prepared.push({
+          object,
+          objectChunks,
+          deltaChunks,
+          fullCompressed,
+          deltaCompressed,
+          compressedObjectChunks,
+          compressedDeltaChunks,
+          links,
+          linksIndexed,
+          hasIncomingRepresentation,
+          claimed: false,
+        });
       }
-      if (storageExhausted) {
-        throw new RepositoryStorageExhaustedError();
+
+      if (prepared.length === 0) {
+        return;
       }
-      throw error;
+
+      try {
+        const commitStarted = performance.now();
+        try {
+          await this.#db.transaction((tx) => {
+            for (const write of prepared) {
+              const { object } = write;
+              const inserted = tx
+                .insert(objects)
+                .values({
+                  oid: object.oid,
+                  type: object.type,
+                  size: object.bytes.length,
+                  chunkCount: write.objectChunks,
+                  compressedSize: write.fullCompressed?.length ?? null,
+                  compressedChunkCount:
+                    write.fullCompressed === null ? null : write.compressedObjectChunks,
+                  linksIndexed: write.linksIndexed,
+                  complete: false,
+                })
+                .onConflictDoNothing()
+                .returning({ oid: objects.oid })
+                .all();
+
+              if (inserted.length === 0) {
+                continue;
+              }
+              write.claimed = true;
+
+              if (timings !== undefined) {
+                timings.resolvedBytesStored += object.bytes.length;
+                timings.compressedBytesStored +=
+                  (write.fullCompressed?.length ?? 0) + (write.deltaCompressed?.length ?? 0);
+                timings.deltaBytesStored += object.delta?.bytes.length ?? 0;
+                timings.linksStored += write.links.length;
+              }
+
+              this.#writeChunks(OBJECT_PREFIX, object.oid, object.bytes);
+              if (write.fullCompressed !== null) {
+                this.#writeChunks(COMPRESSED_OBJECT_PREFIX, object.oid, write.fullCompressed);
+              }
+
+              if (object.delta !== null) {
+                tx.insert(objectDeltas)
+                  .values({
+                    oid: object.oid,
+                    baseOid: object.delta.baseOid,
+                    size: object.delta.bytes.length,
+                    chunkCount: write.deltaChunks,
+                    compressedSize: write.deltaCompressed?.length ?? null,
+                    compressedChunkCount:
+                      write.deltaCompressed === null ? null : write.compressedDeltaChunks,
+                  })
+                  .run();
+
+                this.#writeChunks(DELTA_PREFIX, object.oid, object.delta.bytes);
+                if (write.deltaCompressed !== null) {
+                  this.#writeChunks(COMPRESSED_DELTA_PREFIX, object.oid, write.deltaCompressed);
+                }
+              }
+
+              for (let at = 0; at < write.links.length; at += OBJECT_LINK_INSERT_BATCH_SIZE) {
+                tx.insert(objectLinks)
+                  .values(
+                    write.links.slice(at, at + OBJECT_LINK_INSERT_BATCH_SIZE).map((link) => ({
+                      sourceOid: object.oid,
+                      targetOid: link.oid,
+                      targetType: link.type,
+                    })),
+                  )
+                  .run();
+              }
+
+              tx.update(objects)
+                .set({ complete: true })
+                .where(and(eq(objects.oid, object.oid), eq(objects.complete, false)))
+                .run();
+            }
+          });
+        } finally {
+          if (timings !== undefined) {
+            timings.storageCommitMs += performance.now() - commitStarted;
+          }
+        }
+
+        const retry: PackObject[] = [];
+        for (const write of prepared) {
+          if (write.claimed || !write.hasIncomingRepresentation) {
+            continue;
+          }
+          const readStarted = performance.now();
+          const existing = await this.#stored(write.object.oid);
+          if (timings !== undefined) {
+            timings.storageReadMs += performance.now() - readStarted;
+          }
+          if (existing !== null && !existing.complete) {
+            await this.#discardIncomplete(existing);
+            retry.push(write.object);
+          }
+        }
+        pending = retry;
+      } catch (error) {
+        const storageExhausted = error instanceof Error && isStorageExhaustion(error);
+        for (const write of prepared) {
+          if (!write.claimed) {
+            continue;
+          }
+          try {
+            // Production KV rolls back with SQL. The marker keeps cleanup
+            // discoverable for test stores and future adapters that do not.
+            await this.#stageIncompleteWrite(
+              write.object,
+              write.objectChunks,
+              write.deltaChunks,
+              write.fullCompressed?.length ?? null,
+              write.compressedObjectChunks,
+              write.deltaCompressed?.length ?? null,
+              write.compressedDeltaChunks,
+              write.linksIndexed,
+            );
+          } catch {
+            // Storage exhaustion can also prevent the recovery marker.
+          }
+          try {
+            await this.#discardWrite(
+              write.object.oid,
+              write.objectChunks,
+              write.deltaChunks,
+              write.compressedObjectChunks,
+              write.compressedDeltaChunks,
+            );
+          } catch {
+            // Preserve the write failure; an incomplete row remains sweepable.
+          }
+        }
+        if (storageExhausted) {
+          throw new RepositoryStorageExhaustedError();
+        }
+        throw error;
+      }
     }
   }
 
@@ -352,6 +559,163 @@ export class ObjectStore implements PackSink {
       }
     }
     return bases;
+  }
+
+  /** Plan reusable entries in bounded SQL batches, once per Pack rather than once per Object. */
+  async readPackMetadata(
+    oids: readonly string[],
+  ): Promise<ReadonlyMap<string, PackRepresentationMetadata>> {
+    const metadata = new Map<string, PackRepresentationMetadata>();
+    for (let at = 0; at < oids.length; at += OBJECT_METADATA_BATCH_SIZE) {
+      const batch = oids.slice(at, at + OBJECT_METADATA_BATCH_SIZE);
+      if (batch.length === 0) {
+        continue;
+      }
+      const rows = await this.#db
+        .select({
+          oid: objects.oid,
+          type: objects.type,
+          size: objects.size,
+          fullCompressedSize: objects.compressedSize,
+          fullCompressedChunkCount: objects.compressedChunkCount,
+          deltaBaseOid: objectDeltas.baseOid,
+          deltaSize: objectDeltas.size,
+          deltaCompressedSize: objectDeltas.compressedSize,
+          deltaCompressedChunkCount: objectDeltas.compressedChunkCount,
+        })
+        .from(objects)
+        .leftJoin(objectDeltas, eq(objectDeltas.oid, objects.oid))
+        .where(and(inArray(objects.oid, batch), eq(objects.complete, true)));
+
+      for (const row of rows) {
+        metadata.set(row.oid, {
+          oid: row.oid,
+          type: row.type,
+          size: row.size,
+          full:
+            row.fullCompressedSize === null || row.fullCompressedChunkCount === null
+              ? null
+              : {
+                  size: row.fullCompressedSize,
+                  chunkCount: row.fullCompressedChunkCount,
+                },
+          delta:
+            row.deltaBaseOid === null || row.deltaSize === null
+              ? null
+              : {
+                  baseOid: row.deltaBaseOid,
+                  size: row.deltaSize,
+                  compressed:
+                    row.deltaCompressedSize === null || row.deltaCompressedChunkCount === null
+                      ? null
+                      : {
+                          size: row.deltaCompressedSize,
+                          chunkCount: row.deltaCompressedChunkCount,
+                        },
+                },
+        });
+      }
+    }
+    return metadata;
+  }
+
+  /** Resolve only candidate Objects in a client's closure, inside SQLite's graph index. */
+  async readReachableObjects(
+    roots: ReadonlySet<string>,
+    candidates: ReadonlySet<string>,
+    shallow: ReadonlySet<string> = new Set(),
+  ): Promise<ReadonlySet<string>> {
+    if (roots.size === 0 || candidates.size === 0) {
+      return new Set();
+    }
+    const rows = await this.#db.all<{ readonly oid: string }>(sql`
+      with recursive
+        client_roots(oid) as (
+          select value from json_each(${JSON.stringify([...roots])})
+        ),
+        client_shallow(oid) as (
+          select value from json_each(${JSON.stringify([...shallow])})
+        ),
+        reachable(oid) as (
+          select oid from client_roots
+          union
+          select ${objectLinks.targetOid}
+          from ${objectLinks}
+          join reachable on ${objectLinks.sourceOid} = reachable.oid
+          where ${objectLinks.targetType} <> 'commit'
+             or not exists (
+               select 1 from client_shallow where client_shallow.oid = reachable.oid
+             )
+        )
+      select candidate.value as oid
+      from json_each(${JSON.stringify([...candidates])}) as candidate
+      join reachable on reachable.oid = candidate.value
+      join ${objects} on ${objects.oid} = candidate.value and ${objects.complete} = true
+    `);
+    return new Set(rows.map(({ oid }) => oid));
+  }
+
+  /** Read one already-planned representation using only synchronous KV lookups. */
+  readCachedPackEntry(
+    metadata: PackRepresentationMetadata,
+    preferredBaseOid: string | null,
+  ): CachedPackEntry | null {
+    const selected = selectCachedPackEntry({ metadata, preferredBaseOid });
+    return selected === null
+      ? null
+      : {
+          ...selected.entry,
+          compressed: this.#readChunks(
+            selected.prefix,
+            selected.oid,
+            selected.size,
+            selected.chunkCount,
+          ),
+        };
+  }
+
+  /** Fetch explicit representation chunks through Durable Object KV's multi-get API. */
+  async readCachedPackEntries(
+    requests: readonly CachedPackEntryRequest[],
+  ): Promise<ReadonlyMap<string, CachedPackEntry>> {
+    if (this.#kv.getMany === undefined) {
+      return new Map(
+        requests.flatMap((request) => {
+          const entry = this.readCachedPackEntry(request.metadata, request.preferredBaseOid);
+          return entry === null ? [] : ([[request.metadata.oid, entry]] as const);
+        }),
+      );
+    }
+
+    const selected = requests.flatMap((request) => {
+      const entry = selectCachedPackEntry(request);
+      return entry === null ? [] : [entry];
+    });
+    const keys = selected.flatMap((entry) =>
+      Array.from({ length: entry.chunkCount }, (_, index) =>
+        chunkKey(entry.prefix, entry.oid, index),
+      ),
+    );
+    const chunks = new Map<string, Uint8Array>();
+    for (let at = 0; at < keys.length; at += 128) {
+      const read = await this.#kv.getMany<Uint8Array>(keys.slice(at, at + 128));
+      for (const [key, value] of read) {
+        chunks.set(key, value);
+      }
+    }
+
+    const entries = new Map<string, CachedPackEntry>();
+    for (const selection of selected) {
+      const compressed = this.#readChunksFrom(
+        selection.prefix,
+        selection.oid,
+        selection.size,
+        selection.chunkCount,
+        (key) => chunks.get(key),
+      );
+      entries.set(selection.oid, { ...selection.entry, compressed });
+    }
+    return entries;
   }
 
   /** `null` when the object arrived whole rather than as a delta. */
@@ -643,6 +1007,46 @@ export class ObjectStore implements PackSink {
     }
   }
 
+  async #stageIncompleteWrite(
+    object: PackObject,
+    objectChunks: number,
+    deltaChunks: number,
+    compressedObjectSize: number | null,
+    compressedObjectChunks: number,
+    compressedDeltaSize: number | null,
+    compressedDeltaChunks: number,
+    linksIndexed: boolean,
+  ): Promise<void> {
+    await this.#db.transaction((tx) => {
+      tx.insert(objects)
+        .values({
+          oid: object.oid,
+          type: object.type,
+          size: object.bytes.length,
+          chunkCount: objectChunks,
+          compressedSize: compressedObjectSize,
+          compressedChunkCount: compressedObjectSize === null ? null : compressedObjectChunks,
+          linksIndexed,
+          complete: false,
+        })
+        .onConflictDoNothing()
+        .run();
+      if (object.delta !== null) {
+        tx.insert(objectDeltas)
+          .values({
+            oid: object.oid,
+            baseOid: object.delta.baseOid,
+            size: object.delta.bytes.length,
+            chunkCount: deltaChunks,
+            compressedSize: compressedDeltaSize,
+            compressedChunkCount: compressedDeltaSize === null ? null : compressedDeltaChunks,
+          })
+          .onConflictDoNothing()
+          .run();
+      }
+    });
+  }
+
   /** SQL and synchronous KV share this transaction in a SQLite Durable Object. */
   async #discardWrite(
     oid: string,
@@ -764,12 +1168,22 @@ export class ObjectStore implements PackSink {
   }
 
   #readChunks(prefix: string, oid: string, size: number, count: number): Uint8Array {
+    return this.#readChunksFrom(prefix, oid, size, count, (key) => this.#kv.get<Uint8Array>(key));
+  }
+
+  #readChunksFrom(
+    prefix: string,
+    oid: string,
+    size: number,
+    count: number,
+    readChunk: (key: string) => Uint8Array | undefined,
+  ): Uint8Array {
     const bytes = new Uint8Array(size);
     let at = 0;
 
     for (let index = 0; index < count; index += 1) {
       const key = chunkKey(prefix, oid, index);
-      const chunk = this.#kv.get<Uint8Array>(key);
+      const chunk = readChunk(key);
 
       if (chunk === undefined) {
         throw new ObjectStoreError(`Chunk ${key} is missing.`);

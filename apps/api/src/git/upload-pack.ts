@@ -3,7 +3,13 @@
 import { createDeflate } from "node:zlib";
 
 import { commitParents, linksToFetch } from "../connectivity.ts";
-import { RepositoryStorageExhaustedError, type IndexedObject } from "../object-store.ts";
+import {
+  RepositoryStorageExhaustedError,
+  type CachedPackEntry,
+  type CachedPackEntryRequest,
+  type IndexedObject,
+  type PackRepresentationMetadata,
+} from "../object-store.ts";
 import type { PackBase, PackDelta } from "../pack.ts";
 import { isObjectId, type ObjectType } from "../object.ts";
 import { Sha1, fromHex } from "../sha1.ts";
@@ -27,6 +33,63 @@ const MULTI_ACK_DETAILED = "multi_ack_detailed";
 const SIDE_BAND_64K = "side-band-64k";
 const THIN_PACK = "thin-pack";
 const DATA_BAND = 1;
+
+interface UploadPackTimings {
+  startedAt: number;
+  requestMs: number;
+  negotiationMs: number;
+  packPlanningMs: number;
+  storageReadMs: number;
+  deflateMs: number;
+  hashMs: number;
+  firstByteMs: number | null;
+  responseBytes: number;
+  objects: number;
+}
+
+const createUploadPackTimings = (): UploadPackTimings => ({
+  startedAt: performance.now(),
+  requestMs: 0,
+  negotiationMs: 0,
+  packPlanningMs: 0,
+  storageReadMs: 0,
+  deflateMs: 0,
+  hashMs: 0,
+  firstByteMs: null,
+  responseBytes: 0,
+  objects: 0,
+});
+
+const rounded = (value: number): number => Number(value.toFixed(2));
+
+const logUploadPackTimings = (timings: UploadPackTimings): void => {
+  console.log(
+    `Git upload-pack timings ${JSON.stringify({
+      totalMs: rounded(performance.now() - timings.startedAt),
+      requestMs: rounded(timings.requestMs),
+      negotiationMs: rounded(timings.negotiationMs),
+      packPlanningMs: rounded(timings.packPlanningMs),
+      storageReadMs: rounded(timings.storageReadMs),
+      deflateMs: rounded(timings.deflateMs),
+      hashMs: rounded(timings.hashMs),
+      firstByteMs: timings.firstByteMs === null ? null : rounded(timings.firstByteMs),
+      responseBytes: timings.responseBytes,
+      objects: timings.objects,
+    })}`,
+  );
+};
+
+const timedStorageRead = async <T>(
+  timings: UploadPackTimings,
+  read: () => Promise<T>,
+): Promise<T> => {
+  const started = performance.now();
+  try {
+    return await read();
+  } finally {
+    timings.storageReadMs += performance.now() - started;
+  }
+};
 
 const readOptionalCache = async <T>(
   read: (() => Promise<T | null>) | undefined,
@@ -79,6 +142,21 @@ export interface UploadPackObjectSource {
   readonly readIndexedObjects?: (
     oids: readonly string[],
   ) => Promise<ReadonlyMap<string, IndexedObject>>;
+  readonly readPackMetadata?: (
+    oids: readonly string[],
+  ) => Promise<ReadonlyMap<string, PackRepresentationMetadata>>;
+  readonly readCachedPackEntry?: (
+    metadata: PackRepresentationMetadata,
+    preferredBaseOid: string | null,
+  ) => CachedPackEntry | null;
+  readonly readCachedPackEntries?: (
+    requests: readonly CachedPackEntryRequest[],
+  ) => Promise<ReadonlyMap<string, CachedPackEntry>>;
+  readonly readReachableObjects?: (
+    roots: ReadonlySet<string>,
+    candidates: ReadonlySet<string>,
+    shallow: ReadonlySet<string>,
+  ) => Promise<ReadonlySet<string>>;
 }
 
 const readRequest = async (body: ReadableStream<Uint8Array>): Promise<UploadPackRequest> => {
@@ -239,6 +317,26 @@ const reachable = async (
   return { objects, held };
 };
 
+/** Validate negotiation boundaries without walking the closure behind every `have`. */
+const heldObjects = async (
+  oids: readonly string[],
+  source: UploadPackObjectSource,
+): Promise<ReadonlySet<string>> => {
+  const unique = [...new Set(oids)];
+  const indexed =
+    source.readIndexedObjects === undefined
+      ? new Map<string, IndexedObject>()
+      : await source.readIndexedObjects(unique);
+  const held = new Set<string>();
+
+  for (const oid of unique) {
+    if (indexed.has(oid) || (await source.has(oid))) {
+      held.add(oid);
+    }
+  }
+  return held;
+};
+
 const packHeader = (count: number): Uint8Array => {
   const bytes = new Uint8Array(12);
   bytes.set(encoder.encode("PACK"));
@@ -255,6 +353,8 @@ const PACK_KINDS = {
 } satisfies Record<ObjectType, number>;
 
 const REF_DELTA = 7;
+const PACK_REPRESENTATION_READ_BYTES = 8 * 1024 * 1024;
+const PACK_REPRESENTATION_READ_KEYS = 96;
 
 const entryHeader = (kind: number, size: number): Uint8Array => {
   const bytes: number[] = [];
@@ -285,6 +385,7 @@ async function* deflate(bytes: Uint8Array): AsyncGenerator<Uint8Array> {
 interface PackOrder {
   readonly oids: readonly string[];
   readonly deltaBases: ReadonlyMap<string, string>;
+  readonly metadata: ReadonlyMap<string, PackRepresentationMetadata>;
 }
 
 /**
@@ -295,22 +396,33 @@ interface PackOrder {
 const orderPack = async (
   oids: readonly string[],
   source: UploadPackObjectSource,
+  timings: UploadPackTimings,
 ): Promise<PackOrder> => {
   const included = new Set(oids);
   const deltaBases = new Map<string, string>();
   const dependents = new Map<string, string[]>();
   const dependentOids = new Set<string>();
 
+  const metadata =
+    source.readPackMetadata === undefined
+      ? new Map<string, PackRepresentationMetadata>()
+      : await timedStorageRead(timings, () => source.readPackMetadata!(oids));
   const storedBases =
-    source.readDeltaBases === undefined
+    metadata.size > 0
       ? new Map(
-          await Promise.all(
-            oids.map(async (oid) => [oid, await source.readDeltaBase(oid)] as const),
-          ).then((entries) =>
-            entries.filter((entry): entry is readonly [string, string] => entry[1] !== null),
+          [...metadata].flatMap(([oid, entry]) =>
+            entry.delta === null ? [] : ([[oid, entry.delta.baseOid]] as const),
           ),
         )
-      : await source.readDeltaBases(oids);
+      : source.readDeltaBases === undefined
+        ? new Map(
+            await Promise.all(
+              oids.map(async (oid) => [oid, await source.readDeltaBase(oid)] as const),
+            ).then((entries) =>
+              entries.filter((entry): entry is readonly [string, string] => entry[1] !== null),
+            ),
+          )
+        : await timedStorageRead(timings, () => source.readDeltaBases!(oids));
 
   for (const oid of oids) {
     const baseOid = storedBases.get(oid) ?? null;
@@ -357,7 +469,7 @@ const orderPack = async (
     }
   }
 
-  return { oids: ordered, deltaBases };
+  return { oids: ordered, deltaBases, metadata };
 };
 
 async function* packBytes(
@@ -365,32 +477,109 @@ async function* packBytes(
   clientObjects: ReadonlySet<string>,
   thin: boolean,
   source: UploadPackObjectSource,
+  clientShallow: ReadonlySet<string>,
+  timings: UploadPackTimings,
 ): AsyncGenerator<Uint8Array> {
   const hash = new Sha1();
   const emit = function* (bytes: Uint8Array): Generator<Uint8Array> {
+    const started = performance.now();
     hash.update(bytes);
+    timings.hashMs += performance.now() - started;
+    timings.responseBytes += bytes.length;
     yield bytes;
   };
 
-  const order = await orderPack(oids, source);
+  const planningStarted = performance.now();
+  const order = await orderPack(oids, source, timings);
+  const included = new Set(order.oids);
+  const candidateClientBases = new Set(
+    [...order.deltaBases.values()].filter((oid) => !included.has(oid) && !clientObjects.has(oid)),
+  );
+  const reachableClientBases =
+    thin && source.readReachableObjects !== undefined
+      ? await timedStorageRead(timings, () =>
+          source.readReachableObjects!(clientObjects, candidateClientBases, clientShallow),
+        )
+      : new Set<string>();
+  timings.packPlanningMs += performance.now() - planningStarted;
+  timings.objects = order.oids.length;
+  const availableClientObjects = new Set([...clientObjects, ...reachableClientBases]);
   const emitted = new Set<string>();
+  let prefetched = new Map<string, CachedPackEntry>();
+  let prefetchedUntil = 0;
 
   yield* emit(packHeader(order.oids.length));
 
-  for (const oid of order.oids) {
+  for (let index = 0; index < order.oids.length; index += 1) {
+    if (source.readCachedPackEntries !== undefined && index === prefetchedUntil) {
+      const requests: CachedPackEntryRequest[] = [];
+      const available = new Set(emitted);
+      let compressedBytes = 0;
+      let keys = 0;
+      let next = index;
+
+      for (; next < order.oids.length; next += 1) {
+        const candidateOid = order.oids[next]!;
+        const candidateBase = order.deltaBases.get(candidateOid);
+        const baseIsAvailable =
+          candidateBase !== undefined &&
+          (available.has(candidateBase) || (thin && availableClientObjects.has(candidateBase)));
+        const metadata = order.metadata.get(candidateOid);
+        const representation =
+          baseIsAvailable && metadata?.delta?.compressed !== null
+            ? metadata?.delta?.compressed
+            : metadata?.full;
+
+        if (
+          representation !== undefined &&
+          representation !== null &&
+          requests.length > 0 &&
+          (compressedBytes + representation.size > PACK_REPRESENTATION_READ_BYTES ||
+            keys + representation.chunkCount > PACK_REPRESENTATION_READ_KEYS)
+        ) {
+          break;
+        }
+
+        if (metadata !== undefined && representation !== undefined && representation !== null) {
+          requests.push({
+            metadata,
+            preferredBaseOid: baseIsAvailable ? candidateBase : null,
+          });
+          compressedBytes += representation.size;
+          keys += representation.chunkCount;
+        }
+        available.add(candidateOid);
+      }
+
+      prefetched = new Map(
+        await timedStorageRead(timings, () => source.readCachedPackEntries!(requests)),
+      );
+      prefetchedUntil = Math.max(next, index + 1);
+    }
+
+    const oid = order.oids[index]!;
     const plannedBase = order.deltaBases.get(oid);
     const baseIsAvailable =
       plannedBase !== undefined &&
-      (emitted.has(plannedBase) || (thin && clientObjects.has(plannedBase)));
-    const cachedDelta = baseIsAvailable
-      ? await readOptionalCache(
-          source.readDeltaPackEntry === undefined
-            ? undefined
-            : () => source.readDeltaPackEntry!(oid),
-        )
-      : null;
+      (emitted.has(plannedBase) || (thin && availableClientObjects.has(plannedBase)));
+    const plannedMetadata = order.metadata.get(oid);
+    const plannedEntry =
+      prefetched.get(oid) ??
+      (source.readCachedPackEntry === undefined || plannedMetadata === undefined
+        ? null
+        : source.readCachedPackEntry(plannedMetadata, baseIsAvailable ? plannedBase : null));
+    const cachedDelta =
+      plannedEntry === null && baseIsAvailable
+        ? await readOptionalCache(
+            source.readDeltaPackEntry === undefined
+              ? undefined
+              : () => source.readDeltaPackEntry!(oid),
+          )
+        : null;
     const storedDelta =
-      baseIsAvailable && cachedDelta === null ? await source.readDelta(oid) : null;
+      plannedEntry === null && baseIsAvailable && cachedDelta === null
+        ? await timedStorageRead(timings, () => source.readDelta(oid))
+        : null;
     const delta =
       cachedDelta !== null && cachedDelta.baseOid === plannedBase
         ? cachedDelta
@@ -406,7 +595,15 @@ async function* packBytes(
     let bytes: Uint8Array | null;
     let compressed: Uint8Array | null;
 
-    if (delta === null) {
+    if (plannedEntry?.kind === "delta") {
+      header = entryHeader(REF_DELTA, plannedEntry.size);
+      bytes = null;
+      compressed = plannedEntry.compressed;
+    } else if (plannedEntry?.kind === "full") {
+      header = entryHeader(PACK_KINDS[plannedEntry.type], plannedEntry.size);
+      bytes = null;
+      compressed = plannedEntry.compressed;
+    } else if (delta === null) {
       const cached = await readOptionalCache(
         source.readFullPackEntry === undefined ? undefined : () => source.readFullPackEntry!(oid),
       );
@@ -415,7 +612,7 @@ async function* packBytes(
         bytes = null;
         compressed = cached.compressed;
       } else {
-        const object = await source.read(oid);
+        const object = await timedStorageRead(timings, () => source.read(oid));
         if (object === null) {
           throw new UploadPackError(`Object ${oid} vanished while its pack was being written.`);
         }
@@ -430,22 +627,29 @@ async function* packBytes(
     }
 
     yield* emit(header);
-    if (delta !== null) {
-      yield* emit(fromHex(delta.baseOid));
+    const deltaBaseOid = plannedEntry?.kind === "delta" ? plannedEntry.baseOid : delta?.baseOid;
+    if (deltaBaseOid !== undefined) {
+      yield* emit(fromHex(deltaBaseOid));
     }
 
     if (compressed !== null) {
       yield* emit(compressed);
     } else {
+      const deflateStarted = performance.now();
       for await (const chunk of deflate(bytes!)) {
         yield* emit(chunk);
       }
+      timings.deflateMs += performance.now() - deflateStarted;
     }
 
     emitted.add(oid);
   }
 
-  yield hash.digest();
+  const digestStarted = performance.now();
+  const digest = hash.digest();
+  timings.hashMs += performance.now() - digestStarted;
+  timings.responseBytes += digest.length;
+  yield digest;
 }
 
 const streamFrom = (iterator: AsyncIterator<Uint8Array>): ReadableStream<Uint8Array> =>
@@ -555,8 +759,11 @@ async function* uploadPackResult(
   source: UploadPackObjectSource,
   advertisedOids: ReadonlySet<string>,
   shallow: ReadonlySet<string>,
+  timings: UploadPackTimings,
 ): AsyncGenerator<Uint8Array> {
+  const requestStarted = performance.now();
   const request = await readRequest(body);
+  timings.requestMs += performance.now() - requestStarted;
   if (request.wants.length === 0) {
     throw new UploadPackError("An upload-pack request must want at least one object.");
   }
@@ -572,6 +779,7 @@ async function* uploadPackResult(
     return;
   }
 
+  const negotiationStarted = performance.now();
   const depthPlan =
     request.depth === undefined
       ? null
@@ -593,7 +801,14 @@ async function* uploadPackResult(
   }
 
   const clientBoundaries = new Set([...shallow, ...request.shallow]);
-  const client = await reachable(request.haves, source, false, new Set(), clientBoundaries);
+  const commonHaves = await heldObjects(request.haves, source);
+  // Deepening through an old graft needs the client's full closure for the final
+  // subtraction. Normal fetches stop at common `have` commits and never need to
+  // enumerate the history and trees the client already owns.
+  const client =
+    depthPlan !== null && depthPlan.unshallow.size > 0
+      ? await reachable(request.haves, source, false, new Set(), clientBoundaries)
+      : { objects: [...commonHaves], held: commonHaves };
   const acknowledgements = request.haves.filter((oid) => client.held.has(oid));
   const acknowledgement = acknowledgements.at(-1);
 
@@ -623,8 +838,16 @@ async function* uploadPackResult(
     depthPlan?.shallow ?? shallow,
   );
   const missing = wanted.objects.filter((oid) => !client.held.has(oid));
+  timings.negotiationMs += performance.now() - negotiationStarted;
   const prefix = pktLine(acknowledgement === undefined ? "NAK\n" : `ACK ${acknowledgement}\n`);
-  const pack = packBytes(missing, client.held, request.capabilities.includes(THIN_PACK), source);
+  const pack = packBytes(
+    missing,
+    client.held,
+    request.capabilities.includes(THIN_PACK),
+    source,
+    clientBoundaries,
+    timings,
+  );
 
   if (request.capabilities.includes(SIDE_BAND_64K)) {
     yield* sideband(prefix, pack);
@@ -641,5 +864,17 @@ export const uploadPackResultStream = (
   source: UploadPackObjectSource,
   advertisedOids: ReadonlySet<string>,
   shallow: ReadonlySet<string> = new Set(),
-): ReadableStream<Uint8Array> =>
-  streamFrom(uploadPackResult(body, source, advertisedOids, shallow));
+): ReadableStream<Uint8Array> => {
+  const timings = createUploadPackTimings();
+  const traced = async function* (): AsyncGenerator<Uint8Array> {
+    try {
+      for await (const chunk of uploadPackResult(body, source, advertisedOids, shallow, timings)) {
+        timings.firstByteMs ??= performance.now() - timings.startedAt;
+        yield chunk;
+      }
+    } finally {
+      logUploadPackTimings(timings);
+    }
+  };
+  return streamFrom(traced());
+};
