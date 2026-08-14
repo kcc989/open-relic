@@ -136,6 +136,8 @@ export class FakeRepositoryObjects implements RepositoryObjects {
         return object;
       },
       readBlob: (oid) => store.readBlob(oid),
+      readHistory: (revision, limit, offset) => store.readHistory(revision, limit, offset),
+      readFile: (revision, path) => store.readFile(revision, path),
       hasObject: (oid) => store.hasObject(oid),
       importBranch: (request) => store.importBranch(request),
       resetImport: (init) => store.resetImport(init),

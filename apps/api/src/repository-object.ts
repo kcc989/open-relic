@@ -24,6 +24,8 @@ import {
   type ForkState,
   type ForkTarget,
   type ImportedBranch,
+  type RepositoryHistoryResult,
+  type RepositoryFileResult,
   type ReceivePackOutcome,
   type RemoteBranchRequest,
   type RepositoryInit,
@@ -167,6 +169,18 @@ export class RepositoryObject extends DurableObject {
 
   readBlob(oid: string): Promise<ReadableStream<Uint8Array> | null> {
     return this.#store.readBlob(oid);
+  }
+
+  readHistory(
+    revision: string | null,
+    limit: number,
+    offset: number,
+  ): Promise<RepositoryHistoryResult> {
+    return this.#store.readHistory(revision, limit, offset);
+  }
+
+  readFile(revision: string | null, path: string): Promise<RepositoryFileResult> {
+    return this.#store.readFile(revision, path);
   }
 
   hasObject(oid: string): Promise<boolean> {

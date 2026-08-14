@@ -42,7 +42,7 @@ behavior that has not been built at all rather than behavior built differently:
 |            | Open Relic today                          | Artifacts                                                 |
 | ---------- | ----------------------------------------- | --------------------------------------------------------- |
 | Namespaces | created and deleted explicitly            | created implicitly with the first repo; list and get only |
-| Contents   | direct objects served; log/files `501`    | serve log, objects, and files                             |
+| Contents   | log, objects, and files served            | serve log, objects, and files                             |
 | Import     | durable public HTTPS single-branch import | import one remote branch                                  |
 | Fork       | implemented                               | copy one stable repository snapshot                       |
 | `source`   | set by fork and import                    | records where copied repository contents came from        |
