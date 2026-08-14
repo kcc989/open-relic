@@ -20,7 +20,7 @@ export interface PushCommand {
 
 /** What `git push` asks for against our advertisement. */
 export const CLIENT_CAPABILITIES: readonly string[] = [
-  "report-status",
+  "report-status-v2",
   "side-band-64k",
   "ofs-delta",
   "agent=git/2.99.0",
@@ -54,15 +54,19 @@ export const pushBody = (options: {
   readonly commands: readonly PushCommand[];
   readonly objects?: readonly GitObject[];
   readonly capabilities?: readonly string[];
+  readonly pushOptions?: readonly string[];
   /** For the packs a test wants to be wrong on purpose. */
   readonly pack?: Uint8Array<ArrayBuffer>;
 }): Uint8Array<ArrayBuffer> => {
   const capabilities = options.capabilities ?? CLIENT_CAPABILITIES;
   const pack = options.pack ?? (options.objects === undefined ? null : packOf(options.objects));
+  const pushOptions = capabilities.includes("push-options")
+    ? concat(...(options.pushOptions ?? []).map((option) => pktLine(option)), flushPkt())
+    : new Uint8Array(0);
 
   return pack === null
-    ? commandLines(options.commands, capabilities)
-    : concat(commandLines(options.commands, capabilities), pack);
+    ? concat(commandLines(options.commands, capabilities), pushOptions)
+    : concat(commandLines(options.commands, capabilities), pushOptions, pack);
 };
 
 export interface Report {

@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
-import { PktLineReader } from "../src/git/pkt-line.ts";
+import { flushPkt, pktLine, PktLineReader } from "../src/git/pkt-line.ts";
 import {
   REJECTIONS,
   ReceivePackError,
   accepted,
+  readPushOptions,
   readReceivePackRequest,
   receivePackResult,
   rejected,
@@ -81,6 +82,46 @@ describe("the ref update commands a client sends", () => {
     expect(await new Response(lines.rest()).text()).toBe("PACK…");
   });
 
+  test("reads push options as their own section before the pack", async () => {
+    const body = new Uint8Array([
+      ...commandLines([{ newOid: MAIN, name: "refs/heads/main" }], ["push-options"]),
+      ...encoder.encode("000cdeploy=1"),
+      ...encoder.encode("0008ci=1"),
+      ...encoder.encode("0000PACK…"),
+    ]);
+    const { lines, request } = read(body);
+    const { capabilities } = await request;
+
+    expect(await readPushOptions(lines, capabilities)).toEqual(["deploy=1", "ci=1"]);
+    expect(await new Response(lines.rest()).text()).toBe("PACK…");
+  });
+
+  test("accepts non-ASCII push options", async () => {
+    const body = new Uint8Array([
+      ...commandLines([{ newOid: MAIN, name: "refs/heads/main" }], ["push-options"]),
+      ...pktLine("reason=café"),
+      ...flushPkt(),
+      ...encoder.encode("PACK…"),
+    ]);
+    const { lines, request } = read(body);
+    const { capabilities } = await request;
+
+    expect(await readPushOptions(lines, capabilities)).toEqual(["reason=café"]);
+    expect(await new Response(lines.rest()).text()).toBe("PACK…");
+  });
+
+  test("rejects a push option containing a protocol control byte", async () => {
+    const body = new Uint8Array([
+      ...commandLines([{ newOid: MAIN, name: "refs/heads/main" }], ["push-options"]),
+      ...encoder.encode("0008bad\n"),
+      ...encoder.encode("0000"),
+    ]);
+    const { lines, request } = read(body);
+    const { capabilities } = await request;
+
+    expect(readPushOptions(lines, capabilities)).rejects.toThrow(ReceivePackError);
+  });
+
   test("a body with nothing in it is a push of nothing, not an error", async () => {
     const { request } = read(new Uint8Array(0));
 
@@ -97,6 +138,14 @@ describe("the ref update commands a client sends", () => {
     const { request } = read(encoder.encode("0013not a command at\n0000"));
 
     expect(request).rejects.toThrow(ReceivePackError);
+  });
+
+  test("rejects a capability the server did not advertise", async () => {
+    const { request } = read(
+      commandLines([{ newOid: MAIN, name: "refs/heads/main" }], ["report-status", "mystery"]),
+    );
+
+    expect(request).rejects.toThrow('The capability "mystery" is not supported.');
   });
 });
 
@@ -145,6 +194,15 @@ describe("report-status", () => {
     // Bytes on a connection the client considers finished are worse than
     // silence: it is not reading them, and the next request finds them there.
     expect(receivePackResult(report, ["side-band-64k"])).toHaveLength(0);
+  });
+
+  test("report-status-v2 asks for the same report when no hook rewrote a ref", () => {
+    expect(decoder.decode(receivePackResult(report, ["report-status-v2"]))).toBe(
+      "000eunpack ok\n" +
+        "0017ok refs/heads/main\n" +
+        "0027ng refs/heads/old non-fast-forward\n" +
+        "0000",
+    );
   });
 
   test("cannot be made to carry a line the client wrote itself", () => {
@@ -205,14 +263,17 @@ describe("what this server accepts", () => {
     expect(screen([{ oldOid: MAIN, newOid: NEXT, name: "refs/heads/main" }])).toEqual([null]);
   });
 
+  test("lets a delete of a held ref through", () => {
+    expect(screen([{ oldOid: MAIN, name: "refs/heads/main" }])).toEqual([null]);
+  });
+
+  test("refuses a stale delete", () => {
+    expect(screen([{ oldOid: NEXT, name: "refs/heads/main" }])).toEqual([REJECTIONS.stale]);
+  });
+
   const refused: ReadonlyArray<
     readonly [string, { oldOid?: string; newOid?: string; name: string }, string]
   > = [
-    [
-      "a delete, which the advertisement never offered",
-      { oldOid: MAIN, name: "refs/heads/main" },
-      REJECTIONS.delete,
-    ],
     [
       "a create of a ref we already hold",
       { newOid: NEXT, name: "refs/heads/main" },

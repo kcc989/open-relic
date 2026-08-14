@@ -3,6 +3,7 @@ import { mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { fromHex } from "../src/sha1.ts";
 import { createGitTestApp, type TestApp } from "./support/app.ts";
 
 const git = Bun.which("git");
@@ -21,6 +22,7 @@ let harness: TestApp;
 let server: ReturnType<typeof Bun.serve>;
 let workingTree: string;
 let remote: string;
+let receivePackBodies: Uint8Array[];
 
 const runGitAt = async (cwd: string, ...args: readonly string[]): Promise<GitResult> => {
   const child = Bun.spawn([git, ...args], {
@@ -114,10 +116,21 @@ const expectRemoteMainAt = async (source: string): Promise<void> => {
 
 beforeEach(async () => {
   harness = await createGitTestApp();
+  receivePackBodies = [];
   server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
-    fetch: (request) => harness.app.fetch(request),
+    fetch: async (request) => {
+      const capture = request.url.endsWith("/git-receive-pack")
+        ? request
+            .clone()
+            .arrayBuffer()
+            .then((body) => receivePackBodies.push(new Uint8Array(body)))
+        : Promise.resolve(0);
+      const response = await harness.app.fetch(request);
+      await capture;
+      return response;
+    },
   });
 
   workingTree = mkdtempSync(join(tmpdir(), "open-relic-git-client-"));
@@ -153,7 +166,7 @@ describe("a real Git client over Smart HTTP", () => {
     await expectRemoteMainAt("HEAD");
   });
 
-  test("rejects a forced non-fast-forward push without moving the ref", async () => {
+  test("rejects a plain non-fast-forward, then accepts it when forced", async () => {
     await commit("Anvil firmware\n", "First");
     await gitSucceeds("push", "--porcelain", remote, "HEAD:refs/heads/main");
     await gitSucceeds("branch", "accepted", "HEAD");
@@ -162,12 +175,77 @@ describe("a real Git client over Smart HTTP", () => {
     await gitSucceeds("add", "README.md");
     await gitSucceeds("commit", "--quiet", "--amend", "-m", "Rewritten");
 
-    const rejected = await runGit("push", "--force", "--porcelain", remote, "HEAD:refs/heads/main");
+    const rejected = await runGit("push", "--porcelain", remote, "HEAD:refs/heads/main");
 
     expect(rejected.exitCode).not.toBe(0);
-    expect(rejected.stdout).toContain("[remote rejected]");
+    expect(rejected.stdout).toContain("[rejected]");
     expect(`${rejected.stdout}\n${rejected.stderr}`).toContain("non-fast-forward");
     await expectRemoteMainAt("accepted");
+
+    const forced = await runGit("push", "--force", "--porcelain", remote, "HEAD:refs/heads/main");
+
+    expect(forced.exitCode).toBe(0);
+    expect(forced.stdout).toContain("forced update");
+    await expectRemoteMainAt("HEAD");
+  });
+
+  test("deletes a ref", async () => {
+    await commit("Anvil firmware\n", "First");
+    await gitSucceeds("push", "--porcelain", remote, "HEAD:refs/heads/main");
+
+    const deleted = await runGit("push", "--porcelain", remote, ":refs/heads/main");
+    const refs = await gitSucceeds("ls-remote", remote, "refs/heads/main");
+
+    expect(deleted.exitCode).toBe(0);
+    expect(deleted.stdout).toContain("[deleted]");
+    expect(refs).toBe("");
+  });
+
+  test("accepts an atomic multi-ref push with push options", async () => {
+    await commit("Anvil firmware\n", "First");
+
+    const pushed = await runGit(
+      "push",
+      "--atomic",
+      "--push-option=deploy=production",
+      "--porcelain",
+      remote,
+      "HEAD:refs/heads/main",
+      "HEAD:refs/heads/release",
+    );
+
+    expect(pushed.exitCode).toBe(0);
+    expect(pushed.stdout).toContain("refs/heads/main");
+    expect(pushed.stdout).toContain("refs/heads/release");
+  });
+
+  test("sends and accepts a thin pack against objects from the previous push", async () => {
+    const original = Array.from(
+      { length: 5_000 },
+      (_, line) => `Anvil firmware line ${line.toString().padStart(4, "0")}\n`,
+    ).join("");
+    await commit(original, "First");
+    await gitSucceeds("push", "--porcelain", remote, "HEAD:refs/heads/main");
+    const baseBlob = await gitSucceeds("rev-parse", "HEAD:README.md");
+
+    await commit(original.replace("line 2500", "line 2500 revised"), "Second");
+    receivePackBodies = [];
+    const pushed = await runGit(
+      "-c",
+      "pack.window=50",
+      "-c",
+      "pack.depth=10",
+      "push",
+      "--porcelain",
+      remote,
+      "HEAD:refs/heads/main",
+    );
+
+    expect(pushed.exitCode).toBe(0);
+    const body = receivePackBodies[0];
+    expect(body).toBeDefined();
+    expect(contains(body!, fromHex(baseBlob))).toBe(true);
+    await expectRemoteMainAt("HEAD");
   });
 
   test("keeps a real repository's fresh-clone pack within four times its compact source and push packs", async () => {
@@ -245,3 +323,15 @@ describe("a real Git client over Smart HTTP", () => {
     expect(await gitSucceedsAt(checkout, "fsck", "--full")).toBe("");
   }, 30_000);
 });
+
+const contains = (haystack: Uint8Array, needle: Uint8Array): boolean => {
+  outer: for (let at = 0; at <= haystack.length - needle.length; at += 1) {
+    for (let index = 0; index < needle.length; index += 1) {
+      if (haystack[at + index] !== needle[index]) {
+        continue outer;
+      }
+    }
+    return true;
+  }
+  return false;
+};

@@ -254,7 +254,7 @@ curl 'http://localhost:1337/git/acme/demo.git/info/refs?service=git-receive-pack
 ```text
 001f# service=git-receive-pack
 0000
-00950000000000000000000000000000000000000000 capabilities^{}\0report-status side-band-64k …
+00be0000000000000000000000000000000000000000 capabilities^{}\0report-status report-status-v2 delete-refs …
 0000
 ```
 
@@ -267,15 +267,17 @@ tags are not peeled — both belong to the upload-pack advertisement.
 | Capability                   | Why                                                                   |
 | ---------------------------- | --------------------------------------------------------------------- |
 | `report-status`              | Per-ref accept or reject, which is how a push reports anything at all |
+| `report-status-v2`           | The extensible status form used by current Git clients                |
+| `delete-refs`                | A zero new object id deletes the named ref                            |
 | `side-band-64k`              | Progress and errors alongside the response                            |
+| `atomic`                     | All requested ref changes apply, or none do                           |
 | `ofs-delta`                  | Offset deltas in the pack                                             |
-| `no-thin`                    | Never send a delta whose base is not in the pack                      |
+| `push-options`               | Opaque receive-hook options are accepted before the pack              |
 | `object-format=sha1`         | The only hash we store                                                |
 | `agent=open-relic/<version>` | Identifies the server in a client's trace                             |
 
-`delete-refs`, `atomic`, `push-options`, and `report-status-v2` are deliberately
-absent: an unadvertised capability is how a client learns not to use one, and
-advertising something we do not honor is worse than not advertising it.
+The absence of `no-thin` is also a promise: a ref-delta may name a base object
+the repository already holds.
 
 An advertisement is Git's protocol rather than JSON, so it is the one response
 that is not a v4 envelope. Failures on this path still are — a Git client reads
@@ -326,19 +328,22 @@ the design:
 
 1. **Read the commands.** The capabilities travel on the first one and apply to
    the whole push.
-2. **Screen each command** against the refs we hold — deletes, malformed names,
-   a ref named twice, a create of something that exists, an update from a value
-   the ref no longer has. This is pure policy and lives in `git/receive-pack.ts`
-   with the rest of the wire; nothing here reads storage.
-3. **Read the pack** into the object store, streaming. A push whose commands are
+2. **Read push options**, when negotiated, as a pkt-line section before the
+   pack. They are validated and consumed; there are no receive hooks to consume
+   them yet.
+3. **Screen each command** against the refs we hold — malformed names, a ref
+   named twice, a create of something that exists, or an update/delete from a
+   value the ref no longer has. This is pure policy and lives in
+   `git/receive-pack.ts`; nothing here reads object storage.
+4. **Read the pack** into the object store, streaming. A push whose commands are
    all deletes carries no pack, so none is waited for.
-4. **Walk what the push claims.** From each new ref value, out through commits,
+5. **Walk what the push claims.** From each non-delete value, out through commits,
    trees, and tags, confirming the repository holds every one. The walk stops at
    objects a previous push already proved, so the cost of a push is
    proportional to what it added rather than to the history.
-5. **Check the fast-forward.** A commits-only walk back from the new tip looking
-   for the old one.
-6. **Move the refs**, all of them and any HEAD rewrite, in one transaction.
+6. **Move the refs** in one transaction. Without `atomic`, valid commands still
+   apply when a sibling is rejected. With it, one rejection marks every other
+   command `atomic push failure` and none apply.
 
 **Blobs are skipped in the walk.** They are the expensive half of any real
 repository — most of the objects and nearly all of the bytes — and a pack that
@@ -350,18 +355,16 @@ Objects written by a push that then fails are left in place. A ref is the only
 thing that makes an object reachable, so orphans are a storage cost rather than
 a correctness problem; sweeping them is separate work.
 
-**Deletes and non-fast-forward updates are rejected**, per-command, in
-`report-status` — matching the advertisement, which offers neither `delete-refs`
-nor any way to force. A client that sends one anyway is told so rather than
-quietly ignored.
+Deletes are ordinary conditional commands, and a force update is accepted when
+its old value still matches. A plain Git client rejects a non-fast-forward
+locally; `--force` is what makes it send that same old/new command to the server.
 
 | `ng` reason                                 | When                                              |
 | ------------------------------------------- | ------------------------------------------------- |
-| `deleting a ref is not supported`           | The new value is the zero id                      |
-| `non-fast-forward`                          | The old tip is not behind the new one             |
 | `missing necessary objects`                 | The connectivity walk found a gap                 |
 | `the ref has moved since it was advertised` | The old value is not what we hold                 |
 | `funny refname`                             | Not under `refs/`, or not a name Git would create |
+| `atomic push failure`                       | A sibling command in an atomic push was rejected  |
 | `n/a (unpacker error)`                      | The pack could not be read; `unpack` says why     |
 
 HEAD retargets in exactly one case: the repository held no refs at all and the
@@ -373,12 +376,6 @@ once there is anything to decide between. The registry's `default_branch` and
 `last_push_at` are stamped afterwards, outside the transaction: they are copies
 for the REST surface, and a stamp that fails leaves them stale rather than
 leaving a ref half-moved.
-
-The Worker's CPU ceiling is five minutes, which is what a first push of a real
-repository needs and what the fast-forward walk is budgeted against — proving a
-push is _not_ a fast-forward means reading every commit the new tip reaches, so
-it gives up after `FAST_FORWARD_COMMIT_BUDGET` commits and says so on the
-progress band rather than being killed mid-request.
 
 ## Clone and fetch
 
@@ -460,9 +457,9 @@ the object. The limit is 32 MiB because resolving a delta holds three of these
 at once; lifting it means inflating whole objects straight into chunks instead
 of into one buffer, since only a delta's base genuinely has to be resident.
 
-Both delta encodings resolve, including chains several deep. Thin packs are out
-of scope, which is what advertising `no-thin` promises the client: a delta whose
-base is nowhere is a `missing-base` error rather than a case to handle.
+Both delta encodings resolve, including chains several deep. A thin ref-delta
+can read its base from an earlier push through the same object-store seam; a
+base absent from both the pack and repository remains a `missing-base` error.
 
 Failures are a `PackError` with a code, and the code is a Git fact rather than
 an HTTP one — the object owns Git and the Worker owns the envelope, so push maps
@@ -574,10 +571,10 @@ default.
 `bun test` requires `git` on `PATH` and fails at startup when it is missing. The
 real-client tests serve the runtime-agnostic Hono application over a local HTTP
 socket, create a repository through the same application, and have a real Git
-binary push into it. Git's receive-pack report and a second advertisement prove
-that a commit moves its ref, while a forced non-fast-forward push is rejected
-without moving it. Pkt-line encoding and pack reading remain independently
-covered by table-driven tests, including pack fixtures generated by Git itself.
+binary push into it. They cover create, delete, force, atomic, push options, and
+a captured thin ref-delta against a blob from the previous push. Pkt-line
+encoding and pack reading remain independently covered by table-driven tests,
+including pack fixtures generated by Git itself.
 
 This does not run inside the Workers runtime. It covers the router, protocol,
 pack reader, migrations, and repository behavior, but not the deployed

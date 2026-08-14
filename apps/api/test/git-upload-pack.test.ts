@@ -106,7 +106,9 @@ describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
         method: "POST",
         headers: { Authorization: `Bearer ${harness.repositoryToken}` },
         body: pushBody({
-          commands: [{ oldOid: FIRST.oid, newOid: REJECTED.oid, name: MAIN }],
+          // The stale old value rejects the command after the pack has already
+          // streamed into storage, leaving REJECTED as an orphan.
+          commands: [{ oldOid: SECOND.oid, newOid: REJECTED.oid, name: MAIN }],
           objects: [REJECTED],
         }),
       }),

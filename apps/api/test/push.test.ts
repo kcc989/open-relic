@@ -5,7 +5,13 @@ import { ZERO_OID } from "../src/object.ts";
 import { REJECTIONS, RepositoryStore, type ReceivePackOutcome } from "../src/repository-store.ts";
 import { createTestRepositoryStorage, type TestRepositoryStorage } from "./support/database.ts";
 import { blob, commit, tag, tree, treeEntry, type GitObject } from "./support/git-objects.ts";
-import { streamOf } from "./support/pack.ts";
+import {
+  buildDelta,
+  buildPack,
+  copyInstruction,
+  insertInstruction,
+  streamOf,
+} from "./support/pack.ts";
 import { packOf, pushBody, readReport, type PushCommand } from "./support/receive-pack.ts";
 
 /**
@@ -52,6 +58,7 @@ const push = (options: {
   readonly commands: readonly PushCommand[];
   readonly objects?: readonly GitObject[];
   readonly capabilities?: readonly string[];
+  readonly pushOptions?: readonly string[];
   readonly pack?: Uint8Array<ArrayBuffer>;
 }): Promise<ReceivePackOutcome> => store.receivePack(streamOf(pushBody(options)));
 
@@ -179,7 +186,7 @@ describe("a second push", () => {
     expect(opened.kv.get(HEAD_KEY)).toBe("ref: refs/heads/main\n");
   });
 
-  test("rejects a rewind and leaves the ref where it was", async () => {
+  test("accepts a forced rewind", async () => {
     await push({
       commands: [{ oldOid: FIRST.oid, newOid: SECOND.oid, name: MAIN }],
       objects: SECOND_OBJECTS,
@@ -190,30 +197,51 @@ describe("a second push", () => {
       objects: [],
     });
 
-    expect(report(outcome).lines).toEqual(["unpack ok", `ng ${MAIN} ${REJECTIONS.nonFastForward}`]);
-    expect(outcome.accepted).toBe(false);
-    expect(await advertised()).toContain(`${SECOND.oid} ${MAIN}\0`);
+    expect(report(outcome).lines).toEqual(["unpack ok", `ok ${MAIN}`]);
+    expect(outcome.accepted).toBe(true);
+    expect(await advertised()).toContain(`${FIRST.oid} ${MAIN}\0`);
   });
 
-  test("rejects an unrelated history, which is the other non-fast-forward", async () => {
+  test("accepts a forced update to unrelated history", async () => {
     const outcome = await push({
       commands: [{ oldOid: FIRST.oid, newOid: ELSEWHERE.oid, name: MAIN }],
       objects: [ELSEWHERE],
     });
 
-    expect(report(outcome).lines).toEqual(["unpack ok", `ng ${MAIN} ${REJECTIONS.nonFastForward}`]);
-    expect(await advertised()).toContain(`${FIRST.oid} ${MAIN}\0`);
+    expect(report(outcome).lines).toEqual(["unpack ok", `ok ${MAIN}`]);
+    expect(await advertised()).toContain(`${ELSEWHERE.oid} ${MAIN}\0`);
   });
 
-  test("rejects a delete rather than silently ignoring it", async () => {
-    // `delete-refs` is unadvertised, so a client should not send one; one that
-    // does is told so.
+  test("deletes a ref", async () => {
     const outcome = await push({
       commands: [{ oldOid: FIRST.oid, newOid: ZERO_OID, name: MAIN }],
     });
 
-    expect(report(outcome).lines).toEqual(["unpack ok", `ng ${MAIN} ${REJECTIONS.delete}`]);
-    expect(await advertised()).toContain(`${FIRST.oid} ${MAIN}\0`);
+    expect(report(outcome).lines).toEqual(["unpack ok", `ok ${MAIN}`]);
+    expect(outcome.accepted).toBe(true);
+    expect(await advertised()).toContain("capabilities^{}");
+  });
+
+  test("accepts a thin pack whose ref-delta base arrived in the first push", async () => {
+    const shared = README.bytes.subarray(0, README.bytes.length - 1);
+    const suffix = REVISED.bytes.subarray(shared.length);
+    const delta = buildDelta(README.bytes.length, REVISED.bytes.length, [
+      copyInstruction(0, shared.length),
+      insertInstruction(suffix),
+    ]);
+    const thin = buildPack([
+      { kind: "object", type: SECOND.type, bytes: SECOND.bytes },
+      { kind: "object", type: SECOND_ROOT.type, bytes: SECOND_ROOT.bytes },
+      { kind: "ref-delta", baseOid: README.oid, delta },
+    ]).bytes;
+
+    const outcome = await push({
+      commands: [{ oldOid: FIRST.oid, newOid: SECOND.oid, name: MAIN }],
+      pack: thin,
+    });
+
+    expect(report(outcome).lines).toEqual(["unpack ok", `ok ${MAIN}`]);
+    expect((await store.readObject(REVISED.oid))?.bytes).toEqual(REVISED.bytes);
   });
 
   test("rejects a push against a ref that has moved since the advertisement", async () => {
@@ -402,6 +430,25 @@ describe("a push of several refs at once", () => {
     expect(body).toContain(`${FIRST.oid} refs/heads/main\0`);
     expect(body).toContain(`${ELSEWHERE.oid} refs/heads/side\n`);
   });
+
+  test("an atomic push with one bad command moves none of them", async () => {
+    const outcome = await push({
+      commands: [
+        { newOid: FIRST.oid, name: "refs/heads/main" },
+        { oldOid: FIRST.oid, newOid: SECOND.oid, name: "refs/heads/gone" },
+      ],
+      objects: [...FIRST_OBJECTS, ...SECOND_OBJECTS],
+      capabilities: ["report-status-v2", "atomic"],
+    });
+
+    expect(report(outcome).lines).toEqual([
+      "unpack ok",
+      `ng refs/heads/main ${REJECTIONS.atomic}`,
+      `ng refs/heads/gone ${REJECTIONS.vanished}`,
+    ]);
+    expect(outcome.accepted).toBe(false);
+    expect(await advertised()).toContain("capabilities^{}");
+  });
 });
 
 describe("what the client asked to be told", () => {
@@ -426,6 +473,18 @@ describe("what the client asked to be told", () => {
 
     expect(outcome.report).toHaveLength(0);
     // The push still happened; only the telling was declined.
+    expect(await advertised()).toContain(`${FIRST.oid} ${MAIN}\0`);
+  });
+
+  test("reads push options before the pack and applies the push", async () => {
+    const outcome = await push({
+      commands: [{ newOid: FIRST.oid, name: MAIN }],
+      objects: FIRST_OBJECTS,
+      capabilities: ["report-status-v2", "push-options"],
+      pushOptions: ["deploy=production", "ci.skip"],
+    });
+
+    expect(report(outcome).lines).toEqual(["unpack ok", `ok ${MAIN}`]);
     expect(await advertised()).toContain(`${FIRST.oid} ${MAIN}\0`);
   });
 });

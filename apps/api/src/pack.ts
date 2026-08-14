@@ -9,8 +9,8 @@
  * bought the chunked object store to get, so a buffering rewrite of this file
  * would pass its tests and lose the point.
  *
- * Thin packs are out of scope: `no-thin` is advertised, so a delta whose base
- * is nowhere is an error rather than a case to handle.
+ * A ref-delta may name a base from an earlier push. Reading through the sink is
+ * what makes those thin packs work without retaining prior packs in memory.
  */
 
 import { DeltaError, applyDelta } from "./delta.ts";

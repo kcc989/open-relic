@@ -92,8 +92,14 @@ _Avoid_: garbage collection, cleanup
 
 **Fast-forward**:
 A ref update whose old value is an ancestor of its new one, so nothing that was
-reachable stops being reachable. The only kind of update a push may make.
+reachable stops being reachable. A plain Git client sends only this kind of
+update; replacing history requires a force update.
 _Avoid_: forward update, non-destructive update
+
+**Force update**:
+A ref update the client explicitly sends even though it is not a fast-forward.
+It is still conditional on the ref holding the old value the client saw.
+_Avoid_: forced push, overwrite
 
 **Connectivity**:
 That every object a ref can reach is present. Checked before a push moves a ref,
@@ -107,6 +113,10 @@ _Avoid_: integrity, validation
 The stream of objects a client sends on a push or receives on a fetch, in Git's
 packfile encoding.
 _Avoid_: bundle, archive
+
+**Thin pack**:
+A Pack whose ref-delta omits a base Object the receiver already holds.
+_Avoid_: partial pack
 
 **Delta**:
 An object expressed as edits against another object, its _base_, rather than in
@@ -136,6 +146,15 @@ _Avoid_: ref update request, instruction
 The server's answer to a push: whether the pack could be read, and then one
 accepted-or-rejected line per command, in the order the client sent them.
 _Avoid_: push result, status report
+
+**Atomic push**:
+A push whose Commands either all move their Refs or all fail together.
+_Avoid_: transaction
+
+**Push option**:
+An opaque value a client sends between the Commands and Pack for receive hooks.
+Open Relic accepts and validates these even though it has no hook consumer yet.
+_Avoid_: flag, argument
 
 **Upload-pack**:
 The server side of a fetch or clone: negotiate what the client is missing, then

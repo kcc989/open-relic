@@ -1,12 +1,6 @@
 import { asc, eq, sql } from "drizzle-orm";
 
-import {
-  FAST_FORWARD_COMMIT_BUDGET,
-  findAncestor,
-  findMissingObject,
-  linksToFetch,
-  type WalkOptions,
-} from "./connectivity.ts";
+import { findMissingObject, linksToFetch, type WalkOptions } from "./connectivity.ts";
 import type { SyncSqliteDatabase } from "./db/database.ts";
 import type { SyncKv } from "./db/kv.ts";
 import { REPOSITORY_STATE_ID, refs, repositoryState } from "./db/repository-schema.ts";
@@ -19,12 +13,14 @@ import {
 import { PktLineError, PktLineReader } from "./git/pkt-line.ts";
 import {
   REJECTIONS,
+  ATOMIC_CAPABILITY,
+  PUSH_OPTIONS_CAPABILITY,
   REPORT_STATUS_CAPABILITY,
   ReceivePackError,
   UNPACK_OK,
   accepted,
-  isCreate,
   isDelete,
+  readPushOptions,
   readReceivePackRequest,
   receivePackResult,
   rejected,
@@ -239,6 +235,9 @@ export class RepositoryStore {
     let capabilities: readonly string[];
     try {
       ({ commands, capabilities } = await readReceivePackRequest(lines));
+      if (capabilities.includes(PUSH_OPTIONS_CAPABILITY)) {
+        await readPushOptions(lines, capabilities);
+      }
     } catch (error) {
       if (error instanceof ReceivePackError) {
         await lines.cancel();
@@ -305,6 +304,23 @@ export class RepositoryStore {
       if (verdict.message !== undefined) {
         messages.push(verdict.message);
       }
+    }
+
+    if (capabilities.includes(ATOMIC_CAPABILITY) && rejections.size > 0) {
+      return {
+        report: receivePackResult(
+          {
+            unpack: UNPACK_OK,
+            refs: commands.map(
+              (command, at) => rejections.get(at) ?? rejected(command.name, REJECTIONS.atomic),
+            ),
+            messages,
+          },
+          capabilities,
+        ),
+        accepted: false,
+        retargetedTo: null,
+      };
     }
 
     const retargetedTo = this.#retarget(current, updates);
@@ -416,14 +432,17 @@ export class RepositoryStore {
   }
 
   /**
-   * The two questions that need the objects themselves: is everything the push
-   * claims actually here, and does the new tip descend from the old one.
-   * `null` is a command with nothing left to object to.
+   * The question that needs the objects themselves: is everything the push
+   * claims actually here. `null` is a command with nothing left to object to.
    */
   async #verify(
     command: ReceivePackCommand,
     walk: WalkOptions,
   ): Promise<{ reason: string; message?: string } | null> {
+    if (isDelete(command)) {
+      return null;
+    }
+
     const missing = await findMissingObject(command.newOid, this.#objects, walk);
 
     if (missing !== null) {
@@ -433,24 +452,7 @@ export class RepositoryStore {
       };
     }
 
-    // A branch that did not exist has no history to fast-forward from.
-    if (isCreate(command)) {
-      return null;
-    }
-
-    const verdict = await findAncestor(command.newOid, command.oldOid, this.#objects);
-
-    switch (verdict) {
-      case "ancestor":
-        return null;
-      case "budget-exhausted":
-        return {
-          reason: REJECTIONS.unprovable,
-          message: `${command.name} was not confirmed as a fast-forward within ${FAST_FORWARD_COMMIT_BUDGET} commits.`,
-        };
-      case "unrelated":
-        return { reason: REJECTIONS.nonFastForward };
-    }
+    return null;
   }
 
   /**
@@ -497,6 +499,11 @@ export class RepositoryStore {
   ): Promise<void> {
     await this.#db.transaction((tx) => {
       for (const { command } of updates) {
+        if (isDelete(command)) {
+          tx.delete(refs).where(eq(refs.name, command.name)).run();
+          continue;
+        }
+
         tx.insert(refs)
           .values({ name: command.name, objectId: command.newOid })
           .onConflictDoUpdate({
