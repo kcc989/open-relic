@@ -41,9 +41,25 @@ Every JSON response is the v4 envelope:
 
 Every route rooted at `/namespaces` is the installation's control plane and
 requires `Authorization: Bearer $OPEN_RELIC_API_TOKEN`. Configure the same long,
-random value on the Worker and in the client. This installation API token is
-distinct from the short-lived, repo-scoped `art_v1_…` tokens used by Git; an
-unset installation token closes the control plane rather than opening it.
+random value on the Worker and in the client. This API token is distinct from
+the short-lived, repository-scoped `art_v1_…` Git tokens; an unset API token
+closes the control plane rather than opening it.
+
+Generate the value from a cryptographically secure random source. This command
+uses 32 random bytes and encodes them as 64 hexadecimal characters:
+
+```sh
+openssl rand -hex 32
+```
+
+An explicitly configured value shorter than 32 UTF-8 bytes is rejected during
+planning and deployment. Rotate the API token by replacing the
+`OPEN_RELIC_API_TOKEN` deployment value and redeploying; the old value stops
+working as soon as the new Worker is live.
+
+An empty value, including the placeholder in `.env.example`, is treated as
+unconfigured: local development can start, but the REST API remains closed and
+`/healthz` reports that the installation is unavailable.
 
 A failure keeps the shape and moves into `errors`, using
 [Artifacts' documented codes](https://developers.cloudflare.com/artifacts/api/errors/):
@@ -205,7 +221,7 @@ curl -X POST http://localhost:1337/namespaces/acme/repos \
 
 ## Tokens
 
-Tokens are repo-scoped Git credentials with `read` or `write` scope and an
+Git tokens are repository-scoped credentials with `read` or `write` scope and an
 expiry. They live in the registry so a Git request can be refused before the
 repository is resolved. Revocation is retained as state for token listings;
 deleting a repository or namespace cascades to its tokens.
@@ -272,10 +288,10 @@ method on the repository object, which returns a stream of pkt-lines.
 `RepositoryObject`'s `fetch` handler is not part of that path and answers `501`.
 See [ADR-0004](./docs/adr/0004-git-reaches-a-repository-over-rpc.md).
 
-Bearer authentication uses the full token returned by the REST API. HTTP Basic
+Bearer authentication uses the full Git token returned by the REST API. HTTP Basic
 uses any non-empty username and the token secret — the `art_v1_…` half before
 `?expires=` — as its password. A push requires write scope; missing, expired,
-revoked, read-scoped, or differently repo-scoped tokens are refused before the
+revoked, read-scoped, or differently repository-scoped Git tokens are refused before the
 repository lookup.
 
 ```sh
@@ -585,16 +601,22 @@ bun run destroy        # tear down the current stage
 ```
 
 CI deploys the `prod` stage from `main` via `.github/workflows/deploy.yml`. It
-needs `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, and a long random
-`OPEN_RELIC_API_TOKEN` as repository secrets in a `prod` environment. The
-Cloudflare token needs Workers Scripts:Edit, Workers Subdomain:Edit, Workers
-Observability:Edit, and Account Settings:Read.
+needs `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, and
+`OPEN_RELIC_API_TOKEN` as repository secrets in a `prod` environment. Generate
+the API token as shown above. The Cloudflare token needs Workers
+Scripts:Edit, Workers Subdomain:Edit, Workers Observability:Edit, and Account
+Settings:Read.
 
-`GET /healthz` reports liveness:
+`GET /healthz` is the sole unauthenticated endpoint. It reports readiness when
+the API token is valid:
 
 ```json
 { "service": "open-relic", "status": "ok" }
 ```
+
+If the binding is absent, empty, or shorter than 32 UTF-8 bytes, protected
+routes fail closed with `401` and `/healthz` answers `503` with `status` set to
+`"unavailable"`.
 
 Alongside the endpoints above, routes for forks, imports, repository
 contents, archives, and both halves of upload-pack are registered from the

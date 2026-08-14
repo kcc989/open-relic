@@ -35,7 +35,7 @@ resolved, carrying the credential-bearing request and the `namespace/repository`
 it is being spent against — the two things a token check needs.
 
 The implementation hashes the presented token secret and checks the registry's
-repo-scoped token row for namespace, repository, scope, revocation, and expiry.
+Git token row for namespace, repository, scope, revocation, and expiry.
 The Bearer spelling carries the full token; HTTP Basic carries its secret half
 as the password and ignores the username, matching Artifacts.
 
@@ -53,7 +53,7 @@ There is no anonymous-write mode. A missing, malformed, expired, revoked,
 read-scoped, or differently scoped token is refused before the repository
 lookup, so it cannot reveal whether another repository exists.
 
-The REST control plane is separately protected by the installation API token.
+The REST control plane is separately protected by the API token.
 Without that boundary, an anonymous caller could mint its own write Token and
 make this Git check ceremonial; token issue, list, and revoke never sit outside
 the control-plane gate.

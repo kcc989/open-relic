@@ -16,9 +16,10 @@ import {
   type RepositoryObjects,
 } from "./bindings.ts";
 import {
-  authorizeInstallationApiToken,
+  authorizeApiToken,
   type AuthorizeControlPlaneRequest,
 } from "./control-plane-authorization.ts";
+import { apiTokenFromEnv } from "./api-token.ts";
 import { controlPlaneAuthenticationRequired, notFound, notImplemented } from "./envelope.ts";
 import { registerGitRoutes } from "./git-routes.ts";
 import { authorizeRepoToken, type AuthorizeGitRequest } from "./git/authorization.ts";
@@ -47,11 +48,15 @@ export const createApp = ({
   repositoryObjects = repositoryObjectsFromEnv,
   tokenRegistry = tokenRegistryFromEnv,
   authorizeGit,
-  authorizeControlPlane = authorizeInstallationApiToken,
+  authorizeControlPlane = authorizeApiToken,
 }: AppDependencies = {}) => {
   const app = new Hono<{ Bindings: ApiEnv }>();
 
-  app.get("/healthz", (context) => context.json({ service: "open-relic", status: "ok" }));
+  app.get("/healthz", (context) =>
+    apiTokenFromEnv(context.env) === null
+      ? context.json({ service: "open-relic", status: "unavailable" }, 503)
+      : context.json({ service: "open-relic", status: "ok" }),
+  );
 
   const protectControlPlane: MiddlewareHandler<{ Bindings: ApiEnv }> = async (context, next) => {
     const allowed = await authorizeControlPlane({

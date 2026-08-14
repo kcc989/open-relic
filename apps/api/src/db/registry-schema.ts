@@ -75,7 +75,7 @@ export type RepositoryRow = typeof repositories.$inferSelect;
 export type NewRepositoryRow = typeof repositories.$inferInsert;
 
 /**
- * Repo-scoped Git tokens live with the registry because authorization happens
+ * Repository-scoped Git tokens live with the registry because authorization happens
  * before a repository object is resolved. Only a SHA-256 digest of the secret
  * is stored; the plaintext exists long enough to cross the creation response
  * once and cannot be recovered by list or revoke.
