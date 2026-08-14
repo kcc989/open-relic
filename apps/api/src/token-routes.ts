@@ -21,6 +21,7 @@ import type { Hono } from "hono";
 import type { ApiEnv } from "../../../alchemy.run.ts";
 import {
   forkInProgress,
+  importInProgress,
   invalidInput,
   invalidRepoName,
   invalidTtl,
@@ -147,6 +148,11 @@ export const registerTokenRoutes = (
         `The repository "${namespaceSlug}/${parsed.repositoryName}" is still being forked.`,
       );
     }
+    if (repository?.status === "importing") {
+      return importInProgress(
+        `The repository "${namespaceSlug}/${parsed.repositoryName}" is still being imported.`,
+      );
+    }
     const outcome = await resolveTokens(context.env).createToken({
       namespaceSlug,
       repositoryName: parsed.repositoryName,
@@ -193,6 +199,11 @@ export const registerTokenRoutes = (
     if (repository?.status === "forking") {
       return forkInProgress(
         `The repository "${namespaceSlug}/${repositoryName}" is still being forked.`,
+      );
+    }
+    if (repository?.status === "importing") {
+      return importInProgress(
+        `The repository "${namespaceSlug}/${repositoryName}" is still being imported.`,
       );
     }
     const result = await resolveTokens(context.env).listTokens(namespaceSlug, repositoryName, {

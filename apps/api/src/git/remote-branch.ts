@@ -36,6 +36,7 @@ export class RemoteBranchError extends Error {
     | "invalid-depth"
     | "branch-not-found"
     | "invalid-advertisement"
+    | "public-access-failed"
     | "upstream-unavailable";
 
   constructor(code: RemoteBranchError["code"], message: string) {
@@ -74,6 +75,17 @@ const remoteUrl = (value: string): URL => {
     throw new RemoteBranchError("invalid-url", "The remote URL must name a public host.");
   }
   return parsed;
+};
+
+/** Validate every field which can be rejected without contacting the remote. */
+export const validateRemoteBranchRequest = (request: RemoteBranchRequest): void => {
+  remoteUrl(request.url);
+  if (request.depth !== undefined && (!Number.isSafeInteger(request.depth) || request.depth < 1)) {
+    throw new RemoteBranchError("invalid-depth", "The depth must be a positive integer.");
+  }
+  if (request.branch !== undefined && validateBranchName(request.branch) !== null) {
+    throw new RemoteBranchError("branch-not-found", "The requested branch name is invalid.");
+  }
 };
 
 const ipv4Octets = (hostname: string): readonly number[] | null => {
@@ -206,6 +218,12 @@ const endpoint = (remote: URL, path: "/info/refs" | "/git-upload-pack"): URL => 
 };
 
 const requireResponse = (response: Response, contentType: string): ReadableStream<Uint8Array> => {
+  if (response.status === 401 || response.status === 403) {
+    throw new RemoteBranchError(
+      "public-access-failed",
+      "The Git remote is not publicly accessible.",
+    );
+  }
   if (!response.ok || response.body === null) {
     throw new RemoteBranchError("upstream-unavailable", "The Git remote did not answer.");
   }
@@ -414,13 +432,8 @@ export const fetchRemoteBranch = async (
   request: RemoteBranchRequest,
   fetchRemote: RemoteFetch = globalThis.fetch,
 ): Promise<FetchedRemoteBranch> => {
+  validateRemoteBranchRequest(request);
   const remote = remoteUrl(request.url);
-  if (request.depth !== undefined && (!Number.isSafeInteger(request.depth) || request.depth < 1)) {
-    throw new RemoteBranchError("invalid-depth", "The depth must be a positive integer.");
-  }
-  if (request.branch !== undefined && validateBranchName(request.branch) !== null) {
-    throw new RemoteBranchError("branch-not-found", "The requested branch name is invalid.");
-  }
   const advertised = await fetchWithRedirects(
     endpoint(remote, "/info/refs"),
     {

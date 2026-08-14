@@ -89,6 +89,9 @@ export const alreadyExists = (message: string): Response =>
 export const forkInProgress = (message: string): Response =>
   fail(409, { code: ERROR_CODES.forkInProgress, message });
 
+export const importInProgress = (message: string): Response =>
+  fail(409, { code: ERROR_CODES.importInProgress, message });
+
 export const internalError = (message: string): Response =>
   fail(500, { code: ERROR_CODES.internalError, message });
 

@@ -1,5 +1,6 @@
 import {
   DEFAULT_BRANCH,
+  ERROR_CODES,
   LIST_DEFAULT_LIMIT,
   LIST_MAX_LIMIT,
   NAMESPACES_PATH,
@@ -17,6 +18,7 @@ import {
   type CreateRepoResult,
   type DeleteRepoResult,
   type ForkRepoResult,
+  type ImportRepoResult,
   type RepoInfo,
   type RepoSortField,
   type RepoWithRemote,
@@ -29,7 +31,9 @@ import type { ApiEnv } from "../../../alchemy.run.ts";
 import type { RepositoryObjects } from "./bindings.ts";
 import {
   alreadyExists,
+  fail,
   forkInProgress,
+  importInProgress,
   internalError,
   invalidInput,
   invalidRepoName,
@@ -47,6 +51,12 @@ import {
   parseSearch,
 } from "./query.ts";
 import { gitRemoteUrl } from "./remote.ts";
+import {
+  RemoteBranchError,
+  validateRemoteBranchRequest,
+  type RemoteBranchRequest,
+} from "./git/remote-branch.ts";
+import type { ImportJobFailure, ImportJobRetrying } from "./import-operation.ts";
 import type {
   CreateRepositoryCommand,
   RepositoryCursor,
@@ -78,6 +88,19 @@ type ParsedFork =
   | { readonly ok: true; readonly command: NewFork }
   | (Rejected & { readonly badName?: true });
 
+interface NewImport {
+  readonly request: RemoteBranchRequest;
+  readonly readOnly: boolean;
+}
+
+interface ParsedRemoteBranchRequest {
+  url: string;
+  branch?: string;
+  depth?: number;
+}
+
+type ParsedImport = { readonly ok: true; readonly command: NewImport } | Rejected;
+
 const CreateRepoJson = Schema.Struct({
   name: Schema.optionalKey(
     Schema.Union([Schema.String, Schema.Number, Schema.Boolean, Schema.Null]),
@@ -94,6 +117,15 @@ const ForkRepoJson = Schema.Struct({
   description: Schema.optionalKey(Schema.NullOr(Schema.String)),
   read_only: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
   default_branch_only: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
+});
+
+const ImportRepoJson = Schema.Struct({
+  url: Schema.optionalKey(
+    Schema.Union([Schema.String, Schema.Number, Schema.Boolean, Schema.Null]),
+  ),
+  branch: Schema.optionalKey(Schema.String),
+  depth: Schema.optionalKey(Schema.Number),
+  read_only: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
 });
 
 const parseCreateBody = (namespaceSlug: string, payload: Json): ParsedCreate => {
@@ -199,11 +231,80 @@ const parseForkBody = (payload: Json): ParsedFork => {
   };
 };
 
+const parseImportBody = (payload: Json): ParsedImport => {
+  const object = decodeJson(ImportRepoJson, payload);
+  if (!object.ok) return object;
+  if (!Schema.is(Schema.String)(object.value.url)) {
+    return { ok: false, detail: `"url" must be a string.`, pointer: "/url" };
+  }
+  const readOnly = parseOptionalFlag(object.value.read_only, false);
+  if (!readOnly.ok) return readOnly;
+
+  const request: ParsedRemoteBranchRequest = { url: object.value.url };
+  if (object.value.branch !== undefined) request.branch = object.value.branch;
+  if (object.value.depth !== undefined) request.depth = object.value.depth;
+  try {
+    validateRemoteBranchRequest(request);
+  } catch (error) {
+    if (error instanceof RemoteBranchError) {
+      return {
+        ok: false,
+        detail: error.message,
+        pointer:
+          error.code === "invalid-depth"
+            ? "/depth"
+            : error.code === "branch-not-found"
+              ? "/branch"
+              : "/url",
+      };
+    }
+    throw error;
+  }
+  return { ok: true, command: { request, readOnly: readOnly.value } };
+};
+
 const noSuchRepository = (namespaceSlug: string, name: string): string =>
   `No repository named "${namespaceSlug}/${name}" exists.`;
 
 const repositoryIsForking = (namespaceSlug: string, name: string): string =>
   `The repository "${namespaceSlug}/${name}" is still being forked.`;
+
+const repositoryIsImporting = (namespaceSlug: string, name: string): string =>
+  `The repository "${namespaceSlug}/${name}" is still being imported.`;
+
+const normalizedImportSource = (value: string): string => {
+  const remote = new URL(value);
+  remote.pathname = `${remote.pathname.replace(/\/$/, "").replace(/\.git$/, "")}.git`;
+  // Git endpoint discovery preserves query parameters, which may carry a
+  // credential even for an otherwise public URL. The import may use them, but
+  // the durable source metadata must never persist or echo them.
+  remote.search = "";
+  remote.hash = "";
+  return `git:${remote.toString()}`;
+};
+
+const importFailureResponse = (failure: ImportJobFailure | ImportJobRetrying): Response => {
+  switch (failure.code) {
+    case "invalid-advertisement":
+      return fail(400, { code: ERROR_CODES.invalidUrl, message: failure.message });
+    case "branch-not-found":
+      return fail(400, { code: ERROR_CODES.branchNotFound, message: failure.message });
+    case "public-access-failed":
+      return fail(400, { code: ERROR_CODES.remoteAuthRequired, message: failure.message });
+    case "invalid-url":
+    case "invalid-depth":
+      return invalidInput(failure.message);
+    case "upstream-unavailable":
+      return fail(503, { code: ERROR_CODES.upstreamUnavailable, message: failure.message });
+    case "invalid-pack":
+      return failure.packErrorCode === "object-too-large"
+        ? fail(400, { code: ERROR_CODES.memoryLimit, message: failure.message })
+        : invalidInput(failure.message);
+    case "storage-exhausted":
+    case "internal":
+      return internalError(failure.message);
+  }
+};
 
 /**
  * The query a cursor was minted under, carried inside the cursor so a later
@@ -395,6 +496,9 @@ export const registerRepositoryRoutes = (
     if (found.status === "forking") {
       return forkInProgress(repositoryIsForking(namespaceSlug, name));
     }
+    if (found.status === "importing") {
+      return importInProgress(repositoryIsImporting(namespaceSlug, name));
+    }
 
     return ok(withRemote(context, namespaceSlug, found.repository));
   });
@@ -424,6 +528,9 @@ export const registerRepositoryRoutes = (
     }
     if (source.status === "forking") {
       return forkInProgress(repositoryIsForking(namespaceSlug, sourceName));
+    }
+    if (source.status === "importing") {
+      return importInProgress(repositoryIsImporting(namespaceSlug, sourceName));
     }
 
     const objects = resolveObjects(context.env);
@@ -484,6 +591,90 @@ export const registerRepositoryRoutes = (
       await objects.get(durableObjectId).destroy();
       return internalError(`The repository "${sourceAddress}" could not be forked.`);
     }
+  });
+
+  app.post(`${REPO}/import`, async (context) => {
+    const namespaceSlug = context.req.param("namespace");
+    const name = context.req.param("repo");
+    const nameViolation = validateRepositoryName(name);
+    if (nameViolation !== null) {
+      return invalidRepoName(describeRepositoryNameViolation(nameViolation));
+    }
+
+    let payload: Json;
+    try {
+      // SAFETY: req.json() is the JSON value at this HTTP boundary; Schema rejects the rest.
+      payload = (await context.req.json()) as Json;
+    } catch {
+      return invalidInput("The request body must be valid JSON.");
+    }
+    const parsed = parseImportBody(payload);
+    if (!parsed.ok) return invalidInput(parsed.detail, parsed.pointer);
+
+    const index = resolveIndex(context.env);
+    const objects = resolveObjects(context.env);
+    const durableObjectId = objects.createId();
+    const source = normalizedImportSource(parsed.command.request.url);
+    const reserved = await index.createRepository({
+      namespaceSlug,
+      name,
+      description: null,
+      defaultBranch: parsed.command.request.branch ?? DEFAULT_BRANCH,
+      readOnly: parsed.command.readOnly,
+      source,
+      status: "importing",
+      durableObjectId,
+    });
+    if (!reserved.created) {
+      return reserved.reason === "namespace-missing"
+        ? notFound(`No namespace named "${namespaceSlug}" exists.`)
+        : alreadyExists(`The repository "${namespaceSlug}/${name}" already exists.`);
+    }
+
+    const issued = await resolveTokens(context.env).createToken({
+      namespaceSlug,
+      repositoryName: name,
+      scope: "write",
+      ttlSeconds: TOKEN_TTL_DEFAULT_SECONDS,
+    });
+    if (!issued.created) {
+      await index.deleteImportIfOwned(namespaceSlug, name, durableObjectId);
+      await objects.get(durableObjectId).destroy();
+      return internalError(`The repository "${namespaceSlug}/${name}" could not be imported.`);
+    }
+
+    let outcome;
+    try {
+      outcome = await objects.get(durableObjectId).scheduleImport({
+        namespaceSlug,
+        repositoryName: name,
+        createdAt: reserved.repository.created_at,
+        initialBranch: reserved.repository.default_branch,
+        request: parsed.command.request,
+      });
+    } catch {
+      await index.deleteImportIfOwned(namespaceSlug, name, durableObjectId);
+      await objects.get(durableObjectId).destroy();
+      return internalError(`The repository "${namespaceSlug}/${name}" could not be imported.`);
+    }
+
+    if (!outcome.completed) {
+      return importFailureResponse(outcome);
+    }
+
+    return ok(
+      {
+        id: reserved.repository.id,
+        name,
+        description: null,
+        default_branch: outcome.imported.branch,
+        source,
+        remote: gitRemoteUrl(context.req.url, namespaceSlug, name),
+        token: issued.token.plaintext,
+        objects: outcome.imported.objects,
+      } satisfies ImportRepoResult,
+      { status: 201 },
+    );
   });
 
   /**

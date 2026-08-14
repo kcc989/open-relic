@@ -393,6 +393,42 @@ describe("deleteRepository", () => {
   });
 });
 
+describe("import ownership", () => {
+  test("a stale import cannot publish or delete a replacement with the same name", async () => {
+    const store = await withNamespace();
+    await store.repositories.createRepository({
+      ...command("acme", "mirror", "object-old"),
+      defaultBranch: "old-placeholder",
+      status: "importing",
+    });
+    await store.repositories.deleteRepository("acme", "mirror");
+    await store.repositories.createRepository({
+      ...command("acme", "mirror", "object-new"),
+      defaultBranch: "new-placeholder",
+      status: "importing",
+    });
+
+    expect(
+      await store.repositories.finishImport("acme", "mirror", "object-old", "stale-branch"),
+    ).toBe(false);
+    expect(await store.repositories.deleteImportIfOwned("acme", "mirror", "object-old")).toBeNull();
+    expect(await store.repositories.getRepository("acme", "mirror")).toMatchObject({
+      durableObjectId: "object-new",
+      status: "importing",
+      repository: { default_branch: "new-placeholder" },
+    });
+
+    expect(
+      await store.repositories.finishImport("acme", "mirror", "object-new", "new-branch"),
+    ).toBe(true);
+    expect(await store.repositories.getRepository("acme", "mirror")).toMatchObject({
+      durableObjectId: "object-new",
+      status: "ready",
+      repository: { default_branch: "new-branch" },
+    });
+  });
+});
+
 describe("recording a push", () => {
   const pushed = async () => {
     const store = await withNamespace();
