@@ -4,11 +4,11 @@ import mime from "mime";
 
 import type { ApiEnv } from "../../../alchemy.run.ts";
 import type { RepositoryObjects } from "./bindings.ts";
-import { fail, forkInProgress, importInProgress, notFound, ok } from "./envelope.ts";
+import { fail, ok } from "./envelope.ts";
 import { isObjectId, type ObjectType } from "./object.ts";
 import { ObjectParseError } from "./object-parse.ts";
 import { parseCommit, parseTree } from "./repository-content.ts";
-import type { RepositoryIndexClient } from "./repository-index.ts";
+import type { RepositoryResolver } from "./repository-resolution.ts";
 
 const REPO = `${NAMESPACES_PATH}/:namespace/repos/:repo` as const;
 const ERROR_DOCUMENTATION = "https://developers.cloudflare.com/artifacts/api/errors";
@@ -44,15 +44,6 @@ const objectNotFound = (kind: DirectObjectKind): Response =>
     ERROR_CODES.notFound,
     `${kind[0]!.toUpperCase()}${kind.slice(1)} not found`,
   );
-
-const repositoryNotFound = (namespaceSlug: string, repositoryName: string): Response =>
-  notFound(`No repository named "${namespaceSlug}/${repositoryName}" exists.`);
-
-const repositoryIsForking = (namespaceSlug: string, repositoryName: string): Response =>
-  forkInProgress(`The repository "${namespaceSlug}/${repositoryName}" is still being forked.`);
-
-const repositoryIsImporting = (namespaceSlug: string, repositoryName: string): Response =>
-  importInProgress(`The repository "${namespaceSlug}/${repositoryName}" is still being imported.`);
 
 const corruptObject = (): Response =>
   documentedFailure(500, ERROR_CODES.internalError, "A stored git object is corrupt.");
@@ -93,23 +84,9 @@ const parseLogInteger = (
 
 export const registerContentRoutes = (
   app: Hono<{ Bindings: ApiEnv }>,
-  resolveIndex: (env: ApiEnv) => RepositoryIndexClient,
+  resolveRepository: RepositoryResolver,
   resolveObjects: (env: ApiEnv) => RepositoryObjects,
 ): void => {
-  const resolveRepository = async (env: ApiEnv, namespaceSlug: string, repositoryName: string) => {
-    const found = await resolveIndex(env).getRepository(namespaceSlug, repositoryName);
-    if (found === null) {
-      return { response: repositoryNotFound(namespaceSlug, repositoryName) } as const;
-    }
-    if (found.status === "forking") {
-      return { response: repositoryIsForking(namespaceSlug, repositoryName) } as const;
-    }
-    if (found.status === "importing") {
-      return { response: repositoryIsImporting(namespaceSlug, repositoryName) } as const;
-    }
-    return { repository: resolveObjects(env).get(found.durableObjectId) } as const;
-  };
-
   app.get(`${REPO}/log`, async (context) => {
     const limit = parseLogInteger(context.req.query("limit"), "limit", LOG_DEFAULT_LIMIT);
     if (limit instanceof Response) {
@@ -122,16 +99,18 @@ export const registerContentRoutes = (
 
     const namespaceSlug = context.req.param("namespace");
     const repositoryName = context.req.param("repo");
-    const resolved = await resolveRepository(context.env, namespaceSlug, repositoryName);
-    if ("response" in resolved) {
-      return resolved.response;
+    const resolved = await resolveRepository.resolve({
+      env: context.env,
+      namespace: namespaceSlug,
+      name: repositoryName,
+    });
+    if (resolved instanceof Response) {
+      return resolved;
     }
 
-    const history = await resolved.repository.readHistory(
-      context.req.query("ref") ?? null,
-      limit,
-      offset,
-    );
+    const history = await resolveObjects(context.env)
+      .get(resolved.durableObjectId)
+      .readHistory(context.req.query("ref") ?? null, limit, offset);
     if (!history.ok) {
       return history.reason === "revision-not-found" ? revisionNotFound() : corruptObject();
     }
@@ -145,12 +124,16 @@ export const registerContentRoutes = (
     revision: string | null,
     path: string,
   ): Promise<Response | ReadableStream<Uint8Array>> => {
-    const resolved = await resolveRepository(env, namespaceSlug, repositoryName);
-    if ("response" in resolved) {
-      return resolved.response;
+    const resolved = await resolveRepository.resolve({
+      env,
+      namespace: namespaceSlug,
+      name: repositoryName,
+    });
+    if (resolved instanceof Response) {
+      return resolved;
     }
 
-    const file = await resolved.repository.readFile(revision, path);
+    const file = await resolveObjects(env).get(resolved.durableObjectId).readFile(revision, path);
     if (file.ok) {
       return file.bytes;
     }
@@ -227,11 +210,15 @@ export const registerContentRoutes = (
 
     const namespaceSlug = context.req.param("namespace");
     const repositoryName = context.req.param("repo");
-    const resolved = await resolveRepository(context.env, namespaceSlug, repositoryName);
-    if ("response" in resolved) {
-      return resolved.response;
+    const resolved = await resolveRepository.resolve({
+      env: context.env,
+      namespace: namespaceSlug,
+      name: repositoryName,
+    });
+    if (resolved instanceof Response) {
+      return resolved;
     }
-    const object = await resolved.repository.readObject(hash);
+    const object = await resolveObjects(context.env).get(resolved.durableObjectId).readObject(hash);
     if (object === null) {
       return objectNotFound("commit");
     }
@@ -257,11 +244,15 @@ export const registerContentRoutes = (
 
     const namespaceSlug = context.req.param("namespace");
     const repositoryName = context.req.param("repo");
-    const resolved = await resolveRepository(context.env, namespaceSlug, repositoryName);
-    if ("response" in resolved) {
-      return resolved.response;
+    const resolved = await resolveRepository.resolve({
+      env: context.env,
+      namespace: namespaceSlug,
+      name: repositoryName,
+    });
+    if (resolved instanceof Response) {
+      return resolved;
     }
-    const object = await resolved.repository.readObject(hash);
+    const object = await resolveObjects(context.env).get(resolved.durableObjectId).readObject(hash);
     if (object === null) {
       return objectNotFound("tree");
     }
@@ -287,11 +278,15 @@ export const registerContentRoutes = (
 
     const namespaceSlug = context.req.param("namespace");
     const repositoryName = context.req.param("repo");
-    const resolved = await resolveRepository(context.env, namespaceSlug, repositoryName);
-    if ("response" in resolved) {
-      return resolved.response;
+    const resolved = await resolveRepository.resolve({
+      env: context.env,
+      namespace: namespaceSlug,
+      name: repositoryName,
+    });
+    if (resolved instanceof Response) {
+      return resolved;
     }
-    const stream = await resolved.repository.readBlob(hash);
+    const stream = await resolveObjects(context.env).get(resolved.durableObjectId).readBlob(hash);
     if (stream === null) {
       return objectNotFound("blob");
     }

@@ -7,7 +7,6 @@ import migrations from "../drizzle/repository/migrations.js";
 import type { ApiEnv } from "../../../alchemy.run.ts";
 import { repositoryIndexFromEnv } from "./bindings.ts";
 import { fail } from "./envelope.ts";
-import type { UploadProtocolVersion } from "./git/advertisement.ts";
 import {
   ImportOperation,
   type ImportCheckpoint,
@@ -15,23 +14,30 @@ import {
   type ImportJobOutcome,
   type StoredImportJob,
 } from "./import-operation.ts";
-import type { PackBase } from "./pack.ts";
 import {
-  RepositoryStore,
-  type ForkOptions,
-  type ForkObject,
-  type ForkOutcome,
-  type ForkState,
-  type ForkTarget,
-  type ImportedBranch,
-  type RepositoryHistoryResult,
-  type RepositoryFileResult,
+  REPOSITORY_DATABASE,
+  REPOSITORY_KV,
+  withRepositoryStore,
   type ReceivePackOutcome,
-  type RemoteBranchRequest,
-  type RepositoryInit,
-  type RepositorySnapshot,
+  type RepositoryStorage,
 } from "./repository-store.ts";
 import type { SweepProgress } from "./sweep.ts";
+
+class DurableRepositoryStorage extends DurableObject implements RepositoryStorage {
+  readonly [REPOSITORY_DATABASE]: DrizzleSqliteDODatabase;
+  readonly [REPOSITORY_KV]: DurableObjectStorage["kv"];
+
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+
+    this[REPOSITORY_DATABASE] = drizzle(ctx.storage);
+    this[REPOSITORY_KV] = ctx.storage.kv;
+
+    ctx.blockConcurrencyWhile(async () => {
+      migrate(this[REPOSITORY_DATABASE], migrations);
+    });
+  }
+}
 
 /**
  * One repository, in its own Durable Object: a repository is what Git
@@ -42,16 +48,12 @@ import type { SweepProgress } from "./sweep.ts";
  * `namespace/name` and stores the resulting object id, and every request
  * resolves the name to that id first.
  */
-export class RepositoryObject extends DurableObject {
-  readonly #db: DrizzleSqliteDODatabase;
-  readonly #store: RepositoryStore;
+export class RepositoryObject extends withRepositoryStore(DurableRepositoryStorage) {
   readonly #importOperation: ImportOperation;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
 
-    this.#db = drizzle(ctx.storage);
-    this.#store = new RepositoryStore(this.#db, ctx.storage.kv);
     // SAFETY: this class is bound only by ApiWorker, whose inferred bindings are ApiEnv.
     const apiEnv = env as ApiEnv;
     this.#importOperation = new ImportOperation({
@@ -76,36 +78,12 @@ export class RepositoryObject extends DurableObject {
         armAlarm: () => ctx.storage.setAlarm(Date.now()),
       },
       repository: {
-        resetImport: (init) => this.#store.resetImport(init),
-        importBranch: (request) => this.#store.importBranch(request, globalThis.fetch),
-        destroy: () => this.#store.destroyStorage(() => ctx.storage.deleteAll()),
+        resetImport: (init) => this.resetImport(init),
+        importBranch: (request) => this.importBranch(request, globalThis.fetch),
+        destroy: () => this.destroyStorage(() => ctx.storage.deleteAll()),
       },
       registry: repositoryIndexFromEnv(apiEnv),
     });
-
-    ctx.blockConcurrencyWhile(async () => {
-      migrate(this.#db, migrations);
-    });
-  }
-
-  initialize(init: RepositoryInit): Promise<RepositorySnapshot> {
-    return this.#store.initialize(init);
-  }
-
-  describe(): Promise<RepositorySnapshot | null> {
-    return this.#store.describe();
-  }
-
-  advertiseReceivePack(): Promise<ReadableStream<Uint8Array>> {
-    return this.#store.advertiseReceivePack();
-  }
-
-  advertiseUploadPack(protocolVersion: UploadProtocolVersion): Promise<ReadableStream<Uint8Array>> {
-    return this.#store.advertiseUploadPack(protocolVersion);
-  }
-
-  uploadPack(body: ReadableStream<Uint8Array>): Promise<ReadableStream<Uint8Array>> {
-    return this.#store.uploadPack(body);
   }
 
   /**
@@ -113,46 +91,23 @@ export class RepositoryObject extends DurableObject {
    * the Worker buffering it, and the outcome comes back as bytes plus the two
    * facts the registry needs.
    */
-  async receivePack(body: ReadableStream<Uint8Array>): Promise<ReceivePackOutcome> {
+  override async receivePack(body: ReadableStream<Uint8Array>): Promise<ReceivePackOutcome> {
     // Persist the follow-up before reading the stream. Even a disconnected or
     // CPU-killed push can then leave only temporary orphans. Calling into the
     // store before yielding claims its operation gate, so an immediately due
     // alarm cannot finish a stale sweep before this push begins.
     const scheduled = this.ctx.storage.setAlarm(Date.now());
-    return this.#store.receivePack(body, scheduled);
+    return super.receivePack(body, scheduled);
   }
 
-  copyForkTo(target: ForkTarget, options: ForkOptions): Promise<ForkOutcome> {
-    return this.#store.copyForkTo(target, options);
-  }
-
-  writeForkObject(object: ForkObject, bytes: ReadableStream<Uint8Array>): Promise<void> {
-    return this.#store.writeForkObject(object, bytes);
-  }
-
-  completeFork(state: ForkState): Promise<void> {
-    return this.#store.completeFork(state);
-  }
-
-  async importBranch(request: RemoteBranchRequest): Promise<ImportedBranch> {
-    // Import can leave complete but unreachable objects when the remote fails
-    // late. Persist reclamation before the first network or storage await.
-    const scheduled = this.ctx.storage.setAlarm(Date.now());
-    return this.#store.importBranch(request, globalThis.fetch, scheduled);
-  }
-
-  resetImport(init: RepositoryInit): Promise<void> {
-    return this.#store.resetImport(init);
+  /** Start or resume reclamation; alarms carry subsequent batches. */
+  override async sweep(): Promise<SweepProgress> {
+    return this.#advanceSweep();
   }
 
   /** Persist and alarm the job before any network request can begin. */
   async scheduleImport(job: ImportJob): Promise<ImportJobOutcome> {
     return this.#importOperation.schedule(job);
-  }
-
-  /** Start or resume reclamation; alarms carry subsequent batches. */
-  async sweep(): Promise<SweepProgress> {
-    return this.#advanceSweep();
   }
 
   override async alarm(): Promise<void> {
@@ -161,30 +116,6 @@ export class RepositoryObject extends DurableObject {
       return;
     }
     await this.#advanceSweep();
-  }
-
-  readObject(oid: string): Promise<PackBase | null> {
-    return this.#store.readObject(oid);
-  }
-
-  readBlob(oid: string): Promise<ReadableStream<Uint8Array> | null> {
-    return this.#store.readBlob(oid);
-  }
-
-  readHistory(
-    revision: string | null,
-    limit: number,
-    offset: number,
-  ): Promise<RepositoryHistoryResult> {
-    return this.#store.readHistory(revision, limit, offset);
-  }
-
-  readFile(revision: string | null, path: string): Promise<RepositoryFileResult> {
-    return this.#store.readFile(revision, path);
-  }
-
-  hasObject(oid: string): Promise<boolean> {
-    return this.#store.hasObject(oid);
   }
 
   /**
@@ -199,7 +130,7 @@ export class RepositoryObject extends DurableObject {
   }
 
   async #advanceSweep(): Promise<SweepProgress> {
-    return this.#store.sweep(undefined, async (progress) => {
+    return super.sweep(undefined, async (progress) => {
       if (progress.phase === "complete") {
         console.log("Repository sweep completed", {
           repositoryObject: this.ctx.id.toString(),

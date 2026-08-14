@@ -11,10 +11,10 @@ the repository object with two candidate authorities for one fact.
 
 ## Consequences
 
-`describe()` reads HEAD and parses the branch name out of it to answer the REST
-API's `default_branch`. The registry's denormalized `repositories.default_branch`
-is unaffected and stays what it already claims to be — a cache of the repository
-object's HEAD, kept so that listing a namespace is one query rather than a fan-out.
+Repository operations read and parse HEAD directly. The REST API answers
+`default_branch` from the registry's denormalized
+`repositories.default_branch`, a cache of the repository object's HEAD kept so
+that listing a namespace is one query rather than a fan-out.
 
 A first push retargets HEAD, but only when the repository had no refs and the
 push creates exactly one branch. That is what `git init && git push -u origin

@@ -123,7 +123,7 @@ describe("a first push to an empty repository", () => {
       objects: FIRST_OBJECTS,
     });
 
-    expect(await store.hasObject(README.oid)).toBe(true);
+    expect(await store.readObject(README.oid)).not.toBeNull();
     expect((await store.readObject(FIRST.oid))?.type).toBe("commit");
   });
 
@@ -138,7 +138,7 @@ describe("a first push to an empty repository", () => {
 
     expect(opened.kv.get(HEAD_KEY)).toBe("ref: refs/heads/master\n");
     expect(outcome.retargetedTo).toBe("master");
-    expect((await store.describe())?.defaultBranch).toBe("master");
+    expect(opened.kv.get(HEAD_KEY)).toBe("ref: refs/heads/master\n");
   });
 
   test("leaves HEAD alone when the push named the branch it already points at", async () => {
@@ -317,7 +317,7 @@ describe("a push whose objects are not all there", () => {
       objects: [FIRST, README],
     });
 
-    expect(await store.hasObject(FIRST.oid)).toBe(true);
+    expect(await store.readObject(FIRST.oid)).not.toBeNull();
   });
 
   test("rejects a ref pointing at an object the push never mentioned", async () => {
