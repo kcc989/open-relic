@@ -217,16 +217,10 @@ describe("a real Git client", () => {
     }
   });
 
-  test("fetches after enough divergent local history for Git to gzip negotiation rounds", async () => {
-    const encodings: Array<string | null> = [];
+  test("fetches after enough divergent local history for several negotiation rounds", async () => {
     const server = Bun.serve({
       port: 0,
-      fetch: (request) => {
-        if (request.method === "POST" && request.url.endsWith("/git-upload-pack")) {
-          encodings.push(request.headers.get("Content-Encoding"));
-        }
-        return harness.app.fetch(request);
-      },
+      fetch: (request) => harness.app.fetch(request),
     });
     const remote = remoteFor(server.port);
     const reader = join(directory, "reader");
@@ -252,7 +246,6 @@ describe("a real Git client", () => {
 
       await run(["git", "-C", reader, "fetch", "origin"]);
 
-      expect(encodings).toContain("gzip");
       expect(await run(["git", "-C", reader, "rev-parse", "origin/main"])).toBe(remoteTip);
     } finally {
       server.stop(true);

@@ -304,7 +304,9 @@ describe("a real Git client over Smart HTTP", () => {
     }
 
     const sourceSha = await gitSucceeds("rev-parse", "HEAD");
-    await gitSucceeds("gc", "--aggressive", "--quiet");
+    // Every generated object is reachable; omit the unrelated cruft-pack pass
+    // so this benchmark measures only the aggressive source pack below.
+    await gitSucceeds("gc", "--aggressive", "--no-cruft", "--quiet");
     const sourcePackBytes = packedBytes(join(workingTree, ".git"));
     await gitSucceeds("push", "--porcelain", remote, "HEAD:refs/heads/main");
 
