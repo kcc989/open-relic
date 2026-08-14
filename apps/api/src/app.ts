@@ -1,10 +1,4 @@
-import {
-  GIT_HTTP_ENDPOINTS,
-  REST_ENDPOINTS,
-  isImplementedEndpoint,
-  type EndpointId,
-} from "@open-relic/contracts";
-import { Effect } from "effect";
+import { GIT_HTTP_ENDPOINTS, REST_ENDPOINTS, isImplementedEndpoint } from "@open-relic/contracts";
 import { Hono, type MiddlewareHandler } from "hono";
 
 import type { ApiEnv } from "../../../alchemy.run.ts";
@@ -28,12 +22,10 @@ import type { NamespaceRegistryClient } from "./namespace-registry.ts";
 import { registerNamespaceRoutes } from "./namespace-routes.ts";
 import type { RepositoryIndexClient } from "./repository-index.ts";
 import { registerRepositoryRoutes } from "./repository-routes.ts";
-import { EndpointNotImplemented, GitServiceStub, type GitService } from "./stub-service.ts";
 import { registerTokenRoutes } from "./token-routes.ts";
 import type { TokenRegistryClient } from "./token-registry.ts";
 
 export interface AppDependencies {
-  readonly gitService?: GitService;
   readonly namespaceRegistry?: (env: ApiEnv) => NamespaceRegistryClient;
   readonly repositoryIndex?: (env: ApiEnv) => RepositoryIndexClient;
   readonly repositoryObjects?: (env: ApiEnv) => RepositoryObjects;
@@ -43,7 +35,6 @@ export interface AppDependencies {
 }
 
 export const createApp = ({
-  gitService = GitServiceStub,
   namespaceRegistry = namespaceRegistryFromEnv,
   repositoryIndex = repositoryIndexFromEnv,
   repositoryObjects = repositoryObjectsFromEnv,
@@ -78,36 +69,13 @@ export const createApp = ({
   registerContentRoutes(app, repositoryIndex, repositoryObjects);
   registerTokenRoutes(app, tokenRegistry, repositoryIndex);
 
-  const invokeStub = async (operation: EndpointId): Promise<Response> => {
-    const failure = await Effect.runPromise(
-      gitService.invoke(operation).pipe(
-        Effect.match({
-          onFailure: (error) => error,
-          onSuccess: () => undefined,
-        }),
-      ),
-    );
-
-    return failure instanceof EndpointNotImplemented
-      ? notImplemented(failure.operation)
-      : new Response(null, { status: 204 });
-  };
-
-  const registerStub = (
-    method: "DELETE" | "GET" | "PATCH" | "POST",
-    path: string,
-    operation: EndpointId,
-  ) => {
-    app.on(method, path, () => invokeStub(operation));
-  };
-
   for (const endpoint of REST_ENDPOINTS) {
     // Implemented endpoints are already registered above; registering a stub
     // for them would only shadow a live route with a `501`.
     if (isImplementedEndpoint(endpoint.id)) {
       continue;
     }
-    registerStub(endpoint.method, endpoint.path, endpoint.id);
+    app.on(endpoint.method, endpoint.path, () => notImplemented(endpoint.id));
   }
 
   for (const endpoint of GIT_HTTP_ENDPOINTS) {
@@ -116,7 +84,7 @@ export const createApp = ({
     if (endpoint.id.endsWith(".advertise") || isImplementedEndpoint(endpoint.id)) {
       continue;
     }
-    registerStub(endpoint.method, endpoint.path, endpoint.id);
+    app.on(endpoint.method, endpoint.path, () => notImplemented(endpoint.id));
   }
 
   registerGitRoutes(app, {
