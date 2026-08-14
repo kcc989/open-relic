@@ -39,12 +39,12 @@ The API implemented so far predated this decision and did not match. Most of the
 gap is now closed — the shape of the wire is Artifacts' — and what remains is
 behavior that has not been built at all rather than behavior built differently:
 
-|              | Open Relic today                      | Artifacts                                                 |
-| ------------ | ------------------------------------- | --------------------------------------------------------- |
-| Namespaces   | created and deleted explicitly        | created implicitly with the first repo; list and get only |
-| Contents     | routes registered, answer `501`       | serve log, objects, and files                             |
-| Fork, import | routes registered, answer `501`       | copy repositories and import one remote branch            |
-| `source`     | always `null` — nothing writes it yet | set by import                                             |
+|              | Open Relic today                       | Artifacts                                                 |
+| ------------ | -------------------------------------- | --------------------------------------------------------- |
+| Namespaces   | created and deleted explicitly         | created implicitly with the first repo; list and get only |
+| Contents     | direct objects served; log/files `501` | serve log, objects, and files                             |
+| Fork, import | routes registered, answer `501`        | copy repositories and import one remote branch            |
+| `source`     | always `null` — nothing writes it yet  | set by import                                             |
 
 These closed with the reshaping of the REST surface and Git token
 authorization: the path shape, the v4 envelope, `result_info` pagination,
@@ -53,7 +53,7 @@ documents, the contents path spellings, token creation on the namespace, `202`
 with `{id}` on repository delete, the `id`/`read_only` repository fields, and
 real token issue, list, revoke, expiry, scope, and Git credential checks.
 
-`refs` and `archive/*` are ours, not theirs, and will be removed rather than
+`refs` and `archive/*` were ours, not theirs, and have been removed rather than
 maintained as a second content API. Ref discovery remains on Git upload-pack,
 and clients create archives after fetching or mounting a working tree.
 Extensions are allowed — an installation may serve more than Artifacts does —

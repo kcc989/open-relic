@@ -112,13 +112,6 @@ export const REST_ENDPOINTS = [
     path: `${NAMESPACE}/tokens/:tokenId`,
     samplePath: `${SAMPLE_NAMESPACE}/tokens/0123456789abcdef`,
   },
-  // `refs` and `archive` are ours; the rest are Artifacts' own spellings.
-  {
-    id: "contents.refs",
-    method: "GET",
-    path: `${REPO}/refs`,
-    samplePath: `${SAMPLE_REPO}/refs`,
-  },
   {
     id: "contents.log",
     method: "GET",
@@ -156,12 +149,6 @@ export const REST_ENDPOINTS = [
     method: "GET",
     path: `${REPO}/raw/:ref/*`,
     samplePath: `${SAMPLE_REPO}/raw/main/README.md`,
-  },
-  {
-    id: "contents.archive",
-    method: "GET",
-    path: `${REPO}/archive/*`,
-    samplePath: `${SAMPLE_REPO}/archive/main.tar.gz`,
   },
 ] as const satisfies readonly EndpointContract[];
 
@@ -227,6 +214,9 @@ export const IMPLEMENTED_ENDPOINT_IDS = [
   "tokens.create",
   "tokens.list",
   "tokens.delete",
+  "contents.commit",
+  "contents.tree",
+  "contents.blob",
   "git.receivePack.advertise",
   "git.receivePack",
   "git.uploadPack.advertise",
@@ -430,6 +420,40 @@ export interface CreateRepoResult {
 
 export interface DeleteRepoResult {
   readonly id: string;
+}
+
+// ---------------------------------------------------------------------------
+// Repository content
+// ---------------------------------------------------------------------------
+
+/** The part of a Git identity Artifacts exposes; timestamps live on the commit. */
+export interface CommitIdentity {
+  readonly name: string;
+  readonly email: string;
+}
+
+/** A stored Git commit, in the response shape verified against Artifacts. */
+export interface CommitInfo {
+  readonly hash: string;
+  readonly treeHash: string;
+  readonly message: string;
+  readonly author: CommitIdentity;
+  readonly committer: CommitIdentity;
+  readonly parents: readonly string[];
+  /** Unix seconds from the author identity line. */
+  readonly authoredAt: number;
+  /** Unix seconds from the committer identity line. */
+  readonly committedAt: number;
+}
+
+export type TreeEntryType = "blob" | "exec" | "gitlink" | "symlink" | "tree";
+
+/** One entry in Git's binary tree encoding, as Artifacts exposes it. */
+export interface TreeEntryInfo {
+  readonly name: string;
+  readonly mode: string;
+  readonly hash: string;
+  readonly type: TreeEntryType;
 }
 
 export const REPOSITORY_NAME_MAX_LENGTH = 100;

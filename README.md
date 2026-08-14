@@ -75,6 +75,13 @@ A failure keeps the shape and moves into `errors`, using
 
 A rejected field carries a JSON pointer at it in `errors[].source.pointer`.
 
+Direct object reads use the same immutable SHA-1 names as Git:
+
+- `GET /namespaces/:namespace/repos/:repo/commit/:hash` returns parsed commit metadata.
+- `GET /namespaces/:namespace/repos/:repo/tree/:hash` returns the tree's entries and modes.
+- `GET /namespaces/:namespace/repos/:repo/blob/:hash` returns the stored bytes as
+  `application/octet-stream` rather than a JSON envelope.
+
 Lists answer with a bare array in `result` and their paging state beside it in
 `result_info`. Cursors are keyset, not offset — the cursor carries the sort key
 of the last row handed out — so a repository created mid-walk cannot shift rows
@@ -622,7 +629,6 @@ If the binding is absent, empty, or shorter than 32 UTF-8 bytes, protected
 routes fail closed with `401` and `/healthz` answers `503` with `status` set to
 `"unavailable"`.
 
-Alongside the endpoints above, routes for forks, imports, repository
-contents, archives, and both halves of upload-pack are registered from the
-manifest in `packages/contracts/src/index.ts`, answer `501`, and are covered by
-tests.
+Alongside the endpoints above, routes for forks, imports, and the remaining
+repository content operations are registered from the manifest in
+`packages/contracts/src/index.ts`, answer `501`, and are covered by tests.

@@ -20,6 +20,7 @@ import {
   type AuthorizeControlPlaneRequest,
 } from "./control-plane-authorization.ts";
 import { apiTokenFromEnv } from "./api-token.ts";
+import { registerContentRoutes } from "./content-routes.ts";
 import { controlPlaneAuthenticationRequired, notFound, notImplemented } from "./envelope.ts";
 import { registerGitRoutes } from "./git-routes.ts";
 import { authorizeRepoToken, type AuthorizeGitRequest } from "./git/authorization.ts";
@@ -74,6 +75,7 @@ export const createApp = ({
 
   registerNamespaceRoutes(app, namespaceRegistry, repositoryObjects);
   registerRepositoryRoutes(app, repositoryIndex, repositoryObjects, tokenRegistry);
+  registerContentRoutes(app, repositoryIndex, repositoryObjects);
   registerTokenRoutes(app, tokenRegistry);
 
   const invokeStub = async (operation: EndpointId): Promise<Response> => {

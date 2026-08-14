@@ -38,6 +38,7 @@ export class FakeRepositoryObjects implements RepositoryObjects {
   readonly #storages = new Map<string, TestRepositoryStorage>();
   readonly #minted: string[] = [];
   readonly #destroyed: string[] = [];
+  #serializedRpcLimit = Number.POSITIVE_INFINITY;
 
   createId(): string {
     const id = `repository-object-${this.#minted.length + 1}`;
@@ -56,6 +57,14 @@ export class FakeRepositoryObjects implements RepositoryObjects {
       advertiseUploadPack: (protocolVersion) => store.advertiseUploadPack(protocolVersion),
       uploadPack: (body) => store.uploadPack(body),
       receivePack: (body) => store.receivePack(body),
+      readObject: async (oid) => {
+        const object = await store.readObject(oid);
+        if (object !== null && object.bytes.byteLength >= this.#serializedRpcLimit) {
+          throw new Error("The test RPC value exceeds its serialized size limit.");
+        }
+        return object;
+      },
+      readBlob: (oid) => store.readBlob(oid),
       sweep: () => store.sweep(),
       destroy: async () => {
         this.#destroyed.push(durableObjectId);
@@ -77,6 +86,11 @@ export class FakeRepositoryObjects implements RepositoryObjects {
   /** The ids that still hold storage: created and not destroyed. */
   get liveIds(): readonly string[] {
     return [...this.#storages.keys()];
+  }
+
+  /** Scale down Workers' serialized-RPC ceiling so route tests can cross it cheaply. */
+  limitSerializedRpcTo(bytes: number): void {
+    this.#serializedRpcLimit = bytes;
   }
 
   describe(durableObjectId: string): Promise<RepositorySnapshot | null> {

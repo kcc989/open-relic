@@ -1,5 +1,6 @@
 node_modules/
 .alchemy/
+/.wrangler/
 dist/
 *.tsbuildinfo
 .dev.vars
