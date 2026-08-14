@@ -9,6 +9,12 @@ import { and, count, desc, eq, gt, isNotNull, isNull, lte, type SQL } from "driz
 import type { SyncSqliteDatabase } from "./db/database.ts";
 import { repositories, tokens, type TokenRow } from "./db/registry-schema.ts";
 import { hashTokenSecret, mintToken, parseToken } from "./token-secret.ts";
+import {
+  LocalRegistryStorage,
+  REGISTRY_DATABASE,
+  REGISTRY_NOW,
+  type RegistryStorageConstructor,
+} from "./registry-storage.ts";
 
 export interface CreateTokenCommand {
   readonly namespaceSlug: string;
@@ -37,17 +43,6 @@ export interface AuthorizeTokenCommand {
   readonly namespaceSlug: string;
   readonly repositoryName: string;
   readonly requiredScope: TokenScope;
-}
-
-export interface TokenRegistryClient {
-  readonly createToken: (command: CreateTokenCommand) => Promise<CreateTokenOutcome>;
-  readonly listTokens: (
-    namespaceSlug: string,
-    repositoryName: string,
-    query: ListTokensQuery,
-  ) => Promise<TokenPage | null>;
-  readonly revokeToken: (namespaceSlug: string, id: string) => Promise<boolean>;
-  readonly authorizeToken: (command: AuthorizeTokenCommand) => Promise<boolean>;
 }
 
 const tokenState = (row: TokenRow, now: Date): TokenInfo["state"] => {
@@ -79,134 +74,134 @@ const stateCondition = (state: TokenListState, nowUnix: number): SQL | undefined
 };
 
 /** Token persistence and checks, colocated with the installation registry. */
-export class TokenRegistry implements TokenRegistryClient {
-  readonly #db: SyncSqliteDatabase;
-  readonly #now: () => Date;
+export const withTokenRegistry = <TBase extends RegistryStorageConstructor>(Base: TBase) =>
+  class TokenRegistryMixin extends Base {
+    readonly #db: SyncSqliteDatabase = this[REGISTRY_DATABASE];
+    readonly #now: () => Date = this[REGISTRY_NOW];
 
-  constructor(db: SyncSqliteDatabase, now: () => Date = () => new Date()) {
-    this.#db = db;
-    this.#now = now;
-  }
+    async createToken(command: CreateTokenCommand): Promise<CreateTokenOutcome> {
+      const now = this.#now();
+      const minted = mintToken(now, command.ttlSeconds);
+      const secretHash = await hashTokenSecret(minted.secret);
 
-  async createToken(command: CreateTokenCommand): Promise<CreateTokenOutcome> {
-    const now = this.#now();
-    const minted = mintToken(now, command.ttlSeconds);
-    const secretHash = await hashTokenSecret(minted.secret);
+      return this.#db.transaction((tx): CreateTokenOutcome => {
+        const repository = tx
+          .select({ name: repositories.name })
+          .from(repositories)
+          .where(
+            and(
+              eq(repositories.namespaceSlug, command.namespaceSlug),
+              eq(repositories.name, command.repositoryName),
+            ),
+          )
+          .limit(1)
+          .all();
 
-    return this.#db.transaction((tx): CreateTokenOutcome => {
-      const repository = tx
+        if (repository.length === 0) {
+          return { created: false, reason: "repository-missing" };
+        }
+
+        tx.insert(tokens)
+          .values({
+            id: minted.id,
+            namespaceSlug: command.namespaceSlug,
+            repositoryName: command.repositoryName,
+            secretHash,
+            scope: command.scope,
+            createdAt: now.toISOString(),
+            expiresAt: minted.expiresAt.toISOString(),
+            expiresAtUnix: minted.expiresAtUnix,
+            revokedAt: null,
+          })
+          .run();
+
+        return {
+          created: true,
+          token: {
+            id: minted.id,
+            plaintext: minted.plaintext,
+            scope: command.scope,
+            expires_at: minted.expiresAt.toISOString(),
+          },
+        };
+      });
+    }
+
+    async listTokens(
+      namespaceSlug: string,
+      repositoryName: string,
+      query: ListTokensQuery,
+    ): Promise<TokenPage | null> {
+      const repository = await this.#db
         .select({ name: repositories.name })
         .from(repositories)
         .where(
-          and(
-            eq(repositories.namespaceSlug, command.namespaceSlug),
-            eq(repositories.name, command.repositoryName),
-          ),
+          and(eq(repositories.namespaceSlug, namespaceSlug), eq(repositories.name, repositoryName)),
         )
-        .limit(1)
-        .all();
-
+        .limit(1);
       if (repository.length === 0) {
-        return { created: false, reason: "repository-missing" };
+        return null;
       }
 
-      tx.insert(tokens)
-        .values({
-          id: minted.id,
-          namespaceSlug: command.namespaceSlug,
-          repositoryName: command.repositoryName,
-          secretHash,
-          scope: command.scope,
-          createdAt: now.toISOString(),
-          expiresAt: minted.expiresAt.toISOString(),
-          expiresAtUnix: minted.expiresAtUnix,
-          revokedAt: null,
-        })
-        .run();
+      const now = this.#now();
+      const filter = and(
+        eq(tokens.namespaceSlug, namespaceSlug),
+        eq(tokens.repositoryName, repositoryName),
+        stateCondition(query.state, Math.floor(now.getTime() / 1000)),
+      );
+      const [rows, totals] = await Promise.all([
+        this.#db
+          .select()
+          .from(tokens)
+          .where(filter)
+          .orderBy(desc(tokens.createdAt), desc(tokens.id))
+          .limit(query.perPage)
+          .offset((query.page - 1) * query.perPage),
+        this.#db.select({ count: count() }).from(tokens).where(filter),
+      ]);
 
       return {
-        created: true,
-        token: {
-          id: minted.id,
-          plaintext: minted.plaintext,
-          scope: command.scope,
-          expires_at: minted.expiresAt.toISOString(),
-        },
+        tokens: rows.map((row) => toTokenInfo(row, now)),
+        totalCount: totals[0]?.count ?? 0,
       };
-    });
-  }
-
-  async listTokens(
-    namespaceSlug: string,
-    repositoryName: string,
-    query: ListTokensQuery,
-  ): Promise<TokenPage | null> {
-    const repository = await this.#db
-      .select({ name: repositories.name })
-      .from(repositories)
-      .where(
-        and(eq(repositories.namespaceSlug, namespaceSlug), eq(repositories.name, repositoryName)),
-      )
-      .limit(1);
-    if (repository.length === 0) {
-      return null;
     }
 
-    const now = this.#now();
-    const filter = and(
-      eq(tokens.namespaceSlug, namespaceSlug),
-      eq(tokens.repositoryName, repositoryName),
-      stateCondition(query.state, Math.floor(now.getTime() / 1000)),
-    );
-    const [rows, totals] = await Promise.all([
-      this.#db
+    async revokeToken(namespaceSlug: string, id: string): Promise<boolean> {
+      const rows = await this.#db
+        .update(tokens)
+        .set({ revokedAt: this.#now().toISOString() })
+        .where(and(eq(tokens.namespaceSlug, namespaceSlug), eq(tokens.id, id)))
+        .returning({ id: tokens.id });
+      return rows.length > 0;
+    }
+
+    async authorizeToken(command: AuthorizeTokenCommand): Promise<boolean> {
+      const parsed = parseToken(command.presentedToken);
+      const nowUnix = Math.floor(this.#now().getTime() / 1000);
+      if (parsed === null || (parsed.expiresAtUnix !== null && parsed.expiresAtUnix <= nowUnix)) {
+        return false;
+      }
+
+      const secretHash = await hashTokenSecret(parsed.secret);
+      const rows = await this.#db
         .select()
         .from(tokens)
-        .where(filter)
-        .orderBy(desc(tokens.createdAt), desc(tokens.id))
-        .limit(query.perPage)
-        .offset((query.page - 1) * query.perPage),
-      this.#db.select({ count: count() }).from(tokens).where(filter),
-    ]);
+        .where(eq(tokens.secretHash, secretHash))
+        .limit(1);
+      const row = rows[0];
 
-    return {
-      tokens: rows.map((row) => toTokenInfo(row, now)),
-      totalCount: totals[0]?.count ?? 0,
-    };
-  }
-
-  async revokeToken(namespaceSlug: string, id: string): Promise<boolean> {
-    const rows = await this.#db
-      .update(tokens)
-      .set({ revokedAt: this.#now().toISOString() })
-      .where(and(eq(tokens.namespaceSlug, namespaceSlug), eq(tokens.id, id)))
-      .returning({ id: tokens.id });
-    return rows.length > 0;
-  }
-
-  async authorizeToken(command: AuthorizeTokenCommand): Promise<boolean> {
-    const parsed = parseToken(command.presentedToken);
-    const nowUnix = Math.floor(this.#now().getTime() / 1000);
-    if (parsed === null || (parsed.expiresAtUnix !== null && parsed.expiresAtUnix <= nowUnix)) {
-      return false;
+      return (
+        row !== undefined &&
+        row.namespaceSlug === command.namespaceSlug &&
+        row.repositoryName === command.repositoryName &&
+        row.revokedAt === null &&
+        (parsed.expiresAtUnix === null || row.expiresAtUnix === parsed.expiresAtUnix) &&
+        row.expiresAtUnix > nowUnix &&
+        (command.requiredScope === "read" || row.scope === "write")
+      );
     }
+  };
 
-    const secretHash = await hashTokenSecret(parsed.secret);
-    const rows = await this.#db
-      .select()
-      .from(tokens)
-      .where(eq(tokens.secretHash, secretHash))
-      .limit(1);
-    const row = rows[0];
+export class TokenRegistry extends withTokenRegistry(LocalRegistryStorage) {}
 
-    return (
-      row !== undefined &&
-      row.namespaceSlug === command.namespaceSlug &&
-      row.repositoryName === command.repositoryName &&
-      row.revokedAt === null &&
-      (parsed.expiresAtUnix === null || row.expiresAtUnix === parsed.expiresAtUnix) &&
-      row.expiresAtUnix > nowUnix &&
-      (command.requiredScope === "read" || row.scope === "write")
-    );
-  }
-}
+export type TokenRegistryClient = Pick<TokenRegistry, Extract<keyof TokenRegistry, string>>;

@@ -19,20 +19,11 @@ import { Schema } from "effect";
 import type { Hono } from "hono";
 
 import type { ApiEnv } from "../../../alchemy.run.ts";
-import {
-  forkInProgress,
-  importInProgress,
-  invalidInput,
-  invalidRepoName,
-  invalidTtl,
-  notFound,
-  ok,
-  okList,
-} from "./envelope.ts";
+import { invalidInput, invalidRepoName, invalidTtl, notFound, ok, okList } from "./envelope.ts";
 import { parseChoice, parseLimit } from "./query.ts";
 import { decodeJson, type Json, type Rejected } from "./request-body.ts";
 import type { TokenRegistryClient } from "./token-registry.ts";
-import type { RepositoryIndexClient } from "./repository-index.ts";
+import { repositoryNotFound, type RepositoryResolver } from "./repository-resolution.ts";
 
 const CreateTokenJson = Schema.Struct({
   repo: Schema.optionalKey(
@@ -110,13 +101,10 @@ const parsePage = (raw: string | undefined): { ok: true; value: number } | Rejec
   return { ok: true, value: Number(raw) };
 };
 
-const noSuchRepository = (namespaceSlug: string, repositoryName: string): string =>
-  `No repository named "${namespaceSlug}/${repositoryName}" exists.`;
-
 export const registerTokenRoutes = (
   app: Hono<{ Bindings: ApiEnv }>,
   resolveTokens: (env: ApiEnv) => TokenRegistryClient,
-  resolveRepositories: (env: ApiEnv) => RepositoryIndexClient,
+  resolveRepository: RepositoryResolver,
 ): void => {
   app.post(`${NAMESPACES_PATH}/:namespace/tokens`, async (context) => {
     let payload: Json;
@@ -139,19 +127,13 @@ export const registerTokenRoutes = (
     }
 
     const namespaceSlug = context.req.param("namespace");
-    const repository = await resolveRepositories(context.env).getRepository(
-      namespaceSlug,
-      parsed.repositoryName,
-    );
-    if (repository?.status === "forking") {
-      return forkInProgress(
-        `The repository "${namespaceSlug}/${parsed.repositoryName}" is still being forked.`,
-      );
-    }
-    if (repository?.status === "importing") {
-      return importInProgress(
-        `The repository "${namespaceSlug}/${parsed.repositoryName}" is still being imported.`,
-      );
+    const repository = await resolveRepository.resolve({
+      env: context.env,
+      namespace: namespaceSlug,
+      name: parsed.repositoryName,
+    });
+    if (repository instanceof Response) {
+      return repository;
     }
     const outcome = await resolveTokens(context.env).createToken({
       namespaceSlug,
@@ -162,7 +144,7 @@ export const registerTokenRoutes = (
 
     return outcome.created
       ? ok(outcome.token satisfies CreateTokenResult)
-      : notFound(noSuchRepository(namespaceSlug, parsed.repositoryName));
+      : repositoryNotFound(namespaceSlug, parsed.repositoryName);
   });
 
   app.get(`${NAMESPACES_PATH}/:namespace/repos/:repo/tokens`, async (context) => {
@@ -192,19 +174,13 @@ export const registerTokenRoutes = (
 
     const namespaceSlug = context.req.param("namespace");
     const repositoryName = context.req.param("repo");
-    const repository = await resolveRepositories(context.env).getRepository(
-      namespaceSlug,
-      repositoryName,
-    );
-    if (repository?.status === "forking") {
-      return forkInProgress(
-        `The repository "${namespaceSlug}/${repositoryName}" is still being forked.`,
-      );
-    }
-    if (repository?.status === "importing") {
-      return importInProgress(
-        `The repository "${namespaceSlug}/${repositoryName}" is still being imported.`,
-      );
+    const repository = await resolveRepository.resolve({
+      env: context.env,
+      namespace: namespaceSlug,
+      name: repositoryName,
+    });
+    if (repository instanceof Response) {
+      return repository;
     }
     const result = await resolveTokens(context.env).listTokens(namespaceSlug, repositoryName, {
       state: state.value,
@@ -212,7 +188,7 @@ export const registerTokenRoutes = (
       perPage: perPage.value,
     });
     if (result === null) {
-      return notFound(noSuchRepository(namespaceSlug, repositoryName));
+      return repositoryNotFound(namespaceSlug, repositoryName);
     }
 
     return okList(result.tokens, {

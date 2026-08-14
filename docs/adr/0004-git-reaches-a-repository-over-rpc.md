@@ -44,14 +44,23 @@ is not something an unauthorized client can learn.
 
 ## Consequences
 
-`RepositoryObject` stays a thin RPC shell over `RepositoryStore`, which is what
-lets the tests drive real queries against real migrations without a Workers
-runtime — including the advertisement, since the encoding lives in the store
-rather than in the shell.
+Repository operations are implemented once as inherited class methods. A
+`RepositoryObject` inherits them over Durable Object storage; a
+`RepositoryStore` inherits the same methods over local storage, which lets tests
+drive real queries against real migrations without a Workers runtime. The
+object itself adds only durable import scheduling, alarm arming, and
+destruction. The client type is derived from that implementation rather than
+restating every method.
 
-There is no anonymous-write mode. A missing, malformed, expired, revoked,
-read-scoped, or differently scoped token is refused before the repository
-lookup, so it cannot reveal whether another repository exists.
+The inheritance is load-bearing: Workers RPC exposes methods declared on class
+prototypes, not function-valued instance properties. The shared implementation
+therefore preserves named RPC methods and does not replace them with a forwarded
+request, an object of closures, or runtime-installed delegates.
+
+There is no anonymous-write mode. Upload-pack requires read scope (which a write
+token also grants); receive-pack requires write scope. A missing, malformed,
+expired, revoked, or insufficiently scoped token is refused before the
+repository lookup, so it cannot reveal whether another repository exists.
 
 The REST control plane is separately protected by the API token.
 Without that boundary, an anonymous caller could mint its own write Token and

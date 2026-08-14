@@ -4,6 +4,7 @@ import {
   type CreateRepoRequest,
   type CreateRepoResult,
 } from "@open-relic/contracts";
+import { eq } from "drizzle-orm";
 
 import type { RepositoryObjects } from "../../src/bindings.ts";
 import { createApp } from "../../src/app.ts";
@@ -11,9 +12,13 @@ import {
   allowControlPlane,
   type AuthorizeControlPlaneRequest,
 } from "../../src/control-plane-authorization.ts";
+import { REPOSITORY_STATE_ID, repositoryState } from "../../src/db/repository-schema.ts";
+import { HEAD_KEY } from "../../src/head.ts";
 import {
   ImportOperation,
   type ImportCheckpoint,
+  type ImportJob,
+  type ImportJobOutcome,
   type ImportOperationStorage,
   type StoredImportJob,
 } from "../../src/import-operation.ts";
@@ -21,10 +26,14 @@ import { NamespaceRegistry } from "../../src/namespace-registry.ts";
 import { RepositoryIndex, type RepositoryIndexClient } from "../../src/repository-index.ts";
 import {
   RepositoryStore,
+  type ForkObject,
+  type ForkOptions,
+  type ForkOutcome,
+  type ForkTarget,
   type RemoteFetch,
   type RepositoryObjectClient,
-  type RepositorySnapshot,
 } from "../../src/repository-store.ts";
+import type { PackBase } from "../../src/pack.ts";
 import { TokenRegistry } from "../../src/token-registry.ts";
 import {
   createTestDatabase,
@@ -73,6 +82,55 @@ class MemoryImportOperationStorage implements ImportOperationStorage {
   async armAlarm(): Promise<void> {}
 }
 
+class FakeRepositoryObject extends RepositoryStore implements RepositoryObjectClient {
+  readonly #takeAfterForkSnapshot: () => (() => Promise<void>) | undefined;
+  readonly #takeForkWriteError: () => Error | null;
+  readonly #serializedRpcLimit: () => number;
+  readonly #scheduleImport: (store: RepositoryStore, job: ImportJob) => Promise<ImportJobOutcome>;
+  readonly #destroyObject: () => Promise<void>;
+
+  constructor(
+    storage: TestRepositoryStorage,
+    takeAfterForkSnapshot: () => (() => Promise<void>) | undefined,
+    takeForkWriteError: () => Error | null,
+    serializedRpcLimit: () => number,
+    scheduleImport: (store: RepositoryStore, job: ImportJob) => Promise<ImportJobOutcome>,
+    destroyObject: () => Promise<void>,
+  ) {
+    super(storage.db, storage.kv);
+    this.#takeAfterForkSnapshot = takeAfterForkSnapshot;
+    this.#takeForkWriteError = takeForkWriteError;
+    this.#serializedRpcLimit = serializedRpcLimit;
+    this.#scheduleImport = scheduleImport;
+    this.#destroyObject = destroyObject;
+  }
+
+  override copyForkTo(target: ForkTarget, options: ForkOptions): Promise<ForkOutcome> {
+    return super.copyForkTo(target, options, this.#takeAfterForkSnapshot());
+  }
+
+  override writeForkObject(object: ForkObject, bytes: ReadableStream<Uint8Array>): Promise<void> {
+    const error = this.#takeForkWriteError();
+    return error === null ? super.writeForkObject(object, bytes) : Promise.reject(error);
+  }
+
+  override async readObject(oid: string): Promise<PackBase | null> {
+    const object = await super.readObject(oid);
+    if (object !== null && object.bytes.byteLength >= this.#serializedRpcLimit()) {
+      throw new Error("The test RPC value exceeds its serialized size limit.");
+    }
+    return object;
+  }
+
+  scheduleImport(job: ImportJob): Promise<ImportJobOutcome> {
+    return this.#scheduleImport(this, job);
+  }
+
+  destroy(): Promise<void> {
+    return this.#destroyObject();
+  }
+}
+
 /**
  * The `REPOSITORIES` binding, standing in for the Durable Object namespace.
  * Each id gets a real {@link RepositoryStore} over its own in-memory storage;
@@ -83,7 +141,7 @@ class MemoryImportOperationStorage implements ImportOperationStorage {
 export class FakeRepositoryObjects implements RepositoryObjects {
   readonly #index: RepositoryIndexClient;
   readonly #storages = new Map<string, TestRepositoryStorage>();
-  readonly #stores = new Map<string, RepositoryStore>();
+  readonly #stores = new Map<string, FakeRepositoryObject>();
   readonly #importStorages = new Map<string, MemoryImportOperationStorage>();
   readonly #importOperations = new Map<string, ImportOperation>();
   readonly #minted: string[] = [];
@@ -105,47 +163,7 @@ export class FakeRepositoryObjects implements RepositoryObjects {
   }
 
   get(durableObjectId: string): RepositoryObjectClient {
-    const store = this.#storeFor(durableObjectId);
-
-    return {
-      initialize: (init) => store.initialize(init),
-      describe: () => store.describe(),
-      advertiseReceivePack: () => store.advertiseReceivePack(),
-      advertiseUploadPack: (protocolVersion) => store.advertiseUploadPack(protocolVersion),
-      uploadPack: (body) => store.uploadPack(body),
-      receivePack: (body) => store.receivePack(body),
-      copyForkTo: (target, options) => {
-        const afterSnapshot = this.#afterForkSnapshot ?? undefined;
-        this.#afterForkSnapshot = null;
-        return store.copyForkTo(target, options, afterSnapshot);
-      },
-      writeForkObject: (object, bytes) => {
-        const error = this.#forkWriteError;
-        this.#forkWriteError = null;
-        if (error !== null) {
-          return Promise.reject(error);
-        }
-        return store.writeForkObject(object, bytes);
-      },
-      completeFork: (state) => store.completeFork(state),
-      readObject: async (oid) => {
-        const object = await store.readObject(oid);
-        if (object !== null && object.bytes.byteLength >= this.#serializedRpcLimit) {
-          throw new Error("The test RPC value exceeds its serialized size limit.");
-        }
-        return object;
-      },
-      readBlob: (oid) => store.readBlob(oid),
-      readHistory: (revision, limit, offset) => store.readHistory(revision, limit, offset),
-      readFile: (revision, path) => store.readFile(revision, path),
-      hasObject: (oid) => store.hasObject(oid),
-      importBranch: (request) => store.importBranch(request),
-      resetImport: (init) => store.resetImport(init),
-      scheduleImport: (job) => this.#importOperationFor(durableObjectId, store).schedule(job),
-      sweep: () => store.sweep(),
-      destroy: () =>
-        this.#importOperations.get(durableObjectId)?.destroy() ?? this.#destroy(durableObjectId),
-    };
+    return this.#storeFor(durableObjectId);
   }
 
   /** Every id handed out, in the order the routes asked for them. */
@@ -167,8 +185,17 @@ export class FakeRepositoryObjects implements RepositoryObjects {
     this.#serializedRpcLimit = bytes;
   }
 
-  describe(durableObjectId: string): Promise<RepositorySnapshot | null> {
-    return this.get(durableObjectId).describe();
+  async inspect(durableObjectId: string): Promise<{
+    readonly head: string | undefined;
+    readonly createdAt: string | undefined;
+  }> {
+    const storage = this.#storageFor(durableObjectId);
+    const state = await storage.db
+      .select({ createdAt: repositoryState.createdAt })
+      .from(repositoryState)
+      .where(eq(repositoryState.id, REPOSITORY_STATE_ID))
+      .limit(1);
+    return { head: storage.kv.get(HEAD_KEY), createdAt: state[0]?.createdAt };
   }
 
   /** Stands in for the push that will write them once receive-pack lands. */
@@ -230,13 +257,29 @@ export class FakeRepositoryObjects implements RepositoryObjects {
     return created;
   }
 
-  #storeFor(durableObjectId: string): RepositoryStore {
+  #storeFor(durableObjectId: string): FakeRepositoryObject {
     const existing = this.#stores.get(durableObjectId);
     if (existing !== undefined) {
       return existing;
     }
     const storage = this.#storageFor(durableObjectId);
-    const created = new RepositoryStore(storage.db, storage.kv);
+    const created = new FakeRepositoryObject(
+      storage,
+      () => {
+        const afterSnapshot = this.#afterForkSnapshot ?? undefined;
+        this.#afterForkSnapshot = null;
+        return afterSnapshot;
+      },
+      () => {
+        const error = this.#forkWriteError;
+        this.#forkWriteError = null;
+        return error;
+      },
+      () => this.#serializedRpcLimit,
+      (store, job) => this.#importOperationFor(durableObjectId, store).schedule(job),
+      () =>
+        this.#importOperations.get(durableObjectId)?.destroy() ?? this.#destroy(durableObjectId),
+    );
     this.#stores.set(durableObjectId, created);
     return created;
   }

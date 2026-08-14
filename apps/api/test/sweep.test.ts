@@ -16,13 +16,19 @@ import { streamOf } from "./support/pack.ts";
 
 const MAIN = "refs/heads/main";
 
+class DestructibleRepositoryStore extends RepositoryStore {
+  destroy(remove: () => Promise<void>): Promise<void> {
+    return this.destroyStorage(remove);
+  }
+}
+
 let opened: TestRepositoryStorage;
-let store: RepositoryStore;
+let store: DestructibleRepositoryStore;
 let objects: ObjectStore;
 
 beforeEach(async () => {
   opened = createTestRepositoryStorage();
-  store = new RepositoryStore(opened.db, opened.kv);
+  store = new DestructibleRepositoryStore(opened.db, opened.kv);
   objects = new ObjectStore(opened.db, opened.kv);
   await store.initialize({ defaultBranch: "main", createdAt: "2026-08-13T00:00:00.000Z" });
 });
@@ -297,7 +303,7 @@ test("destruction waits until an in-flight sweep has finished re-arming its alar
   await started;
 
   let destroyed = false;
-  const destroying = store.destroyStorage(async () => {
+  const destroying = store.destroy(async () => {
     alarmArmed = false;
     destroyed = true;
   });
