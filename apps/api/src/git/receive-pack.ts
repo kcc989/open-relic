@@ -16,7 +16,23 @@ import { flushPkt, pktLine, type PktLineReader } from "./pkt-line.ts";
 export const RECEIVE_PACK_RESULT_CONTENT_TYPE = "application/x-git-receive-pack-result" as const;
 
 export const REPORT_STATUS_CAPABILITY = "report-status";
+export const REPORT_STATUS_V2_CAPABILITY = "report-status-v2";
 export const SIDE_BAND_64K_CAPABILITY = "side-band-64k";
+export const ATOMIC_CAPABILITY = "atomic";
+export const PUSH_OPTIONS_CAPABILITY = "push-options";
+
+const REQUEST_CAPABILITIES = new Set([
+  REPORT_STATUS_CAPABILITY,
+  REPORT_STATUS_V2_CAPABILITY,
+  SIDE_BAND_64K_CAPABILITY,
+  ATOMIC_CAPABILITY,
+  PUSH_OPTIONS_CAPABILITY,
+  "ofs-delta",
+  "object-format=sha1",
+]);
+
+const understandsCapability = (capability: string): boolean =>
+  REQUEST_CAPABILITIES.has(capability) || capability.startsWith("agent=");
 
 /**
  * The multiplexed stream `side-band-64k` turns the response into: the report on
@@ -129,8 +145,42 @@ export const readReceivePackRequest = async (lines: PktLineReader): Promise<Rece
     const parsed = parseCommandLine(line.payload, capabilities);
     if (parsed.capabilities !== null && commands.length === 0) {
       capabilities = parsed.capabilities;
+      const unsupported = capabilities.find((capability) => !understandsCapability(capability));
+      if (unsupported !== undefined) {
+        throw new ReceivePackError(
+          `The capability "${unsupported}" is not supported.`,
+          capabilities,
+        );
+      }
     }
     commands.push(parsed.command);
+  }
+};
+
+/**
+ * Push options are a second pkt-line section between the commands and pack.
+ * Open Relic has no receive hooks yet, so honoring them means consuming and
+ * validating the section without changing repository behavior.
+ */
+export const readPushOptions = async (
+  lines: PktLineReader,
+  capabilities: readonly string[],
+): Promise<readonly string[]> => {
+  const options: string[] = [];
+
+  for (;;) {
+    const line = await lines.next();
+    if (line.kind === "flush") {
+      return options;
+    }
+    if (line.kind === "end") {
+      throw new ReceivePackError("The request ended before the push options did.", capabilities);
+    }
+
+    if (line.payload.length === 0 || line.payload.some((byte) => byte <= 0x1f || byte === 0x7f)) {
+      throw new ReceivePackError("A push option contains an invalid byte.", capabilities);
+    }
+    options.push(decoder.decode(line.payload));
   }
 };
 
@@ -225,7 +275,10 @@ export const receivePackResult = (
 ): Uint8Array<ArrayBuffer> => {
   // A client that did not ask for `report-status` is not reading one, and
   // sending it anyway would leave bytes on a connection it considers finished.
-  if (!capabilities.includes(REPORT_STATUS_CAPABILITY)) {
+  if (
+    !capabilities.includes(REPORT_STATUS_CAPABILITY) &&
+    !capabilities.includes(REPORT_STATUS_V2_CAPABILITY)
+  ) {
     return new Uint8Array(0);
   }
 
@@ -238,19 +291,16 @@ export const receivePackResult = (
 
 /**
  * Why a ref did not move, in the words a client prints back to whoever ran
- * `git push`. `non-fast-forward` is Git's own spelling and is worth matching
- * exactly; the rest only have to be true and readable.
+ * `git push`.
  */
 export const REJECTIONS = {
-  delete: "deleting a ref is not supported",
   funnyRefname: "funny refname",
   duplicate: "the same ref appears twice in this push",
   exists: "the ref already exists",
   vanished: "the ref no longer exists",
   stale: "the ref has moved since it was advertised",
-  nonFastForward: "non-fast-forward",
   missingObjects: "missing necessary objects",
-  unprovable: "the history is too long to prove a fast-forward",
+  atomic: "atomic push failure",
   unpacker: "n/a (unpacker error)",
 } as const;
 
@@ -272,9 +322,10 @@ const isRefName = (name: string): boolean =>
  * refs the repository already holds — no objects read, no storage touched.
  * `null` in a slot means the command survives to the connectivity walk.
  *
- * Deletes and force are the two halves of push deliberately left out of this
- * slice, and `delete-refs` is unadvertised for exactly that reason. A client
- * that sends one anyway is told so rather than quietly ignored.
+ * Whether an update is a fast-forward is intentionally absent. A plain Git
+ * client refuses a non-fast-forward before sending it; `--force` sends the
+ * same command shape, and the repository accepts it when its old value is
+ * still current.
  */
 export const screenCommands = (
   commands: readonly ReceivePackCommand[],
@@ -283,10 +334,6 @@ export const screenCommands = (
   const seen = new Set<string>();
 
   return commands.map((command) => {
-    if (isDelete(command)) {
-      return REJECTIONS.delete;
-    }
-
     if (!isRefName(command.name)) {
       return REJECTIONS.funnyRefname;
     }
@@ -299,6 +346,13 @@ export const screenCommands = (
     seen.add(command.name);
 
     const held = refs.get(command.name);
+
+    if (isDelete(command)) {
+      if (held === undefined) {
+        return REJECTIONS.vanished;
+      }
+      return held === command.oldOid ? null : REJECTIONS.stale;
+    }
 
     if (isCreate(command)) {
       return held === undefined ? null : REJECTIONS.exists;

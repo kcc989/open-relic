@@ -29,9 +29,9 @@ describe("the receive-pack advertisement", () => {
     expect(advertise([])).toBe(
       "001f# service=git-receive-pack\n" +
         "0000" +
-        "0095" +
+        "00be" +
         `${ZERO_OID} capabilities^{}\0` +
-        "report-status side-band-64k ofs-delta no-thin object-format=sha1 agent=open-relic/0.1.0\n" +
+        "report-status report-status-v2 delete-refs side-band-64k atomic ofs-delta push-options object-format=sha1 agent=open-relic/0.1.0\n" +
         "0000",
     );
   });
@@ -39,9 +39,12 @@ describe("the receive-pack advertisement", () => {
   test("advertises exactly the capabilities we honor", () => {
     expect(RECEIVE_PACK_CAPABILITIES).toEqual([
       "report-status",
+      "report-status-v2",
+      "delete-refs",
       "side-band-64k",
+      "atomic",
       "ofs-delta",
-      "no-thin",
+      "push-options",
       "object-format=sha1",
       "agent=open-relic/0.1.0",
     ]);

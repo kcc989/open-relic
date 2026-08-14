@@ -302,7 +302,7 @@ test("bytes past the trailer are rejected", async () => {
   );
 });
 
-test("a ref-delta whose base is nowhere is rejected — thin packs are out of scope", async () => {
+test("a thin ref-delta whose base is absent from the repository is rejected", async () => {
   const pack = buildPack([
     {
       kind: "ref-delta",

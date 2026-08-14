@@ -26,18 +26,18 @@ export type UploadProtocolVersion = 0 | 1;
 export const SERVICE_VERSION = "0.1.0";
 
 /**
- * Exactly what we honor, and nothing else — an unadvertised capability is how a
- * client learns not to use it. `no-thin` is the one that has to be said out
- * loud: without it a client may send deltas against objects it never packs.
- *
- * Deliberately absent until the work that implements them lands: `delete-refs`,
- * `atomic`, `push-options`, `report-status-v2`.
+ * Exactly what we honor, and nothing else. Thin packs need no capability of
+ * their own: not advertising `no-thin` lets a client delta against objects the
+ * repository already holds.
  */
 export const RECEIVE_PACK_CAPABILITIES: readonly string[] = [
   "report-status",
+  "report-status-v2",
+  "delete-refs",
   "side-band-64k",
+  "atomic",
   "ofs-delta",
-  "no-thin",
+  "push-options",
   "object-format=sha1",
   `agent=open-relic/${SERVICE_VERSION}`,
 ];

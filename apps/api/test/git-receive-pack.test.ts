@@ -7,7 +7,6 @@ import {
 } from "@open-relic/contracts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
-import { REJECTIONS } from "../src/repository-store.ts";
 import { createGitTestApp, type TestApp } from "./support/app.ts";
 import { envelope, errorCode, result } from "./support/envelope.ts";
 import { blob, commit, tree, treeEntry } from "./support/git-objects.ts";
@@ -122,16 +121,21 @@ describe("POST /git/:namespace/:repo.git/git-receive-pack", () => {
     expect(body.result?.last_push_at).toBeNull();
   });
 
-  test("rejects a delete per-ref rather than at the HTTP layer", async () => {
+  test("deletes a ref through the Git protocol", async () => {
     // A push that Git can talk about is answered in Git's protocol; the
     // envelope is for requests that never reached a repository.
+    await createMain();
     const response = await post(pushBody({ commands: [{ oldOid: FIRST.oid, name: MAIN }] }));
 
     expect(response.status).toBe(200);
-    expect((await reportOf(response)).lines).toEqual([
-      "unpack ok",
-      `ng ${MAIN} ${REJECTIONS.delete}`,
-    ]);
+    expect((await reportOf(response)).lines).toEqual(["unpack ok", `ok ${MAIN}`]);
+
+    const advertisement = await harness.app.request(
+      new Request(ADVERTISE, {
+        headers: { Authorization: `Bearer ${harness.repositoryToken}` },
+      }),
+    );
+    expect(await advertisement.text()).toContain("capabilities^{}");
   });
 
   test("refuses a read-only repository, which is what that flag is for", async () => {

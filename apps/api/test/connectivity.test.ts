@@ -3,7 +3,6 @@ import { describe, expect, test } from "bun:test";
 import {
   ObjectParseError,
   commitParents,
-  findAncestor,
   findMissingObject,
   linksToReach,
   linksToVerify,
@@ -196,52 +195,5 @@ describe("the connectivity walk", () => {
     await findMissingObject(FIRST.oid, source, shared);
 
     expect(reads.length).toBe(before);
-  });
-});
-
-describe("the fast-forward check", () => {
-  const history = holding(SECOND, FIRST, ROOT, DOCS);
-
-  test("a commit is its own ancestor, so an unchanged tip fast-forwards", async () => {
-    expect(await findAncestor(FIRST.oid, FIRST.oid, history)).toBe("ancestor");
-  });
-
-  test("finds the old tip behind the new one", async () => {
-    expect(await findAncestor(SECOND.oid, FIRST.oid, history)).toBe("ancestor");
-  });
-
-  test("does not find the new tip behind the old one, which is a rewind", async () => {
-    expect(await findAncestor(FIRST.oid, SECOND.oid, history)).toBe("unrelated");
-  });
-
-  test("finds an ancestor that only one parent of a merge reaches", async () => {
-    // The trap a walk that stopped at the first known tip would fall into: the
-    // old tip is behind the *other* parent.
-    const sideways = commit({ tree: ROOT, message: "Sideways" });
-    const merge = commit({ tree: ROOT, parents: [sideways, SECOND] });
-
-    expect(
-      await findAncestor(merge.oid, FIRST.oid, holding(merge, sideways, SECOND, FIRST, ROOT, DOCS)),
-    ).toBe("ancestor");
-  });
-
-  test("reads no trees, because history is made of commits", async () => {
-    const reads: string[] = [];
-    const source: ObjectSource = {
-      read: async (oid) => {
-        reads.push(oid);
-        return history.read(oid);
-      },
-    };
-
-    await findAncestor(SECOND.oid, FIRST.oid, source);
-
-    expect(reads).not.toContain(ROOT.oid);
-  });
-
-  test("gives up rather than reading a history without end", async () => {
-    // Proving *no* means reading everything the new tip reaches; the ceiling is
-    // what makes that a rejection we can explain instead of a Worker we lose.
-    expect(await findAncestor(SECOND.oid, "d".repeat(40), history, 1)).toBe("budget-exhausted");
   });
 });
