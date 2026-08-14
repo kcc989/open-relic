@@ -228,7 +228,13 @@ test("deduplicates repeated graph edges during writes and index backfills", asyn
 });
 
 test("batches delta and reachability metadata below Cloudflare SQLite's bind limit", async () => {
-  const opened = createTestRepositoryStorage({ maxBoundValues: 100 });
+  let queries = 0;
+  const opened = createTestRepositoryStorage({
+    maxBoundValues: 100,
+    onQuery: () => {
+      queries += 1;
+    },
+  });
   openHandles.push(opened.close);
   const objects = new ObjectStore(opened.db, opened.kv);
   const written = Array.from({ length: 205 }, (_, at) => blob(utf8(`object ${at}`)));
@@ -238,7 +244,9 @@ test("batches delta and reachability metadata below Cloudflare SQLite's bind lim
   const oids = written.map(({ oid }) => oid);
 
   expect(await objects.readDeltaBases(oids)).toEqual(new Map());
+  queries = 0;
   expect((await objects.readPackMetadata(oids)).size).toBe(oids.length);
+  expect(queries).toBe(1);
   expect((await objects.readIndexedObjects(oids)).size).toBe(oids.length);
 });
 
@@ -265,6 +273,30 @@ test("finds candidate Objects in a client's indexed closure without returning th
       new Set([second.oid]),
     ),
   ).toEqual(new Set([contents.oid]));
+});
+
+test("reads a complete indexed closure with client and shallow boundaries", async () => {
+  const objects = store();
+  const contents = gitBlob("reachable contents\n");
+  const root = tree([treeEntry("README.md", contents)]);
+  const first = commit({ tree: root, message: "First" });
+  const second = commit({ tree: root, parents: [first], message: "Second" });
+  for (const object of [contents, root, first, second]) {
+    await objects.write({ ...object, delta: null });
+  }
+
+  expect(new Set(await objects.readObjectClosure(new Set([second.oid])))).toEqual(
+    new Set([second.oid, first.oid, root.oid, contents.oid]),
+  );
+  expect(
+    new Set(await objects.readObjectClosure(new Set([second.oid]), new Set([first.oid]))),
+  ).toEqual(new Set([second.oid, root.oid, contents.oid]));
+  expect(
+    new Set(
+      await objects.readObjectClosure(new Set([second.oid]), new Set(), new Set([second.oid])),
+    ),
+  ).toEqual(new Set([second.oid, root.oid, contents.oid]));
+  expect(await objects.readObjectClosure(new Set(["f".repeat(40)]))).toBeNull();
 });
 
 test("a store reopened on the same storage sees the objects", async () => {

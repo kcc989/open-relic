@@ -23,6 +23,7 @@ export interface TestRepositoryStorage extends TestDatabase {
 interface TestDatabaseOptions {
   /** Reject queries that the target SQLite runtime could not execute. */
   readonly maxBoundValues?: number;
+  readonly onQuery?: (query: string, params: unknown[]) => void;
 }
 
 /**
@@ -91,7 +92,8 @@ const createDatabase = (
   const db = drizzle({
     client,
     logger: {
-      logQuery(_query, params) {
+      logQuery(query, params) {
+        options.onQuery?.(query, params);
         if (params.length > maxBoundValues) {
           throw new RangeError(
             `SQLite statement binds ${params.length} values; the configured maximum is ${maxBoundValues}.`,

@@ -196,6 +196,7 @@ describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
     expect(response.status).toBe(200);
     expect(new TextDecoder().decode(packetPayloads(bytes)[0])).toBe("NAK\n");
     expect(new TextDecoder().decode(packFromSideband(bytes).subarray(0, 4))).toBe("PACK");
+    expect(packetPayloads(bytes).slice(1)).toHaveLength(1);
   });
 
   test("advertises an annotated tag followed immediately by its peeled target", async () => {
@@ -392,6 +393,107 @@ describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
     ).arrayBuffer();
 
     expect(cached).toEqual(new Set(fixtures.map(({ oid }) => oid)));
+  });
+
+  test("starts one bounded representation read ahead while emitting the current window", async () => {
+    const leaves = Array.from({ length: 100 }, (_, at) => blob(`object ${at}\n`));
+    const root = tree(leaves.map((leaf, at) => treeEntry(`object-${at}.txt`, leaf)));
+    const tip = commit({ tree: root, message: "Read ahead" });
+    const fixtures = [tip, root, ...leaves];
+    const objects = new Map(
+      fixtures.map((object) => [object.oid, { type: object.type, bytes: object.bytes }]),
+    );
+    const compressed = new Map(
+      fixtures.map((object) => [object.oid, new Uint8Array(deflateSync(object.bytes))]),
+    );
+    const metadata = new Map<string, PackRepresentationMetadata>(
+      fixtures.map((object) => [
+        object.oid,
+        {
+          oid: object.oid,
+          type: object.type,
+          size: object.bytes.length,
+          full: { size: compressed.get(object.oid)!.length, chunkCount: 1 },
+          delta: null,
+        },
+      ]),
+    );
+    const reads: string[][] = [];
+    const request = concat(pktLine(`want ${tip.oid}\n`), flushPkt(), pktLine("done\n"));
+    const response = uploadPackResultStream(
+      streamOf(request),
+      {
+        has: async (oid) => objects.has(oid),
+        read: async (oid) => objects.get(oid) ?? null,
+        readDeltaBase: async () => null,
+        readDelta: async () => null,
+        readPackMetadata: async () => metadata,
+        readCachedPackEntries: async (requests) => {
+          reads.push(requests.map(({ metadata }) => metadata.oid));
+          return new Map(
+            requests.map(({ metadata }) => [
+              metadata.oid,
+              {
+                kind: "full" as const,
+                type: metadata.type,
+                size: metadata.size,
+                compressed: compressed.get(metadata.oid)!,
+              },
+            ]),
+          );
+        },
+      },
+      new Set([tip.oid]),
+    );
+    const reader = response.getReader();
+
+    // NAK, Pack header, then the first entry. Starting that entry must also
+    // start the next bounded storage read instead of waiting for this window
+    // to finish crossing the response stream.
+    await reader.read();
+    await reader.read();
+    await reader.read();
+
+    expect(reads).toHaveLength(2);
+    expect(reads[0]).toHaveLength(96);
+    expect(reads[1]).toHaveLength(fixtures.length - 96);
+    await reader.cancel();
+  });
+
+  test("uses one indexed closure walk for a normal wanted graph", async () => {
+    const contents = blob("indexed contents\n");
+    const root = tree([treeEntry("README.md", contents)]);
+    const tip = commit({ tree: root, message: "Indexed closure" });
+    const fixtures = [tip, root, contents];
+    const objects = new Map(
+      fixtures.map((object) => [object.oid, { type: object.type, bytes: object.bytes }]),
+    );
+    const closures: string[][] = [];
+    let frontierReads = 0;
+    const request = concat(pktLine(`want ${tip.oid}\n`), flushPkt(), pktLine("done\n"));
+    const response = uploadPackResultStream(
+      streamOf(request),
+      {
+        has: async (oid) => objects.has(oid),
+        read: async (oid) => objects.get(oid) ?? null,
+        readDeltaBase: async () => null,
+        readDelta: async () => null,
+        readIndexedObjects: async () => {
+          frontierReads += 1;
+          return new Map();
+        },
+        readObjectClosure: async (roots) => {
+          closures.push([...roots]);
+          return fixtures.map(({ oid }) => oid);
+        },
+      },
+      new Set([tip.oid]),
+    );
+
+    await new Response(response).arrayBuffer();
+
+    expect(closures).toEqual([[tip.oid]]);
+    expect(frontierReads).toBe(0);
   });
 
   test("plans an object once when several tree entries reach the same oid in one frontier", async () => {
