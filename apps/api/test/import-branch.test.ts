@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 
 import { PktLineReader, flushPkt, pktLine } from "../src/git/pkt-line.ts";
 import type { SyncKv } from "../src/db/kv.ts";
+import { HEAD_KEY } from "../src/head.ts";
 import { MAX_OBJECT_BYTES } from "../src/object.ts";
 import { ObjectStore, RepositoryStorageExhaustedError } from "../src/object-store.ts";
 import { PackError, readPack } from "../src/pack.ts";
@@ -144,10 +145,7 @@ describe("fetching one public HTTPS branch", () => {
     );
 
     expect(imported).toEqual({ branch: "trunk", oid: selected.oid, shallow: [], objects: 5 });
-    expect(await repository.describe()).toEqual({
-      defaultBranch: "trunk",
-      createdAt: "2026-08-13T00:00:00.000Z",
-    });
+    expect(opened.kv.get(HEAD_KEY)).toBe("ref: refs/heads/trunk\n");
     expect(await repository.readObject(selected.oid)).toEqual({
       type: "commit",
       bytes: selected.bytes,
@@ -472,7 +470,7 @@ describe("fetching one public HTTPS branch", () => {
     );
 
     expect(imported.branch).toBe("release/2.x");
-    expect((await repository.describe())?.defaultBranch).toBe("release/2.x");
+    expect(opened.kv.get(HEAD_KEY)).toBe("ref: refs/heads/release/2.x\n");
     expect(decoder.decode(requests[1]!.body)).toContain(`want ${selected.oid}`);
     expect(decoder.decode(requests[1]!.body)).not.toContain(head.oid);
   });
@@ -546,7 +544,7 @@ describe("fetching one public HTTPS branch", () => {
     }
 
     expect(pulled).toBeLessThan(responseBytes.length);
-    expect((await repository.describe())?.defaultBranch).toBe("main");
+    expect(opened.kv.get(HEAD_KEY)).toBe("ref: refs/heads/main\n");
     expect(await new Response(await repository.advertiseReceivePack()).text()).not.toContain(
       "refs/heads/",
     );
@@ -595,7 +593,7 @@ describe("fetching one public HTTPS branch", () => {
     const recovery = new RepositoryStore(opened.db, opened.kv);
     expect(await recovery.readObject(snapshot.oid)).not.toBeNull();
     expect(await recovery.readObject(selected.oid)).toBeNull();
-    expect((await recovery.describe())?.defaultBranch).toBe("main");
+    expect(opened.kv.get(HEAD_KEY)).toBe("ref: refs/heads/main\n");
     expect(await new Response(await recovery.advertiseReceivePack()).text()).not.toContain(
       "refs/heads/",
     );

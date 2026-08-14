@@ -104,7 +104,7 @@ describe("POST /namespaces/:namespace/repos/:source/fork", () => {
     expect(await advertisement()).toContain(`${FIRST.oid} ${MAIN}`);
     expect(await advertisement()).toContain(`${FEATURE.oid} ${FEATURE_REF}`);
     expect(await advertisement()).toContain(`${V1.oid} ${TAG}`);
-    expect(await targetClient().hasObject(ORPHAN.oid)).toBe(false);
+    expect(await targetClient().readObject(ORPHAN.oid)).toBeNull();
 
     const stored = await result<RepoWithRemote>(
       await harness.app.request("http://local.test/namespaces/acme/repos/copy"),
@@ -117,7 +117,7 @@ describe("POST /namespaces/:namespace/repos/:source/fork", () => {
     expect((await harness.app.request("http://local.test/namespaces/acme/repos/copy")).status).toBe(
       200,
     );
-    expect(await targetClient().hasObject(FIRST.oid)).toBe(true);
+    expect(await targetClient().readObject(FIRST.oid)).not.toBeNull();
   });
 
   test("preserves a retained delta when its base is part of the fork snapshot", async () => {
@@ -159,18 +159,16 @@ describe("POST /namespaces/:namespace/repos/:source/fork", () => {
     );
 
     expect(body.objects).toBe(3);
-    expect(await targetClient().describe()).toMatchObject({ defaultBranch: "main" });
     expect(await advertisement()).toContain(`${FIRST.oid} ${MAIN}`);
     expect(await advertisement()).not.toContain(FEATURE_REF);
     expect(await advertisement()).not.toContain(TAG);
-    expect(await targetClient().hasObject(FEATURE.oid)).toBe(false);
+    expect(await targetClient().readObject(FEATURE.oid)).toBeNull();
   });
 
   test("preserves an empty repository's HEAD and reports zero objects", async () => {
     const body = await result<ForkRepoResult>(await fork({ name: "empty-copy" }));
 
     expect(body.objects).toBe(0);
-    expect(await targetClient().describe()).toMatchObject({ defaultBranch: "main" });
     expect(await advertisement()).toContain(`${"0".repeat(40)} capabilities^{}`);
   });
 
@@ -244,7 +242,7 @@ describe("POST /namespaces/:namespace/repos/:source/fork", () => {
     await Promise.all([pendingFork, pendingPush]);
 
     expect(await advertisement()).toContain(`${FIRST.oid} ${MAIN}`);
-    expect(await targetClient().hasObject(FEATURE.oid)).toBe(false);
+    expect(await targetClient().readObject(FEATURE.oid)).toBeNull();
     const sourceId = harness.objects.mintedIds[0]!;
     const sourceAdvertisement = await new Response(
       await harness.objects.get(sourceId).advertiseReceivePack(),

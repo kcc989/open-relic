@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { deflateSync } from "node:zlib";
 
-import { flushPkt, pktLine } from "../src/git/pkt-line.ts";
+import { delimiterPkt, flushPkt, pktLine } from "../src/git/pkt-line.ts";
 import { uploadPackResultStream } from "../src/git/upload-pack.ts";
 import { RepositoryStorageExhaustedError } from "../src/object-store.ts";
 import { readPack, type PackBase, type PackObject } from "../src/pack.ts";
@@ -50,6 +50,19 @@ const post = (path: string, body: Uint8Array<ArrayBuffer>, contentEncoding?: str
   );
 };
 
+const postV2 = (body: Uint8Array<ArrayBuffer>) =>
+  harness.app.request(
+    new Request(UPLOAD, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${harness.repositoryToken}`,
+        "Content-Type": "application/x-git-upload-pack-request",
+        "Git-Protocol": "version=2",
+      },
+      body,
+    }),
+  );
+
 beforeEach(async () => {
   harness = await createGitTestApp();
   await harness.app.request(
@@ -94,6 +107,79 @@ const packFromSideband = (bytes: Uint8Array): Uint8Array => {
 };
 
 describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
+  test("serves protocol-v2 ls-refs with prefixes, symrefs, and peeled tags", async () => {
+    const request = concat(
+      pktLine("command=ls-refs\n"),
+      pktLine("agent=git/test\n"),
+      pktLine("object-format=sha1\n"),
+      delimiterPkt(),
+      pktLine("peel\n"),
+      pktLine("symrefs\n"),
+      pktLine("ref-prefix HEAD\n"),
+      pktLine("ref-prefix refs/tags/\n"),
+      flushPkt(),
+    );
+    const response = await postV2(request);
+    const text = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(text).toContain(`${FIRST.oid} HEAD symref-target:refs/heads/main\n`);
+    expect(text).toContain(`${V1.oid} refs/tags/v1 peeled:${FIRST.oid}\n`);
+    expect(text).not.toContain(`${FIRST.oid} refs/heads/main\n`);
+    expect(text).toEndWith("0000");
+  });
+
+  test("serves a protocol-v2 fetch as a packfile section", async () => {
+    const request = concat(
+      pktLine("command=fetch\n"),
+      pktLine("agent=git/test\n"),
+      pktLine("object-format=sha1\n"),
+      delimiterPkt(),
+      pktLine("thin-pack\n"),
+      pktLine("no-progress\n"),
+      pktLine("include-tag\n"),
+      pktLine("ofs-delta\n"),
+      pktLine(`want ${FIRST.oid}\n`),
+      pktLine("done\n"),
+      flushPkt(),
+    );
+    const response = await postV2(request);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const payloads = packetPayloads(bytes);
+
+    expect(response.status).toBe(200);
+    expect(new TextDecoder().decode(payloads[0])).toBe("packfile\n");
+    expect(payloads.slice(1).every((payload) => payload[0] === 1)).toBe(true);
+    expect(
+      new TextDecoder().decode(
+        concat(...payloads.slice(1).map((payload) => payload.subarray(1))).subarray(0, 4),
+      ),
+    ).toBe("PACK");
+  });
+
+  test("sends repository shallow boundaries on a normal protocol-v2 fetch", async () => {
+    const [durableObjectId] = harness.objects.mintedIds;
+    await harness.objects.seedShallowCommits(durableObjectId!, [FIRST.oid]);
+    const request = concat(
+      pktLine("command=fetch\n"),
+      pktLine("object-format=sha1\n"),
+      delimiterPkt(),
+      pktLine("thin-pack\n"),
+      pktLine("no-progress\n"),
+      pktLine("ofs-delta\n"),
+      pktLine(`want ${FIRST.oid}\n`),
+      pktLine("done\n"),
+      flushPkt(),
+    );
+    const response = await postV2(request);
+    const text = new TextDecoder().decode(await response.arrayBuffer());
+
+    expect(response.status).toBe(200);
+    expect(text).toContain("shallow-info\n");
+    expect(text).toContain(`shallow ${FIRST.oid}\n`);
+    expect(text.indexOf("shallow-info\n")).toBeLessThan(text.indexOf("packfile\n"));
+  });
+
   test("inflates a gzip-encoded negotiation request", async () => {
     const request = concat(
       pktLine(`want ${FIRST.oid} side-band-64k\n`),

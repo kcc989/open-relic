@@ -2,9 +2,11 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { NAMESPACES_PATH, type CreateTokenResult } from "@open-relic/contracts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { createGitTestApp, type TestApp } from "./support/app.ts";
+import { result } from "./support/envelope.ts";
 import { blob, commit, tag, tree, treeEntry } from "./support/git-objects.ts";
 import { pushBody } from "./support/receive-pack.ts";
 
@@ -29,15 +31,26 @@ const push = (body: Uint8Array<ArrayBuffer>) =>
     }),
   );
 
-const remoteFor = (port: number | undefined): string => {
-  if (harness.repositoryToken === null) {
+const remoteFor = (port: number | undefined, token = harness.repositoryToken): string => {
+  if (token === null) {
     throw new Error("The Git test repository has no token.");
   }
   if (port === undefined) {
     throw new Error("The Git test server has no port.");
   }
-  return `http://x:${encodeURIComponent(harness.repositoryToken)}@127.0.0.1:${port}/git/acme/demo.git`;
+  return `http://x:${encodeURIComponent(token)}@127.0.0.1:${port}/git/acme/demo.git`;
 };
+
+const createReadToken = async () =>
+  result<CreateTokenResult>(
+    await harness.app.request(
+      new Request(`http://local.test${NAMESPACES_PATH}/acme/tokens`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repo: "demo", scope: "read" }),
+      }),
+    ),
+  );
 
 beforeEach(async () => {
   harness = await createGitTestApp();
@@ -77,15 +90,42 @@ const run = async (command: readonly string[]): Promise<string> => {
 };
 
 describe("a real Git client", () => {
-  test("clones a pushed repository and checks out HEAD", async () => {
+  test("clones with a read-scoped token and checks out HEAD", async () => {
     const server = Bun.serve({
       port: 0,
       fetch: (request) => harness.app.fetch(request),
     });
     const checkout = join(directory, "checkout");
+    const readToken = await createReadToken();
 
     try {
-      await run(["git", "-c", "protocol.version=1", "clone", remoteFor(server.port), checkout]);
+      await run([
+        "git",
+        "-c",
+        "protocol.version=1",
+        "clone",
+        remoteFor(server.port, readToken.plaintext),
+        checkout,
+      ]);
+
+      expect(await readFile(join(checkout, "README.md"), "utf8")).toBe("Anvil firmware\n");
+      expect(await run(["git", "-C", checkout, "rev-parse", "HEAD"])).toBe(FIRST.oid);
+      expect(await run(["git", "-C", checkout, "rev-parse", "refs/tags/v1^{}"])).toBe(FIRST.oid);
+      expect(await run(["git", "-C", checkout, "fsck", "--full"])).toBe("");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("clones a pushed repository with protocol v2", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch: (request) => harness.app.fetch(request),
+    });
+    const checkout = join(directory, "checkout-v2");
+
+    try {
+      await run(["git", "-c", "protocol.version=2", "clone", remoteFor(server.port), checkout]);
 
       expect(await readFile(join(checkout, "README.md"), "utf8")).toBe("Anvil firmware\n");
       expect(await run(["git", "-C", checkout, "rev-parse", "HEAD"])).toBe(FIRST.oid);
@@ -103,6 +143,7 @@ describe("a real Git client", () => {
     });
     const writer = join(directory, "writer");
     const reader = join(directory, "reader");
+    const readerV2 = join(directory, "reader-v2");
 
     try {
       await run(["git", "clone", remoteFor(server.port), writer]);
@@ -129,6 +170,9 @@ describe("a real Git client", () => {
         reader,
       ]);
       expect(await run(["git", "-C", reader, "rev-list", "--count", "HEAD"])).toBe("1");
+      await run(["git", "-c", "protocol.version=2", "clone", remoteFor(server.port), readerV2]);
+      expect(await run(["git", "-C", readerV2, "rev-list", "--count", "HEAD"])).toBe("3");
+      expect((await readFile(join(readerV2, ".git", "shallow"), "utf8")).trim()).toBe(FIRST.oid);
 
       await writeFile(join(writer, "README.md"), "Anvil firmware, fourth\n");
       await run(["git", "-C", writer, "add", "README.md"]);
@@ -136,14 +180,16 @@ describe("a real Git client", () => {
       const remoteTip = await run(["git", "-C", writer, "rev-parse", "HEAD"]);
       await run(["git", "-C", writer, "push", "origin", "HEAD:main"]);
 
-      await run(["git", "-C", reader, "fetch", "origin"]);
+      await run(["git", "-c", "protocol.version=1", "-C", reader, "fetch", "origin"]);
+      await run(["git", "-c", "protocol.version=1", "-C", readerV2, "fetch", "origin"]);
 
       expect(await run(["git", "-C", reader, "rev-parse", "origin/main"])).toBe(remoteTip);
       expect(await run(["git", "-C", reader, "show", "origin/main:README.md"])).toBe(
         "Anvil firmware, fourth",
       );
+      expect(await run(["git", "-C", readerV2, "rev-parse", "origin/main"])).toBe(remoteTip);
 
-      await run(["git", "-C", reader, "fetch", "--depth=3", "origin"]);
+      await run(["git", "-c", "protocol.version=1", "-C", reader, "fetch", "--depth=3", "origin"]);
       expect(await run(["git", "-C", reader, "rev-list", "--count", "origin/main"])).toBe("3");
     } finally {
       server.stop(true);

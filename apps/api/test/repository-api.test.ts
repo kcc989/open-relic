@@ -98,11 +98,11 @@ describe("POST /namespaces/:namespace/repos", () => {
     const [durableObjectId] = harness.objects.mintedIds;
     expect(durableObjectId).toBeString();
 
-    const stored = await harness.objects.describe(durableObjectId!);
-    expect(stored?.defaultBranch).toBe("trunk");
+    const stored = await harness.objects.inspect(durableObjectId!);
+    expect(stored.head).toBe("ref: refs/heads/trunk\n");
     // The object and its index entry agree on one creation time.
     const listed = await result<RepoWithRemote>(await harness.app.request(`${REPOS}/demo`));
-    expect(stored?.createdAt).toBe(listed.created_at);
+    expect(stored.createdAt).toBe(listed.created_at);
   });
 
   test("defaults the description to null and the branch to main", async () => {

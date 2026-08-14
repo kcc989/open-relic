@@ -32,8 +32,6 @@ import type { RepositoryObjects } from "./bindings.ts";
 import {
   alreadyExists,
   fail,
-  forkInProgress,
-  importInProgress,
   internalError,
   invalidInput,
   invalidRepoName,
@@ -62,6 +60,7 @@ import type {
   RepositoryCursor,
   RepositoryIndexClient,
 } from "./repository-index.ts";
+import { repositoryNotFound, type RepositoryResolver } from "./repository-resolution.ts";
 import {
   decodeJson,
   parseOptionalFlag,
@@ -263,15 +262,6 @@ const parseImportBody = (payload: Json): ParsedImport => {
   return { ok: true, command: { request, readOnly: readOnly.value } };
 };
 
-const noSuchRepository = (namespaceSlug: string, name: string): string =>
-  `No repository named "${namespaceSlug}/${name}" exists.`;
-
-const repositoryIsForking = (namespaceSlug: string, name: string): string =>
-  `The repository "${namespaceSlug}/${name}" is still being forked.`;
-
-const repositoryIsImporting = (namespaceSlug: string, name: string): string =>
-  `The repository "${namespaceSlug}/${name}" is still being imported.`;
-
 const normalizedImportSource = (value: string): string => {
   const remote = new URL(value);
   remote.pathname = `${remote.pathname.replace(/\/$/, "").replace(/\.git$/, "")}.git`;
@@ -323,6 +313,7 @@ export const registerRepositoryRoutes = (
   resolveIndex: (env: ApiEnv) => RepositoryIndexClient,
   resolveObjects: (env: ApiEnv) => RepositoryObjects,
   resolveTokens: (env: ApiEnv) => TokenRegistryClient,
+  resolveRepository: RepositoryResolver,
 ): void => {
   const REPOS = `${NAMESPACES_PATH}/:namespace/repos` as const;
   const REPO = `${REPOS}/:repo` as const;
@@ -388,7 +379,7 @@ export const registerRepositoryRoutes = (
     if (!issued.created) {
       // The row was just created. Only a concurrent delete can make it vanish
       // before its initial token is issued, in which case it is truthfully gone.
-      return notFound(noSuchRepository(namespaceSlug, outcome.repository.name));
+      return repositoryNotFound(namespaceSlug, outcome.repository.name);
     }
 
     // Narrower than the list and get shape on purpose: Artifacts answers a
@@ -488,16 +479,13 @@ export const registerRepositoryRoutes = (
   app.get(REPO, async (context) => {
     const namespaceSlug = context.req.param("namespace");
     const name = context.req.param("repo");
-    const found = await resolveIndex(context.env).getRepository(namespaceSlug, name);
-
-    if (found === null) {
-      return notFound(noSuchRepository(namespaceSlug, name));
-    }
-    if (found.status === "forking") {
-      return forkInProgress(repositoryIsForking(namespaceSlug, name));
-    }
-    if (found.status === "importing") {
-      return importInProgress(repositoryIsImporting(namespaceSlug, name));
+    const found = await resolveRepository.resolve({
+      env: context.env,
+      namespace: namespaceSlug,
+      name,
+    });
+    if (found instanceof Response) {
+      return found;
     }
 
     return ok(withRemote(context, namespaceSlug, found.repository));
@@ -522,15 +510,13 @@ export const registerRepositoryRoutes = (
     }
 
     const index = resolveIndex(context.env);
-    const source = await index.getRepository(namespaceSlug, sourceName);
-    if (source === null) {
-      return notFound(noSuchRepository(namespaceSlug, sourceName));
-    }
-    if (source.status === "forking") {
-      return forkInProgress(repositoryIsForking(namespaceSlug, sourceName));
-    }
-    if (source.status === "importing") {
-      return importInProgress(repositoryIsImporting(namespaceSlug, sourceName));
+    const source = await resolveRepository.resolve({
+      env: context.env,
+      namespace: namespaceSlug,
+      name: sourceName,
+    });
+    if (source instanceof Response) {
+      return source;
     }
 
     const objects = resolveObjects(context.env);
@@ -688,7 +674,7 @@ export const registerRepositoryRoutes = (
     const deleted = await resolveIndex(context.env).deleteRepository(namespaceSlug, name);
 
     if (deleted === null) {
-      return notFound(noSuchRepository(namespaceSlug, name));
+      return repositoryNotFound(namespaceSlug, name);
     }
 
     // The pointer is gone first, so nothing can reach a half-emptied

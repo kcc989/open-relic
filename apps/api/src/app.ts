@@ -21,6 +21,7 @@ import { authorizeRepoToken, type AuthorizeGitRequest } from "./git/authorizatio
 import type { NamespaceRegistryClient } from "./namespace-registry.ts";
 import { registerNamespaceRoutes } from "./namespace-routes.ts";
 import type { RepositoryIndexClient } from "./repository-index.ts";
+import { createRepositoryResolver } from "./repository-resolution.ts";
 import { registerRepositoryRoutes } from "./repository-routes.ts";
 import { registerTokenRoutes } from "./token-routes.ts";
 import type { TokenRegistryClient } from "./token-registry.ts";
@@ -43,6 +44,10 @@ export const createApp = ({
   authorizeControlPlane = authorizeApiToken,
 }: AppDependencies = {}) => {
   const app = new Hono<{ Bindings: ApiEnv }>();
+  const resolveRepository = createRepositoryResolver(
+    repositoryIndex,
+    authorizeGit ?? authorizeRepoToken(tokenRegistry),
+  );
 
   app.get("/healthz", (context) =>
     apiTokenFromEnv(context.env) === null
@@ -65,9 +70,15 @@ export const createApp = ({
   app.use("/namespaces/*", protectControlPlane);
 
   registerNamespaceRoutes(app, namespaceRegistry, repositoryObjects);
-  registerRepositoryRoutes(app, repositoryIndex, repositoryObjects, tokenRegistry);
-  registerContentRoutes(app, repositoryIndex, repositoryObjects);
-  registerTokenRoutes(app, tokenRegistry, repositoryIndex);
+  registerRepositoryRoutes(
+    app,
+    repositoryIndex,
+    repositoryObjects,
+    tokenRegistry,
+    resolveRepository,
+  );
+  registerContentRoutes(app, resolveRepository, repositoryObjects);
+  registerTokenRoutes(app, tokenRegistry, resolveRepository);
 
   for (const endpoint of REST_ENDPOINTS) {
     // Implemented endpoints are already registered above; registering a stub
@@ -88,9 +99,9 @@ export const createApp = ({
   }
 
   registerGitRoutes(app, {
+    resolveRepository,
     repositoryIndex,
     repositoryObjects,
-    authorize: authorizeGit ?? authorizeRepoToken(tokenRegistry),
   });
 
   app.notFound(() => notFound("No route matches this request."));

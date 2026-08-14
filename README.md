@@ -584,12 +584,13 @@ imports each `.sql` file directly; Alchemy's bundler maps `.sql` to a text modul
 for exactly this case, so no wrangler-style `rules` config or codegen step is
 needed.
 
-Both objects are thin RPC shells over plain classes — `NamespaceRegistry` and
-`RepositoryIndex` over the registry's database, `RepositoryStore` over a
-repository's — each of which takes any synchronous drizzle SQLite database.
-Tests construct one over `bun:sqlite` and migrate it from the same `drizzle/`
-folder, so the queries and the generated schema run for real without a Workers
-runtime — the only thing the tests skip is the RPC hop.
+The named RPC methods are one inherited implementation over two storage
+adapters. Durable Object classes provide `drizzle(ctx.storage)`; the local
+`NamespaceRegistry`, `RepositoryIndex`, `TokenRegistry`, and `RepositoryStore`
+classes provide the same operations over any synchronous drizzle SQLite
+database. Tests use `bun:sqlite` and migrate it from the same `drizzle/` folder,
+so the queries and generated schema run for real without a Workers runtime —
+the only thing they skip is the RPC hop.
 
 Git bytes are the exception to the schema. `RepositoryStore` also takes the
 synchronous KV half of the same storage, because `HEAD` is stored as the file
@@ -647,6 +648,12 @@ runtime with real Git repositories, follow the
 [Cloudflare smoke-testing runbook](./docs/cloudflare-smoke-testing.md). Its
 script removes all temporary clones on exit and destroys the smoke stage by
 default.
+
+To compare an arbitrary public GitHub repository across GitHub, hosted
+Cloudflare Artifacts, and a deployed Open Relic installation, follow the
+[Git host benchmarking runbook](./docs/git-host-benchmarking.md). The tracked
+harness records push, clone, integrity, pack-size, and incremental-fetch
+measurements and removes its disposable repositories by default.
 
 ### Test coverage
 

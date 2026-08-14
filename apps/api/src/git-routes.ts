@@ -3,30 +3,28 @@ import type { Hono } from "hono";
 
 import type { ApiEnv } from "../../../alchemy.run.ts";
 import type { RepositoryObjects } from "./bindings.ts";
-import {
-  forbidden,
-  forkInProgress,
-  importInProgress,
-  gitAuthenticationRequired,
-  invalidInput,
-  notFound,
-} from "./envelope.ts";
+import { forbidden, invalidInput } from "./envelope.ts";
 import {
   RECEIVE_PACK_ADVERTISEMENT_CONTENT_TYPE,
   RECEIVE_PACK_SERVICE,
   UPLOAD_PACK_ADVERTISEMENT_CONTENT_TYPE,
   UPLOAD_PACK_RESULT_CONTENT_TYPE,
   UPLOAD_PACK_SERVICE,
+  type UploadProtocolVersion,
 } from "./git/advertisement.ts";
-import type { AuthorizeGitRequest } from "./git/authorization.ts";
 import { GzipError, gunzip } from "./git/gzip.ts";
 import { RECEIVE_PACK_RESULT_CONTENT_TYPE } from "./git/receive-pack.ts";
 import type { RepositoryIndexClient, RepositoryPointer } from "./repository-index.ts";
+import type { RepositoryResolver } from "./repository-resolution.ts";
 
 /** Just enough of Hono's context for the preamble both Git routes share. */
 type GitRouteContext = {
   readonly env: ApiEnv;
-  readonly req: { readonly raw: Request; param(name: string): string };
+  readonly req: {
+    readonly raw: Request;
+    header(name: string): string | undefined;
+    param(name: string): string;
+  };
 };
 
 /**
@@ -40,14 +38,14 @@ const NO_CACHE_HEADERS = {
 } as const;
 
 export interface GitRouteDependencies {
+  readonly resolveRepository: RepositoryResolver;
   readonly repositoryIndex: (env: ApiEnv) => RepositoryIndexClient;
   readonly repositoryObjects: (env: ApiEnv) => RepositoryObjects;
-  readonly authorize: AuthorizeGitRequest;
 }
 
 export const registerGitRoutes = (
   app: Hono<{ Bindings: ApiEnv }>,
-  { repositoryIndex, repositoryObjects, authorize }: GitRouteDependencies,
+  { resolveRepository, repositoryIndex, repositoryObjects }: GitRouteDependencies,
 ): void => {
   /**
    * What every Git request does before it can do anything else: refuse the
@@ -57,34 +55,26 @@ export const registerGitRoutes = (
    * an unauthorized client can learn (ADR-0004), and the lookup is what keeps
    * an unknown name from waking a repository object.
    */
-  const resolve = async (context: GitRouteContext): Promise<RepositoryPointer | Response> => {
+  const resolve = async (
+    context: GitRouteContext,
+    requiredScope: "read" | "write",
+  ): Promise<RepositoryPointer | Response> => {
     const namespace = context.req.param("namespace");
     const name = repositoryNameFromPath(context.req.param("repo"));
 
-    const decision = await authorize({
+    return resolveRepository.resolve({
       env: context.env,
-      request: context.req.raw,
       namespace,
-      repository: name,
-      requiredScope: "write",
+      name,
+      git: { request: context.req.raw, requiredScope },
     });
+  };
 
-    if (!decision.allowed) {
-      return gitAuthenticationRequired(decision.detail);
-    }
-
-    const found = await repositoryIndex(context.env).getRepository(namespace, name);
-
-    if (found === null) {
-      return notFound(`No repository named "${namespace}/${name}" exists.`);
-    }
-    if (found.status === "forking") {
-      return forkInProgress(`The repository "${namespace}/${name}" is still being forked.`);
-    }
-    if (found.status === "importing") {
-      return importInProgress(`The repository "${namespace}/${name}" is still being imported.`);
-    }
-    return found;
+  const uploadProtocolVersion = (context: GitRouteContext): UploadProtocolVersion => {
+    const parameters = context.req.header("Git-Protocol")?.split(":") ?? [];
+    if (parameters.includes("version=2")) return 2;
+    if (parameters.includes("version=1")) return 1;
+    return 0;
   };
 
   // Both advertisements share a path and are told apart by the service Git
@@ -93,16 +83,14 @@ export const registerGitRoutes = (
     const service = context.req.query("service");
 
     if (service === UPLOAD_PACK_SERVICE) {
-      const found = await resolve(context);
+      const found = await resolve(context, "read");
       if (found instanceof Response) {
         return found;
       }
 
       const advertisement = await repositoryObjects(context.env)
         .get(found.durableObjectId)
-        .advertiseUploadPack(
-          context.req.header("Git-Protocol")?.split(":").includes("version=1") === true ? 1 : 0,
-        );
+        .advertiseUploadPack(uploadProtocolVersion(context));
 
       return new Response(advertisement, {
         headers: {
@@ -121,7 +109,7 @@ export const registerGitRoutes = (
       );
     }
 
-    const found = await resolve(context);
+    const found = await resolve(context, "write");
     if (found instanceof Response) {
       return found;
     }
@@ -139,7 +127,7 @@ export const registerGitRoutes = (
   });
 
   app.post(`${GIT_REPOSITORY_PATH}/git-receive-pack`, async (context) => {
-    const found = await resolve(context);
+    const found = await resolve(context, "write");
     if (found instanceof Response) {
       return found;
     }
@@ -192,7 +180,7 @@ export const registerGitRoutes = (
   });
 
   app.post(`${GIT_REPOSITORY_PATH}/git-upload-pack`, async (context) => {
-    const found = await resolve(context);
+    const found = await resolve(context, "read");
     if (found instanceof Response) {
       return found;
     }
@@ -220,7 +208,7 @@ export const registerGitRoutes = (
 
     const result = await repositoryObjects(context.env)
       .get(found.durableObjectId)
-      .uploadPack(decoded);
+      .uploadPack(decoded, uploadProtocolVersion(context));
 
     return new Response(result, {
       headers: {

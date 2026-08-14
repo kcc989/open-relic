@@ -10,6 +10,11 @@ import {
   type RepositoryStatus,
 } from "./db/registry-schema.ts";
 import { escapeLikePattern } from "./pagination.ts";
+import {
+  LocalRegistryStorage,
+  REGISTRY_DATABASE,
+  type RegistryStorageConstructor,
+} from "./registry-storage.ts";
 
 export interface CreateRepositoryCommand {
   readonly namespaceSlug: string;
@@ -84,35 +89,6 @@ export interface PushRecord {
   readonly defaultBranch: string | null;
 }
 
-export interface RepositoryIndexClient {
-  readonly createRepository: (command: CreateRepositoryCommand) => Promise<CreateRepositoryOutcome>;
-  readonly listRepositories: (
-    namespaceSlug: string,
-    query: ListRepositoriesQuery,
-  ) => Promise<RepositoryPage | null>;
-  readonly getRepository: (
-    namespaceSlug: string,
-    name: string,
-  ) => Promise<RepositoryPointer | null>;
-  readonly deleteRepository: (
-    namespaceSlug: string,
-    name: string,
-  ) => Promise<DeletedRepository | null>;
-  readonly deleteImportIfOwned: (
-    namespaceSlug: string,
-    name: string,
-    durableObjectId: string,
-  ) => Promise<DeletedRepository | null>;
-  readonly finishFork: (namespaceSlug: string, name: string) => Promise<boolean>;
-  readonly finishImport: (
-    namespaceSlug: string,
-    name: string,
-    durableObjectId: string,
-    defaultBranch: string,
-  ) => Promise<boolean>;
-  readonly recordPush: (namespaceSlug: string, name: string, record: PushRecord) => Promise<void>;
-}
-
 const toRepository = (row: RepositoryRow): RepoInfo => ({
   id: row.id,
   name: row.name,
@@ -166,244 +142,245 @@ const sortValue = (row: RepositoryRow, field: RepoSortField): string => {
  * transaction, and listing a namespace is one query rather than a fan-out of
  * RPCs to every repository object.
  */
-export class RepositoryIndex {
-  readonly #db: SyncSqliteDatabase;
+export const withRepositoryIndex = <TBase extends RegistryStorageConstructor>(Base: TBase) =>
+  class RepositoryIndexMixin extends Base {
+    readonly #db: SyncSqliteDatabase = this[REGISTRY_DATABASE];
 
-  constructor(db: SyncSqliteDatabase) {
-    this.#db = db;
-  }
+    /**
+     * The namespace check and the insert share a transaction: without it a
+     * namespace deleted in between would leave a repository pointing at nothing.
+     *
+     * The driver is synchronous, so the statements are executed with `.all()`
+     * rather than awaited — a transaction that yielded would commit before its
+     * body finished.
+     */
+    async createRepository(command: CreateRepositoryCommand): Promise<CreateRepositoryOutcome> {
+      return this.#db.transaction((tx): CreateRepositoryOutcome => {
+        const namespace = tx
+          .select({ slug: namespaces.slug })
+          .from(namespaces)
+          .where(eq(namespaces.slug, command.namespaceSlug))
+          .limit(1)
+          .all();
 
-  /**
-   * The namespace check and the insert share a transaction: without it a
-   * namespace deleted in between would leave a repository pointing at nothing.
-   *
-   * The driver is synchronous, so the statements are executed with `.all()`
-   * rather than awaited — a transaction that yielded would commit before its
-   * body finished.
-   */
-  async createRepository(command: CreateRepositoryCommand): Promise<CreateRepositoryOutcome> {
-    return this.#db.transaction((tx): CreateRepositoryOutcome => {
-      const namespace = tx
+        if (namespace.length === 0) {
+          return { created: false, reason: "namespace-missing" };
+        }
+
+        // One clock for both stamps: a repository that has never been touched
+        // reports the same `created_at` and `updated_at`.
+        const now = new Date().toISOString();
+
+        const inserted = tx
+          .insert(repositories)
+          .values({
+            namespaceSlug: command.namespaceSlug,
+            name: command.name,
+            id: newRepositoryId(),
+            durableObjectId: command.durableObjectId,
+            description: command.description,
+            defaultBranch: command.defaultBranch,
+            readOnly: command.readOnly,
+            source: command.source ?? null,
+            status: command.status ?? "ready",
+            createdAt: now,
+            updatedAt: now,
+            lastPushAt: null,
+          })
+          .onConflictDoNothing()
+          .returning()
+          .all();
+
+        const row = inserted[0];
+        return row === undefined
+          ? { created: false, reason: "name-taken" }
+          : { created: true, repository: toRepository(row) };
+      });
+    }
+
+    /**
+     * `null` is a missing namespace; an empty page is one that owns no matching
+     * repositories. One row beyond the limit is read to decide whether there is a
+     * next cursor without a second count query.
+     */
+    async listRepositories(
+      namespaceSlug: string,
+      query: ListRepositoriesQuery,
+    ): Promise<RepositoryPage | null> {
+      const namespace = await this.#db
         .select({ slug: namespaces.slug })
         .from(namespaces)
-        .where(eq(namespaces.slug, command.namespaceSlug))
-        .limit(1)
-        .all();
+        .where(eq(namespaces.slug, namespaceSlug))
+        .limit(1);
 
       if (namespace.length === 0) {
-        return { created: false, reason: "namespace-missing" };
+        return null;
       }
 
-      // One clock for both stamps: a repository that has never been touched
-      // reports the same `created_at` and `updated_at`.
-      const now = new Date().toISOString();
+      const expression = sortExpression(query.sort);
+      const ascending = query.direction === "asc";
+      const filters: SQL[] = [eq(repositories.namespaceSlug, namespaceSlug)];
 
-      const inserted = tx
-        .insert(repositories)
-        .values({
-          namespaceSlug: command.namespaceSlug,
-          name: command.name,
-          id: newRepositoryId(),
-          durableObjectId: command.durableObjectId,
-          description: command.description,
-          defaultBranch: command.defaultBranch,
-          readOnly: command.readOnly,
-          source: command.source ?? null,
-          status: command.status ?? "ready",
-          createdAt: now,
-          updatedAt: now,
-          lastPushAt: null,
-        })
-        .onConflictDoNothing()
-        .returning()
-        .all();
+      if (query.search !== null) {
+        const pattern = `%${escapeLikePattern(query.search)}%`;
+        filters.push(sql`${repositories.name} LIKE ${pattern} ESCAPE '\\'`);
+      }
 
-      const row = inserted[0];
+      if (query.cursor !== null) {
+        const { value, name } = query.cursor;
+
+        // A row-value comparison, so the sort key and the name tiebreak resume
+        // together — two repositories sharing a timestamp cannot hide each other.
+        filters.push(
+          ascending
+            ? sql`(${expression}, ${repositories.name}) > (${value}, ${name})`
+            : sql`(${expression}, ${repositories.name}) < (${value}, ${name})`,
+        );
+      }
+
+      const rows = await this.#db
+        .select()
+        .from(repositories)
+        .where(and(...filters))
+        .orderBy(
+          ascending ? asc(expression) : desc(expression),
+          ascending ? asc(repositories.name) : desc(repositories.name),
+        )
+        .limit(query.limit + 1);
+
+      const page = rows.slice(0, query.limit);
+      const last = page.at(-1);
+
+      return {
+        repositories: page.map(toRepository),
+        next:
+          rows.length > query.limit && last !== undefined
+            ? { value: sortValue(last, query.sort), name: last.name }
+            : null,
+      };
+    }
+
+    async getRepository(namespaceSlug: string, name: string): Promise<RepositoryPointer | null> {
+      const rows = await this.#db
+        .select()
+        .from(repositories)
+        .where(and(eq(repositories.namespaceSlug, namespaceSlug), eq(repositories.name, name)))
+        .limit(1);
+
+      const row = rows[0];
       return row === undefined
-        ? { created: false, reason: "name-taken" }
-        : { created: true, repository: toRepository(row) };
-    });
-  }
-
-  /**
-   * `null` is a missing namespace; an empty page is one that owns no matching
-   * repositories. One row beyond the limit is read to decide whether there is a
-   * next cursor without a second count query.
-   */
-  async listRepositories(
-    namespaceSlug: string,
-    query: ListRepositoriesQuery,
-  ): Promise<RepositoryPage | null> {
-    const namespace = await this.#db
-      .select({ slug: namespaces.slug })
-      .from(namespaces)
-      .where(eq(namespaces.slug, namespaceSlug))
-      .limit(1);
-
-    if (namespace.length === 0) {
-      return null;
+        ? null
+        : {
+            repository: toRepository(row),
+            durableObjectId: row.durableObjectId,
+            status: row.status,
+          };
     }
 
-    const expression = sortExpression(query.sort);
-    const ascending = query.direction === "asc";
-    const filters: SQL[] = [eq(repositories.namespaceSlug, namespaceSlug)];
+    /**
+     * Hands back the object id the dropped entry pointed at, so the caller can
+     * destroy its storage, and the public id the response answers with. `null`
+     * when there was no such repository.
+     */
+    async deleteRepository(namespaceSlug: string, name: string): Promise<DeletedRepository | null> {
+      const deleted = await this.#db
+        .delete(repositories)
+        .where(and(eq(repositories.namespaceSlug, namespaceSlug), eq(repositories.name, name)))
+        .returning({
+          id: repositories.id,
+          durableObjectId: repositories.durableObjectId,
+        });
 
-    if (query.search !== null) {
-      const pattern = `%${escapeLikePattern(query.search)}%`;
-      filters.push(sql`${repositories.name} LIKE ${pattern} ESCAPE '\\'`);
+      return deleted[0] ?? null;
     }
 
-    if (query.cursor !== null) {
-      const { value, name } = query.cursor;
+    /** A stale multi-step create may clean up only the row it originally reserved. */
+    async deleteImportIfOwned(
+      namespaceSlug: string,
+      name: string,
+      durableObjectId: string,
+    ): Promise<DeletedRepository | null> {
+      const deleted = await this.#db
+        .delete(repositories)
+        .where(
+          and(
+            eq(repositories.namespaceSlug, namespaceSlug),
+            eq(repositories.name, name),
+            eq(repositories.durableObjectId, durableObjectId),
+            eq(repositories.status, "importing"),
+          ),
+        )
+        .returning({
+          id: repositories.id,
+          durableObjectId: repositories.durableObjectId,
+        });
 
-      // A row-value comparison, so the sort key and the name tiebreak resume
-      // together — two repositories sharing a timestamp cannot hide each other.
-      filters.push(
-        ascending
-          ? sql`(${expression}, ${repositories.name}) > (${value}, ${name})`
-          : sql`(${expression}, ${repositories.name}) < (${value}, ${name})`,
-      );
+      return deleted[0] ?? null;
     }
 
-    const rows = await this.#db
-      .select()
-      .from(repositories)
-      .where(and(...filters))
-      .orderBy(
-        ascending ? asc(expression) : desc(expression),
-        ascending ? asc(repositories.name) : desc(repositories.name),
-      )
-      .limit(query.limit + 1);
+    async finishFork(namespaceSlug: string, name: string): Promise<boolean> {
+      const updated = await this.#db
+        .update(repositories)
+        .set({ status: "ready" })
+        .where(
+          and(
+            eq(repositories.namespaceSlug, namespaceSlug),
+            eq(repositories.name, name),
+            eq(repositories.status, "forking"),
+          ),
+        )
+        .returning({ name: repositories.name });
 
-    const page = rows.slice(0, query.limit);
-    const last = page.at(-1);
-
-    return {
-      repositories: page.map(toRepository),
-      next:
-        rows.length > query.limit && last !== undefined
-          ? { value: sortValue(last, query.sort), name: last.name }
-          : null,
-    };
-  }
-
-  async getRepository(namespaceSlug: string, name: string): Promise<RepositoryPointer | null> {
-    const rows = await this.#db
-      .select()
-      .from(repositories)
-      .where(and(eq(repositories.namespaceSlug, namespaceSlug), eq(repositories.name, name)))
-      .limit(1);
-
-    const row = rows[0];
-    return row === undefined
-      ? null
-      : {
-          repository: toRepository(row),
-          durableObjectId: row.durableObjectId,
-          status: row.status,
-        };
-  }
-
-  /**
-   * Hands back the object id the dropped entry pointed at, so the caller can
-   * destroy its storage, and the public id the response answers with. `null`
-   * when there was no such repository.
-   */
-  async deleteRepository(namespaceSlug: string, name: string): Promise<DeletedRepository | null> {
-    const deleted = await this.#db
-      .delete(repositories)
-      .where(and(eq(repositories.namespaceSlug, namespaceSlug), eq(repositories.name, name)))
-      .returning({
-        id: repositories.id,
-        durableObjectId: repositories.durableObjectId,
-      });
-
-    return deleted[0] ?? null;
-  }
-
-  /** A stale multi-step create may clean up only the row it originally reserved. */
-  async deleteImportIfOwned(
-    namespaceSlug: string,
-    name: string,
-    durableObjectId: string,
-  ): Promise<DeletedRepository | null> {
-    const deleted = await this.#db
-      .delete(repositories)
-      .where(
-        and(
-          eq(repositories.namespaceSlug, namespaceSlug),
-          eq(repositories.name, name),
-          eq(repositories.durableObjectId, durableObjectId),
-          eq(repositories.status, "importing"),
-        ),
-      )
-      .returning({
-        id: repositories.id,
-        durableObjectId: repositories.durableObjectId,
-      });
-
-    return deleted[0] ?? null;
-  }
-
-  async finishFork(namespaceSlug: string, name: string): Promise<boolean> {
-    const updated = await this.#db
-      .update(repositories)
-      .set({ status: "ready" })
-      .where(
-        and(
-          eq(repositories.namespaceSlug, namespaceSlug),
-          eq(repositories.name, name),
-          eq(repositories.status, "forking"),
-        ),
-      )
-      .returning({ name: repositories.name });
-
-    return updated.length > 0;
-  }
-
-  /** Publish the remote's actual HEAD only if this is still the reserved import. */
-  async finishImport(
-    namespaceSlug: string,
-    name: string,
-    durableObjectId: string,
-    defaultBranch: string,
-  ): Promise<boolean> {
-    const updated = await this.#db
-      .update(repositories)
-      .set({ status: "ready", defaultBranch })
-      .where(
-        and(
-          eq(repositories.namespaceSlug, namespaceSlug),
-          eq(repositories.name, name),
-          eq(repositories.durableObjectId, durableObjectId),
-          eq(repositories.status, "importing"),
-        ),
-      )
-      .returning({ name: repositories.name });
-
-    return updated.length > 0;
-  }
-
-  /**
-   * Stamps a push onto the index entry, after the refs have already moved.
-   *
-   * Deliberately not part of the push: the repository object is where a push
-   * either happens or does not, and the row here is a copy for the REST
-   * surface's benefit. A stamp that fails leaves `last_push_at` stale rather
-   * than leaving a ref half-moved.
-   */
-  async recordPush(namespaceSlug: string, name: string, record: PushRecord): Promise<void> {
-    // Built in statements rather than spread conditionally: `default_branch`
-    // is left alone on all but the one push that retargets HEAD, and an
-    // omission is easier to read as an omission than as an empty object.
-    const stamp: Partial<NewRepositoryRow> = { lastPushAt: record.pushedAt };
-    if (record.defaultBranch !== null) {
-      stamp.defaultBranch = record.defaultBranch;
+      return updated.length > 0;
     }
 
-    await this.#db
-      .update(repositories)
-      .set(stamp)
-      .where(and(eq(repositories.namespaceSlug, namespaceSlug), eq(repositories.name, name)));
-  }
-}
+    /** Publish the remote's actual HEAD only if this is still the reserved import. */
+    async finishImport(
+      namespaceSlug: string,
+      name: string,
+      durableObjectId: string,
+      defaultBranch: string,
+    ): Promise<boolean> {
+      const updated = await this.#db
+        .update(repositories)
+        .set({ status: "ready", defaultBranch })
+        .where(
+          and(
+            eq(repositories.namespaceSlug, namespaceSlug),
+            eq(repositories.name, name),
+            eq(repositories.durableObjectId, durableObjectId),
+            eq(repositories.status, "importing"),
+          ),
+        )
+        .returning({ name: repositories.name });
+
+      return updated.length > 0;
+    }
+
+    /**
+     * Stamps a push onto the index entry, after the refs have already moved.
+     *
+     * Deliberately not part of the push: the repository object is where a push
+     * either happens or does not, and the row here is a copy for the REST
+     * surface's benefit. A stamp that fails leaves `last_push_at` stale rather
+     * than leaving a ref half-moved.
+     */
+    async recordPush(namespaceSlug: string, name: string, record: PushRecord): Promise<void> {
+      // Built in statements rather than spread conditionally: `default_branch`
+      // is left alone on all but the one push that retargets HEAD, and an
+      // omission is easier to read as an omission than as an empty object.
+      const stamp: Partial<NewRepositoryRow> = { lastPushAt: record.pushedAt };
+      if (record.defaultBranch !== null) {
+        stamp.defaultBranch = record.defaultBranch;
+      }
+
+      await this.#db
+        .update(repositories)
+        .set(stamp)
+        .where(and(eq(repositories.namespaceSlug, namespaceSlug), eq(repositories.name, name)));
+    }
+  };
+
+export class RepositoryIndex extends withRepositoryIndex(LocalRegistryStorage) {}
+
+export type RepositoryIndexClient = Pick<RepositoryIndex, Extract<keyof RepositoryIndex, string>>;
