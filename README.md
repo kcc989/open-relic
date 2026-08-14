@@ -148,3 +148,7 @@ pack reader, and migrations, but not the Workers runtime or the RPC hop.
 - [Git host benchmarking runbook](./docs/git-host-benchmarking.md) — compare
   against GitHub and hosted Artifacts
 - [AGENTS.md](./AGENTS.md) — guide for coding agents
+
+## License
+
+Open Relic is available under the [MIT License](./LICENSE).
