@@ -95,6 +95,10 @@ export class NamespaceRegistryObject extends DurableObject {
     return this.#repositories.deleteRepository(namespaceSlug, name);
   }
 
+  finishFork(namespaceSlug: string, name: string): Promise<boolean> {
+    return this.#repositories.finishFork(namespaceSlug, name);
+  }
+
   recordPush(namespaceSlug: string, name: string, record: PushRecord): Promise<void> {
     return this.#repositories.recordPush(namespaceSlug, name, record);
   }

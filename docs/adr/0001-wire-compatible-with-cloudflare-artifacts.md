@@ -39,12 +39,13 @@ The API implemented so far predated this decision and did not match. Most of the
 gap is now closed — the shape of the wire is Artifacts' — and what remains is
 behavior that has not been built at all rather than behavior built differently:
 
-|              | Open Relic today                       | Artifacts                                                 |
-| ------------ | -------------------------------------- | --------------------------------------------------------- |
-| Namespaces   | created and deleted explicitly         | created implicitly with the first repo; list and get only |
-| Contents     | direct objects served; log/files `501` | serve log, objects, and files                             |
-| Fork, import | routes registered, answer `501`        | copy repositories and import one remote branch            |
-| `source`     | always `null` — nothing writes it yet  | set by import                                             |
+|            | Open Relic today                       | Artifacts                                                 |
+| ---------- | -------------------------------------- | --------------------------------------------------------- |
+| Namespaces | created and deleted explicitly         | created implicitly with the first repo; list and get only |
+| Contents   | direct objects served; log/files `501` | serve log, objects, and files                             |
+| Import     | route registered, answers `501`        | import one remote branch                                  |
+| Fork       | implemented                            | copy one stable repository snapshot                       |
+| `source`   | set by fork; import is not built yet   | records where copied repository contents came from        |
 
 These closed with the reshaping of the REST surface and Git token
 authorization: the path shape, the v4 envelope, `result_info` pagination,

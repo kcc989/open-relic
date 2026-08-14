@@ -10,10 +10,10 @@ Artifacts should work against an installation with nothing changed but the host.
 [ADR-0001](./docs/adr/0001-wire-compatible-with-cloudflare-artifacts.md) records
 what that binds us to, and where the API below does not match yet.
 
-**`git push`, `git clone`, and `git fetch` work.** The namespace and repository
-APIs are implemented, and a Git client can round-trip branches over authenticated
-Git Smart HTTP. Everything else — contents, forks, and imports — is still a
-registered route that answers `501`:
+**`git push`, `git clone`, `git fetch`, and repository forks work.** The
+namespace and repository APIs are implemented, and a Git client can round-trip
+branches over authenticated Git Smart HTTP. Contents and imports are still
+registered routes that answer `501`:
 
 - Hono routes for every REST and Git Smart HTTP endpoint in the initial API
 - Effect v4 as the typed stub service boundary
@@ -172,9 +172,9 @@ row and not a byte of Git data.
 
 The split is metadata against contents. The registry row holds what the API
 answers with, which keeps listing a namespace one query instead of a fan-out of
-RPCs. The repository object holds what Git owns — today that is only `HEAD`,
-because a bare repository has one from `git init` and before its first ref. Both
-are written when the repository is created.
+RPCs. The repository object holds what Git owns — `HEAD`, refs, objects, retained
+deltas, and sweep checkpoints. A bare repository starts with HEAD before its
+first ref; the index row and that initial Git state are written on creation.
 
 `HEAD` is stored the way Git stores it: the literal bytes of the `.git/HEAD`
 file — `ref: refs/heads/main\n` when symbolic, a bare 40-hex object id when
@@ -186,12 +186,19 @@ schema change to be expressible. See
 `repositories.default_branch` stays what it already was — a denormalized copy
 that keeps listing a namespace one query.
 
+Multi-step creation reserves the registry row with a repository status before
+copying. A fork stays `forking` until its object, ref, HEAD, and initial-token
+writes are complete; targeted REST access returns `409/10303` in that window.
+Failure deletes the row and cascaded tokens, then destroys the incomplete
+repository object so the name can be retried from scratch.
+
 | Endpoint                                                                   | Behavior                                                                                                                                                         |
 | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `POST /namespaces/:namespace/repos`                                        | `200` with `{id, name, description, default_branch, remote, token}`, `404` if the namespace is unknown, `409` if the name is taken, `400` if the body is invalid |
 | `GET /namespaces/:namespace/repos?limit=&cursor=&search=&sort=&direction=` | `200` with `result_info`, `404` if the namespace is unknown                                                                                                      |
 | `GET /namespaces/:namespace/repos/:repo`                                   | `200` or `404`                                                                                                                                                   |
 | `DELETE /namespaces/:namespace/repos/:repo`                                | `202` with `{ "id": … }` or `404`; discards the repository object's storage                                                                                      |
+| `POST /namespaces/:namespace/repos/:repo/fork`                             | `201` after one stable reachable snapshot is copied into an independent repository; `409` while a source or target is still forking                              |
 
 A create answers with a deliberately narrower shape than a list or get: the
 identity, the remote to clone from, and the one token it will not show again.
@@ -218,6 +225,13 @@ against a conservative subset of `git check-ref-format`.
 Deleting a namespace deletes its repositories in the same transaction and hands
 back the object ids, which the route then discards; an index row and the object
 it points at are never removed by the same layer.
+
+A full fork copies HEAD, every ref, and the union of objects reachable from
+those roots. `default_branch_only` narrows the refs and reachability walk to the
+branch named by HEAD. The source repository holds its operation gate for the
+copy and transfers one resolved object at a time to the target, keeping memory
+bounded by object size while excluding concurrent pushes from the captured
+snapshot. Orphans are not copied.
 
 ```sh
 curl -X POST http://localhost:1337/namespaces/acme/repos \

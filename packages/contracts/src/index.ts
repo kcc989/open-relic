@@ -211,6 +211,7 @@ export const IMPLEMENTED_ENDPOINT_IDS = [
   "repositories.list",
   "repositories.get",
   "repositories.delete",
+  "repositories.fork",
   "tokens.create",
   "tokens.list",
   "tokens.delete",
@@ -389,7 +390,7 @@ export interface RepoInfo {
   readonly created_at: string;
   readonly updated_at: string;
   readonly last_push_at: string | null;
-  /** The URL an imported repository came from; `null` when it was created here. */
+  /** The import URL or fork source address; `null` when the repository was created empty. */
   readonly source: string | null;
   readonly read_only: boolean;
 }
@@ -416,6 +417,22 @@ export interface CreateRepoResult {
   readonly default_branch: string;
   readonly remote: string;
   readonly token: string;
+}
+
+export interface ForkRepoRequest {
+  readonly name: string;
+  readonly description?: string;
+  readonly read_only?: boolean;
+  readonly default_branch_only?: boolean;
+}
+
+/**
+ * Hosted Artifacts includes the stable source address in its fork result in
+ * addition to the documented object count and create fields.
+ */
+export interface ForkRepoResult extends CreateRepoResult {
+  readonly objects: number;
+  readonly source: string;
 }
 
 export interface DeleteRepoResult {

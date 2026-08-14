@@ -86,6 +86,12 @@ export const gitAuthenticationRequired = (message: string): Response =>
 export const alreadyExists = (message: string): Response =>
   fail(409, { code: ERROR_CODES.alreadyExists, message });
 
+export const forkInProgress = (message: string): Response =>
+  fail(409, { code: ERROR_CODES.forkInProgress, message });
+
+export const internalError = (message: string): Response =>
+  fail(500, { code: ERROR_CODES.internalError, message });
+
 export const notImplemented = (operation: EndpointId): Response =>
   fail(501, {
     code: ERROR_CODES.notImplemented,

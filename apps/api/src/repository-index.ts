@@ -7,6 +7,7 @@ import {
   repositories,
   type NewRepositoryRow,
   type RepositoryRow,
+  type RepositoryStatus,
 } from "./db/registry-schema.ts";
 import { escapeLikePattern } from "./pagination.ts";
 
@@ -16,6 +17,8 @@ export interface CreateRepositoryCommand {
   readonly description: string | null;
   readonly defaultBranch: string;
   readonly readOnly: boolean;
+  readonly source?: string | null;
+  readonly status?: RepositoryStatus;
   /**
    * The `RepositoryObject` this name will point at, allocated by the caller so
    * that a rejected create never leaves an initialized object behind.
@@ -61,6 +64,7 @@ export interface RepositoryPage {
 export interface RepositoryPointer {
   readonly repository: RepoInfo;
   readonly durableObjectId: string;
+  readonly status: RepositoryStatus;
 }
 
 /** What a delete answers with, and what its storage has to be discarded by. */
@@ -94,6 +98,7 @@ export interface RepositoryIndexClient {
     namespaceSlug: string,
     name: string,
   ) => Promise<DeletedRepository | null>;
+  readonly finishFork: (namespaceSlug: string, name: string) => Promise<boolean>;
   readonly recordPush: (namespaceSlug: string, name: string, record: PushRecord) => Promise<void>;
 }
 
@@ -192,7 +197,8 @@ export class RepositoryIndex {
           description: command.description,
           defaultBranch: command.defaultBranch,
           readOnly: command.readOnly,
-          source: null,
+          source: command.source ?? null,
+          status: command.status ?? "ready",
           createdAt: now,
           updatedAt: now,
           lastPushAt: null,
@@ -280,7 +286,11 @@ export class RepositoryIndex {
     const row = rows[0];
     return row === undefined
       ? null
-      : { repository: toRepository(row), durableObjectId: row.durableObjectId };
+      : {
+          repository: toRepository(row),
+          durableObjectId: row.durableObjectId,
+          status: row.status,
+        };
   }
 
   /**
@@ -298,6 +308,22 @@ export class RepositoryIndex {
       });
 
     return deleted[0] ?? null;
+  }
+
+  async finishFork(namespaceSlug: string, name: string): Promise<boolean> {
+    const updated = await this.#db
+      .update(repositories)
+      .set({ status: "ready" })
+      .where(
+        and(
+          eq(repositories.namespaceSlug, namespaceSlug),
+          eq(repositories.name, name),
+          eq(repositories.status, "forking"),
+        ),
+      )
+      .returning({ name: repositories.name });
+
+    return updated.length > 0;
   }
 
   /**

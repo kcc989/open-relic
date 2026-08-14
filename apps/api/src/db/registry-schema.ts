@@ -7,6 +7,9 @@ import {
   uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
+export const REPOSITORY_STATUSES = ["creating", "importing", "forking", "ready"] as const;
+export type RepositoryStatus = (typeof REPOSITORY_STATUSES)[number];
+
 /**
  * The slug is the primary key, which is what makes claiming one a single
  * `INSERT ... ON CONFLICT DO NOTHING` rather than a read-then-write race.
@@ -54,8 +57,10 @@ export const repositories = sqliteTable(
     defaultBranch: text("default_branch").notNull(),
     /** Refused by the Git surface on push; the REST surface only reports it. */
     readOnly: integer("read_only", { mode: "boolean" }).notNull().default(false),
-    /** The remote an import copied from; `null` for a repository created here. */
+    /** Import URL or fork source address; `null` for a repository created empty. */
     source: text("source"),
+    /** Targeted access is refused until a multi-step create operation finishes. */
+    status: text("status", { enum: REPOSITORY_STATUSES }).notNull().default("ready"),
     createdAt: text("created_at")
       .notNull()
       .$defaultFn(() => new Date().toISOString()),
