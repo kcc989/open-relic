@@ -116,6 +116,20 @@ test("an object larger than one chunk round-trips byte-identically", async () =>
   expect((await objects.read(written.oid))?.bytes).toEqual(contents);
 });
 
+test("a streamed object is byte-oriented for transfer over Workers RPC", async () => {
+  const objects = store();
+  const written = blob(utf8("stream me"));
+  await objects.write(written);
+
+  const stream = await objects.readStream(written.oid, "blob");
+  const reader = stream!.getReader({ mode: "byob" });
+  const next = await reader.read(new Uint8Array(written.bytes.length));
+
+  expect(next.done).toBe(false);
+  expect(next.value).toEqual(Uint8Array.from(written.bytes));
+  await reader.cancel();
+});
+
 test("a delta and its base hash are kept alongside the resolved object", async () => {
   const objects = store();
   const resolved = utf8("the resolved contents");

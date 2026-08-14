@@ -12,8 +12,9 @@ what that binds us to, and where the API below does not match yet.
 
 **`git push`, `git clone`, `git fetch`, repository forks, and public HTTPS
 imports work.** The namespace and repository APIs are implemented, and a Git
-client can round-trip branches over authenticated Git Smart HTTP. The remaining
-content routes are registered endpoints that answer `501`:
+client can round-trip branches over authenticated Git Smart HTTP. Repository
+contents are readable through both immutable object ids and branch-, tag-, or
+commit-resolved paths.
 
 - Hono routes for every REST and Git Smart HTTP endpoint in the initial API
 - Effect v4 as the typed stub service boundary
@@ -81,6 +82,14 @@ Direct object reads use the same immutable SHA-1 names as Git:
 - `GET /namespaces/:namespace/repos/:repo/tree/:hash` returns the tree's entries and modes.
 - `GET /namespaces/:namespace/repos/:repo/blob/:hash` returns the stored bytes as
   `application/octet-stream` rather than a JSON envelope.
+
+Resolved content reads share Git revision and nested-tree traversal:
+
+- `GET /namespaces/:namespace/repos/:repo/log?ref=&limit=&offset=` returns commit history.
+- `GET /namespaces/:namespace/repos/:repo/file?ref=&path=` returns file bytes as
+  `application/octet-stream`.
+- `GET /namespaces/:namespace/repos/:repo/raw/:ref/*` returns the same bytes with
+  a content type inferred from the path.
 
 Lists answer with a bare array in `result` and their paging state beside it in
 `result_info`. Cursors are keyset, not offset — the cursor carries the sort key

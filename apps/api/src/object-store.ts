@@ -181,6 +181,7 @@ export class ObjectStore implements PackSink {
     let read = 0;
 
     return new ReadableStream<Uint8Array>({
+      type: "bytes",
       pull: (controller) => {
         if (index === row.chunkCount) {
           if (read !== row.size) {
@@ -213,7 +214,7 @@ export class ObjectStore implements PackSink {
           return;
         }
 
-        controller.enqueue(chunk);
+        controller.enqueue(Uint8Array.from(chunk));
       },
     });
   }

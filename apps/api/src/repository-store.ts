@@ -1,3 +1,4 @@
+import type { CommitInfo } from "@open-relic/contracts";
 import { asc, eq, sql } from "drizzle-orm";
 
 import { findMissingObject, linksToFetch, type WalkOptions } from "./connectivity.ts";
@@ -54,8 +55,13 @@ import {
 } from "./git/remote-branch.ts";
 import { ObjectStore, RepositoryStorageExhaustedError } from "./object-store.ts";
 import type { ObjectType } from "./object.ts";
+import { ObjectParseError } from "./object-parse.ts";
 import { PackError, readPack, type PackBase, type PackObject } from "./pack.ts";
+import { parseCommit } from "./repository-content.ts";
 import { RepositorySweeper, type SweepProgress } from "./sweep.ts";
+import { GITLINK_MODE, TREE_MODE, treeEntries, type ParsedTreeEntry } from "./tree-entry.ts";
+
+const TREE_NAME_DECODER = new TextDecoder();
 
 /** The Git side of a `git init --bare`; the registry owns naming. */
 export interface RepositoryInit {
@@ -116,6 +122,20 @@ export interface ForkOutcome {
   readonly objects: number;
 }
 
+export type ResolvedContentFailure =
+  | "corrupt"
+  | "file-not-found"
+  | "revision-not-found"
+  | "wrong-object-type";
+
+export type RepositoryHistoryResult =
+  | { readonly ok: true; readonly commits: readonly CommitInfo[] }
+  | { readonly ok: false; readonly reason: ResolvedContentFailure };
+
+export type RepositoryFileResult =
+  | { readonly ok: true; readonly bytes: ReadableStream<Uint8Array> }
+  | { readonly ok: false; readonly reason: ResolvedContentFailure };
+
 export class ForkError extends Error {
   constructor(message: string) {
     super(message);
@@ -140,6 +160,12 @@ export interface RepositoryObjectClient {
   readonly completeFork: (state: ForkState) => Promise<void>;
   readonly readObject: (oid: string) => Promise<PackBase | null>;
   readonly readBlob: (oid: string) => Promise<ReadableStream<Uint8Array> | null>;
+  readonly readHistory: (
+    revision: string | null,
+    limit: number,
+    offset: number,
+  ) => Promise<RepositoryHistoryResult>;
+  readonly readFile: (revision: string | null, path: string) => Promise<RepositoryFileResult>;
   readonly hasObject: (oid: string) => Promise<boolean>;
   readonly importBranch: (request: RemoteBranchRequest) => Promise<ImportedBranch>;
   readonly resetImport: (init: RepositoryInit) => Promise<void>;
@@ -646,6 +672,129 @@ export class RepositoryStore {
     return this.#objects.readStream(oid, "blob");
   }
 
+  async readHistory(
+    revision: string | null,
+    limit: number,
+    offset: number,
+  ): Promise<RepositoryHistoryResult> {
+    const resolved = await this.#resolveCommit(revision);
+    if (!resolved.ok) {
+      return resolved;
+    }
+    if (resolved.oid === null) {
+      return { ok: true, commits: [] };
+    }
+
+    const commits: CommitInfo[] = [];
+    const pending = [resolved.oid];
+    const visited = new Set<string>();
+    const shallow = await this.#shallow();
+
+    while (pending.length > 0 && commits.length < offset + limit) {
+      const oid = pending.shift()!;
+      if (visited.has(oid)) {
+        continue;
+      }
+      visited.add(oid);
+
+      const object = await this.#objects.read(oid);
+      if (object === null) {
+        return { ok: false, reason: "corrupt" };
+      }
+      if (object.type !== "commit") {
+        return { ok: false, reason: "wrong-object-type" };
+      }
+
+      let parsed: CommitInfo;
+      try {
+        parsed = parseCommit(oid, object.bytes);
+      } catch (error) {
+        if (error instanceof ObjectParseError) {
+          return { ok: false, reason: "corrupt" };
+        }
+        throw error;
+      }
+      commits.push(parsed);
+      if (!shallow.has(oid)) {
+        pending.push(...parsed.parents);
+      }
+    }
+
+    return { ok: true, commits: commits.slice(offset) };
+  }
+
+  async readFile(revision: string | null, path: string): Promise<RepositoryFileResult> {
+    const resolved = await this.#resolveCommit(revision);
+    if (!resolved.ok) {
+      return resolved;
+    }
+    if (resolved.oid === null) {
+      return { ok: false, reason: "revision-not-found" };
+    }
+
+    const commit = await this.#objects.read(resolved.oid);
+    if (commit === null || commit.type !== "commit") {
+      return { ok: false, reason: "corrupt" };
+    }
+
+    let treeOid: string;
+    try {
+      treeOid = parseCommit(resolved.oid, commit.bytes).treeHash;
+    } catch (error) {
+      if (error instanceof ObjectParseError) {
+        return { ok: false, reason: "corrupt" };
+      }
+      throw error;
+    }
+
+    const segments = path.split("/");
+    if (segments.length === 0 || segments.some((segment) => segment.length === 0)) {
+      return { ok: false, reason: "file-not-found" };
+    }
+
+    for (const [at, segment] of segments.entries()) {
+      const tree = await this.#objects.read(treeOid);
+      if (tree === null || tree.type !== "tree") {
+        return { ok: false, reason: "corrupt" };
+      }
+
+      let entry: ParsedTreeEntry | undefined;
+      try {
+        for (const candidate of treeEntries(tree.bytes)) {
+          if (TREE_NAME_DECODER.decode(candidate.name) === segment) {
+            entry = candidate;
+            break;
+          }
+        }
+      } catch (error) {
+        if (error instanceof ObjectParseError) {
+          return { ok: false, reason: "corrupt" };
+        }
+        throw error;
+      }
+      if (entry === undefined) {
+        return { ok: false, reason: "file-not-found" };
+      }
+
+      const last = at === segments.length - 1;
+      if (!last) {
+        if (entry.mode !== TREE_MODE) {
+          return { ok: false, reason: "file-not-found" };
+        }
+        treeOid = entry.oid;
+        continue;
+      }
+
+      if (entry.mode === TREE_MODE || entry.mode === GITLINK_MODE) {
+        return { ok: false, reason: "wrong-object-type" };
+      }
+      const bytes = await this.#objects.readStream(entry.oid, "blob");
+      return bytes === null ? { ok: false, reason: "corrupt" } : { ok: true, bytes };
+    }
+
+    return { ok: false, reason: "file-not-found" };
+  }
+
   hasObject(oid: string): Promise<boolean> {
     return this.#objects.has(oid);
   }
@@ -659,6 +808,66 @@ export class RepositoryStore {
 
   async #refMap(): Promise<ReadonlyMap<string, string>> {
     return new Map((await this.#refs()).map((ref) => [ref.name, ref.oid]));
+  }
+
+  async #resolveCommit(
+    revision: string | null,
+  ): Promise<
+    | { readonly ok: true; readonly oid: string | null }
+    | { readonly ok: false; readonly reason: ResolvedContentFailure }
+  > {
+    const refMap = await this.#refMap();
+    const head = this.#head();
+    let oid: string | undefined;
+
+    if (revision === null) {
+      if (head?.kind === "detached") {
+        oid = head.oid;
+      } else if (head !== null) {
+        oid = refMap.get(head.ref);
+        if (oid === undefined) {
+          return { ok: true, oid: null };
+        }
+      }
+    } else if (/^[0-9a-f]{40}$/.test(revision)) {
+      oid = revision;
+    } else {
+      oid = refMap.get(`${BRANCH_REF_PREFIX}${revision}`) ?? refMap.get(`refs/tags/${revision}`);
+    }
+
+    if (oid === undefined) {
+      return { ok: false, reason: "revision-not-found" };
+    }
+
+    const visited = new Set<string>();
+    while (!visited.has(oid)) {
+      visited.add(oid);
+      const object = await this.#objects.read(oid);
+      if (object === null) {
+        return { ok: false, reason: "revision-not-found" };
+      }
+      if (object.type === "commit") {
+        return { ok: true, oid };
+      }
+      if (object.type !== "tag") {
+        return { ok: false, reason: "wrong-object-type" };
+      }
+
+      try {
+        const [target] = linksToFetch(object.type, object.bytes);
+        if (target === undefined) {
+          return { ok: false, reason: "corrupt" };
+        }
+        oid = target.oid;
+      } catch (error) {
+        if (error instanceof ObjectParseError) {
+          return { ok: false, reason: "corrupt" };
+        }
+        throw error;
+      }
+    }
+
+    return { ok: false, reason: "corrupt" };
   }
 
   async #shallow(): Promise<ReadonlySet<string>> {
