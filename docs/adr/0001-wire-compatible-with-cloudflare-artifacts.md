@@ -87,9 +87,10 @@ already does. An installation builds it from the host the request arrived on, so
 it advertises whatever host the client actually reached it at.
 
 Artifacts documents 10 GB per repository, 1 TB per account, and request-rate
-limits. Those capacity policies are not part of the wire shape. The initial Open
-Relic release deliberately uses a fixed 4 GB logical repository quota so one
-repository, its retained deltas, and its metadata fit in one 10 GB SQLite-backed
-Durable Object. It does not reproduce Artifacts' request-rate limits. Raising
-the repository quota requires a later storage-layout decision rather than a
-configuration switch that the current layout cannot honor.
+limits. Those capacity policies are not part of the wire shape, so the initial
+Open Relic release does not reproduce them. The current one-repository/one-
+SQLite-Durable-Object layout is still bounded by the platform's physical storage
+limit: exhausting it must reject the operation cleanly without making a partial
+object visible or damaging data already stored. Supporting a larger capacity or
+an explicit repository quota requires a later storage-layout decision rather
+than a logical counter that cannot account for physical amplification.

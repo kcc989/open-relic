@@ -51,6 +51,8 @@ export const objects = sqliteTable("objects", {
   type: text("type", { enum: OBJECT_TYPES }).notNull(),
   size: integer("size").notNull(),
   chunkCount: integer("chunk_count").notNull(),
+  /** Readers ignore a row until every resolved and retained-delta chunk exists. */
+  complete: integer("complete", { mode: "boolean" }).notNull().default(true),
 });
 
 export type ObjectRow = typeof objects.$inferSelect;

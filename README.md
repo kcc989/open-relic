@@ -419,6 +419,13 @@ base's hash in `object_deltas`; upload-pack reuses it when the client already ha
 that base. The incoming pack passes through our hands exactly once. See
 [ADR-0002](./docs/adr/0002-git-objects-are-chunked-rows-in-the-repository-object.md).
 
+An `objects` row begins incomplete and is invisible to reads until all of those
+rows and chunks exist. If the Durable Object reports `SQLITE_FULL`, the pending
+representation is removed in one storage transaction and receive-pack rejects
+the Pack through report-status. If cleanup is interrupted, the hidden row stays
+enumerable so a retry or Sweep can finish it. Objects completed earlier in that
+Pack remain Orphans and are reclaimed by the normal Sweep.
+
 The parse is a single streaming pass, and that is the whole point of storing
 objects this way. Each resolved object is written the moment it is complete, so
 a delta resolves by reading its base back out of storage rather than by holding

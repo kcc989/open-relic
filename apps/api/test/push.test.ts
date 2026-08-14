@@ -1,9 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { HEAD_KEY } from "../src/head.ts";
+import type { SyncKv } from "../src/db/kv.ts";
 import { ZERO_OID } from "../src/object.ts";
 import { REJECTIONS, RepositoryStore, type ReceivePackOutcome } from "../src/repository-store.ts";
-import { createTestRepositoryStorage, type TestRepositoryStorage } from "./support/database.ts";
+import {
+  createSqliteFullError,
+  createTestRepositoryStorage,
+  type TestRepositoryStorage,
+} from "./support/database.ts";
 import { blob, commit, tag, tree, treeEntry, type GitObject } from "./support/git-objects.ts";
 import {
   buildDelta,
@@ -67,6 +72,22 @@ const report = (outcome: ReceivePackOutcome) => readReport(outcome.report);
 /** The refs the repository would advertise, which is the only view that counts. */
 const advertised = async (): Promise<string> =>
   new Response(await store.advertiseReceivePack()).text();
+
+const storageFullOnce = (kv: SyncKv, keyToFail: string): SyncKv => {
+  let failed = false;
+
+  return {
+    get: <T>(key: string): T | undefined => kv.get<T>(key),
+    put: <T>(key: string, value: T): void => {
+      if (!failed && key === keyToFail) {
+        failed = true;
+        throw createSqliteFullError();
+      }
+      kv.put(key, value);
+    },
+    delete: (key: string): void => kv.delete(key),
+  };
+};
 
 describe("a first push to an empty repository", () => {
   test("creates the branch and reports it accepted", async () => {
@@ -334,6 +355,58 @@ describe("a push whose pack cannot be read", () => {
     });
 
     expect(report(outcome).lines[0]).toContain("PACK");
+  });
+});
+
+describe("a push that exhausts repository storage", () => {
+  test("reports the unpack failure, preserves completed objects, and remains retryable", async () => {
+    await push({
+      commands: [{ newOid: FIRST.oid, name: MAIN }],
+      objects: FIRST_OBJECTS,
+    });
+    const exhausted = new RepositoryStore(
+      opened.db,
+      storageFullOnce(opened.kv, `o:${SECOND.oid}:0`),
+    );
+
+    const failed = await exhausted.receivePack(
+      streamOf(
+        pushBody({
+          commands: [{ oldOid: FIRST.oid, newOid: SECOND.oid, name: MAIN }],
+          objects: [SECOND_ROOT, REVISED, SECOND],
+        }),
+      ),
+    );
+
+    expect(report(failed).lines).toEqual([
+      "unpack Repository storage is full.",
+      `ng ${MAIN} ${REJECTIONS.unpacker}`,
+    ]);
+    expect(await advertised()).toContain(`${FIRST.oid} ${MAIN}\0`);
+    expect((await store.readObject(FIRST.oid))?.bytes).toEqual(FIRST.bytes);
+    expect((await store.readObject(SECOND_ROOT.oid))?.bytes).toEqual(SECOND_ROOT.bytes);
+    expect((await store.readObject(REVISED.oid))?.bytes).toEqual(REVISED.bytes);
+    expect(await store.readObject(SECOND.oid)).toBeNull();
+
+    for (let turns = 0; turns < 10; turns += 1) {
+      if ((await store.sweep()).phase === "complete") {
+        break;
+      }
+    }
+    expect(await store.readObject(SECOND_ROOT.oid)).toBeNull();
+    expect(await store.readObject(REVISED.oid)).toBeNull();
+    expect((await store.readObject(FIRST.oid))?.bytes).toEqual(FIRST.bytes);
+
+    const retried = await exhausted.receivePack(
+      streamOf(
+        pushBody({
+          commands: [{ oldOid: FIRST.oid, newOid: SECOND.oid, name: MAIN }],
+          objects: [SECOND_ROOT, REVISED, SECOND],
+        }),
+      ),
+    );
+    expect(report(retried).lines).toEqual(["unpack ok", `ok ${MAIN}`]);
+    expect(await advertised()).toContain(`${SECOND.oid} ${MAIN}\0`);
   });
 });
 

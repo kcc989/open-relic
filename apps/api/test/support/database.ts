@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { Database, SQLiteError } from "bun:sqlite";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,7 @@ const migrationsFolder = (durableObject: "registry" | "repository"): string =>
 
 export interface TestDatabase {
   readonly db: SyncSqliteDatabase;
+  readonly client: Database;
   readonly close: () => void;
 }
 
@@ -41,6 +42,25 @@ export const createTestKv = (): SyncKv => {
       entries.delete(key);
     },
   };
+};
+
+/** A real driver error, not a message-shaped stand-in for one. */
+export const createSqliteFullError = (): SQLiteError => {
+  const client = new Database(":memory:");
+
+  try {
+    client.run("PRAGMA max_page_count = 1");
+    client.run("CREATE TABLE exhausts_the_database (value text)");
+  } catch (error) {
+    if (error instanceof SQLiteError && error.code === "SQLITE_FULL") {
+      return error;
+    }
+    throw error;
+  } finally {
+    client.close();
+  }
+
+  throw new Error("The test database did not exhaust its storage.");
 };
 
 /**
@@ -76,6 +96,7 @@ const createDatabase = (
 
   return {
     db,
+    client,
     close: () => {
       client.close();
     },
