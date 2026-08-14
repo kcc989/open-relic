@@ -140,10 +140,16 @@ const treeLinks = (bytes: Uint8Array, includeBlobs: boolean): readonly ObjectLin
  * The objects this one names that we insist on holding. Not everything it
  * references — see the note at the top of this file about blobs.
  */
-export const linksToVerify = (type: ObjectType, bytes: Uint8Array): readonly ObjectLink[] => {
+export const linksToVerify = (
+  type: ObjectType,
+  bytes: Uint8Array,
+  shallowCommit = false,
+): readonly ObjectLink[] => {
   switch (type) {
-    case "commit":
-      return commitLinks(bytes);
+    case "commit": {
+      const links = commitLinks(bytes);
+      return shallowCommit ? links.slice(0, 1) : links;
+    }
     case "tree":
       return treeLinks(bytes, false);
     case "tag":
@@ -158,10 +164,16 @@ export const linksToVerify = (type: ObjectType, bytes: Uint8Array): readonly Obj
  * sweep must follow blobs too: skipping their existence is safe while proving
  * a complete pack, but skipping their mark would collect live file contents.
  */
-export const linksToReach = (type: ObjectType, bytes: Uint8Array): readonly ObjectLink[] => {
+export const linksToReach = (
+  type: ObjectType,
+  bytes: Uint8Array,
+  shallowCommit = false,
+): readonly ObjectLink[] => {
   switch (type) {
-    case "commit":
-      return commitLinks(bytes);
+    case "commit": {
+      const links = commitLinks(bytes);
+      return shallowCommit ? links.slice(0, 1) : links;
+    }
     case "tree":
       return treeLinks(bytes, true);
     case "tag":
@@ -192,6 +204,8 @@ export interface WalkOptions {
   readonly verified: ReadonlySet<string>;
   /** Carried across the commands of one push, so shared history is walked once. */
   readonly visited: Set<string>;
+  /** Commits whose trees are present but whose parents are intentionally absent. */
+  readonly shallow?: ReadonlySet<string>;
 }
 
 /**
@@ -204,7 +218,7 @@ export interface WalkOptions {
 export const findMissingObject = async (
   tip: string,
   source: ObjectSource,
-  { verified, visited }: WalkOptions,
+  { verified, visited, shallow = new Set() }: WalkOptions,
 ): Promise<string | null> => {
   const pending: string[] = [tip];
 
@@ -222,7 +236,7 @@ export const findMissingObject = async (
     }
 
     try {
-      for (const link of linksToVerify(object.type, object.bytes)) {
+      for (const link of linksToVerify(object.type, object.bytes, shallow.has(oid))) {
         pending.push(link.oid);
       }
     } catch (error) {

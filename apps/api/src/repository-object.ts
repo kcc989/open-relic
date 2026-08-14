@@ -14,7 +14,9 @@ import {
   type ForkOutcome,
   type ForkState,
   type ForkTarget,
+  type ImportedBranch,
   type ReceivePackOutcome,
+  type RemoteBranchRequest,
   type RepositoryInit,
   type RepositorySnapshot,
 } from "./repository-store.ts";
@@ -88,6 +90,13 @@ export class RepositoryObject extends DurableObject {
 
   completeFork(state: ForkState): Promise<void> {
     return this.#store.completeFork(state);
+  }
+
+  async importBranch(request: RemoteBranchRequest): Promise<ImportedBranch> {
+    // Import can leave complete but unreachable objects when the remote fails
+    // late. Persist reclamation before the first network or storage await.
+    const scheduled = this.ctx.storage.setAlarm(Date.now());
+    return this.#store.importBranch(request, globalThis.fetch, scheduled);
   }
 
   /** Start or resume reclamation; alarms carry subsequent batches. */

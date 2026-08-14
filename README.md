@@ -421,9 +421,29 @@ Protocol v1 is supported explicitly: a request carrying `Git-Protocol:
 version=1` receives the `version 1` marker before the advertisement. Protocol v2
 is deferred. A v2 request receives the truthful v0 advertisement, so Git
 automatically falls back instead of being promised `ls-refs` or v2 `fetch`.
-Shallow and deepen capabilities are likewise unadvertised until their graph
-boundaries are implemented. `filter` and `include-tag` remain unsupported,
-matching Artifacts.
+Repositories imported with a shallow history persist the boundary commits the
+way Git persists its `shallow` file. Upload-pack advertises those boundaries,
+stops its graph walk at them, and a clone remains shallow rather than failing on
+an intentionally absent parent. Ordinary repositories still do not advertise
+client-requested shallow or deepen support. `filter` and `include-tag` remain
+unsupported, matching Artifacts.
+
+## Outbound branch fetch
+
+`RepositoryObject.importBranch` is the storage-side operation behind the future
+REST import workflow. It acts as a small protocol-v1 Smart HTTP client: discover
+the remote HEAD or select one requested branch, negotiate full or shallow
+history, and hand the response stream directly to `readPack`. Only after the
+pack is complete and its selected history is connected does one transaction
+write the branch ref, shallow boundaries, and HEAD. The method returns the
+actual branch and tip so the registry can copy `default_branch` when the REST
+workflow lands; the import route itself remains a `501` stub for now.
+
+Outbound requests accept only HTTPS remotes without URL user information.
+Literal loopback, private, and link-local destinations are refused, including
+on each of at most three manually followed redirects. Requests carry neither
+credentials nor cookies, and errors omit the remote URL because its query is
+sensitive. No Git binary, checkout, or whole-pack buffer is involved.
 
 ## Objects and packs
 
@@ -456,18 +476,19 @@ directly — a pack four times longer is read with no more in flight. A rewrite
 that buffered the pack would pass every other test and lose the reason the store
 looks like this.
 
-| Module                    | What it is                                                                                                 |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `src/pack.ts`             | The pack reader: entry headers, `ofs-delta` and `ref-delta` resolution, the trailing checksum              |
-| `src/object-store.ts`     | Objects as chunked rows, and the sink the pack is read into                                                |
-| `src/connectivity.ts`     | What a commit, tree, or tag names, and the walks that answer "is it all here" and "is this a fast-forward" |
-| `src/inflate.ts`          | A resumable zlib decompressor                                                                              |
-| `src/sha1.ts`             | Incremental SHA-1                                                                                          |
-| `src/delta.ts`            | Git's copy/insert delta encoding                                                                           |
-| `src/git/pkt-line.ts`     | Git's framing, written and read — and the hand-off from the commands to the pack behind them               |
-| `src/git/receive-pack.ts` | The push conversation: commands in, `report-status` out, and what this server accepts                      |
-| `src/git/upload-pack.ts`  | Fetch negotiation, reachability subtraction, and the streaming pack writer                                 |
-| `src/repository-store.ts` | The order all of it happens in, and the transaction at the end                                             |
+| Module                     | What it is                                                                                                 |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `src/pack.ts`              | The pack reader: entry headers, `ofs-delta` and `ref-delta` resolution, the trailing checksum              |
+| `src/object-store.ts`      | Objects as chunked rows, and the sink the pack is read into                                                |
+| `src/connectivity.ts`      | What a commit, tree, or tag names, and the walks that answer "is it all here" and "is this a fast-forward" |
+| `src/inflate.ts`           | A resumable zlib decompressor                                                                              |
+| `src/sha1.ts`              | Incremental SHA-1                                                                                          |
+| `src/delta.ts`             | Git's copy/insert delta encoding                                                                           |
+| `src/git/pkt-line.ts`      | Git's framing, written and read — and the hand-off from the commands to the pack behind them               |
+| `src/git/receive-pack.ts`  | The push conversation: commands in, `report-status` out, and what this server accepts                      |
+| `src/git/upload-pack.ts`   | Fetch negotiation, reachability subtraction, and the streaming pack writer                                 |
+| `src/git/remote-branch.ts` | Credentialless Smart HTTP discovery and one-branch outbound fetch                                          |
+| `src/repository-store.ts`  | The order all of it happens in, and the transaction at the end                                             |
 
 `DecompressionStream("deflate")` cannot do this job: a pack is a concatenation
 of zlib streams with no length prefix, so the next object can only be found by

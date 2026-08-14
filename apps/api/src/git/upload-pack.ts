@@ -2,7 +2,7 @@
 
 import { createDeflate } from "node:zlib";
 
-import { linksToFetch } from "../connectivity.ts";
+import { commitParents, linksToFetch } from "../connectivity.ts";
 import type { PackBase, PackDelta } from "../pack.ts";
 import { isObjectId, type ObjectType } from "../object.ts";
 import { Sha1, fromHex } from "../sha1.ts";
@@ -19,6 +19,8 @@ const decoder = new TextDecoder();
 
 const WANT_PATTERN = /^want ([0-9a-f]{40})(?: (.*))?\n?$/;
 const HAVE_PATTERN = /^have ([0-9a-f]{40})\n?$/;
+const SHALLOW_PATTERN = /^shallow ([0-9a-f]{40})\n?$/;
+const DEEPEN_PATTERN = /^deepen ([0-9]+)\n?$/;
 
 const MULTI_ACK_DETAILED = "multi_ack_detailed";
 const SIDE_BAND_64K = "side-band-64k";
@@ -34,6 +36,8 @@ export class UploadPackError extends Error {
 
 interface UploadPackRequest {
   readonly wants: readonly string[];
+  readonly shallow: readonly string[];
+  readonly depth: number | undefined;
   readonly haves: readonly string[];
   readonly capabilities: readonly string[];
   readonly done: boolean;
@@ -49,42 +53,62 @@ export interface UploadPackObjectSource {
 const readRequest = async (body: ReadableStream<Uint8Array>): Promise<UploadPackRequest> => {
   const lines = new PktLineReader(body);
   const wants: string[] = [];
+  const shallow: string[] = [];
   const haves: string[] = [];
   let capabilities: readonly string[] = [];
+  let depth: number | undefined;
   let inHaves = false;
+  let inShallow = false;
 
   try {
     for (;;) {
       const line = await lines.next();
 
       if (line.kind === "end") {
-        return { wants, haves, capabilities, done: false };
+        return { wants, shallow, depth, haves, capabilities, done: false };
       }
       if (line.kind === "flush") {
         if (!inHaves) {
           inHaves = true;
           continue;
         }
-        return { wants, haves, capabilities, done: false };
+        return { wants, shallow, depth, haves, capabilities, done: false };
       }
 
       const text = decoder.decode(line.payload);
       if (!inHaves) {
         const match = WANT_PATTERN.exec(text);
-        if (match === null) {
-          throw new UploadPackError(`"${text.trim()}" is not a want line.`);
+        if (match !== null && !inShallow) {
+          wants.push(match[1]!);
+          if (wants.length === 1) {
+            capabilities = (match[2] ?? "").split(" ").filter((value) => value !== "");
+          }
+          continue;
         }
 
-        wants.push(match[1]!);
-        if (wants.length === 1) {
-          capabilities = (match[2] ?? "").split(" ").filter((value) => value !== "");
+        inShallow = true;
+        const shallowMatch = SHALLOW_PATTERN.exec(text);
+        if (shallowMatch !== null && depth === undefined) {
+          shallow.push(shallowMatch[1]!);
+          continue;
         }
-        continue;
+
+        const deepenMatch = DEEPEN_PATTERN.exec(text);
+        if (deepenMatch !== null && depth === undefined) {
+          const parsed = Number(deepenMatch[1]);
+          if (!Number.isSafeInteger(parsed)) {
+            throw new UploadPackError(`"${text.trim()}" is not a valid depth request.`);
+          }
+          depth = parsed === 0 ? undefined : parsed;
+          continue;
+        }
+
+        throw new UploadPackError(`"${text.trim()}" is not a valid upload request line.`);
       }
 
       if (text === "done\n" || text === "done") {
         await lines.cancel();
-        return { wants, haves, capabilities, done: true };
+        return { wants, shallow, depth, haves, capabilities, done: true };
       }
 
       const match = HAVE_PATTERN.exec(text);
@@ -112,6 +136,7 @@ const reachable = async (
   source: UploadPackObjectSource,
   missingIsError: boolean,
   stopAt: ReadonlySet<string> = new Set(),
+  shallow: ReadonlySet<string> = new Set(),
 ): Promise<ReachableObjects> => {
   const pending: { readonly oid: string; readonly type: ObjectType | null }[] = roots.map(
     (oid) => ({
@@ -151,7 +176,7 @@ const reachable = async (
 
     held.add(oid);
     objects.push(oid);
-    for (const link of linksToFetch(object.type, object.bytes)) {
+    for (const link of linksToFetch(object.type, object.bytes, shallow.has(oid))) {
       pending.push(link);
     }
   }
@@ -357,10 +382,79 @@ async function* sideband(
   yield flushPkt();
 }
 
+interface DepthPlan {
+  readonly shallow: ReadonlySet<string>;
+  readonly unshallow: ReadonlySet<string>;
+}
+
+/** Find the commit grafts produced by an absolute `deepen` request. */
+const planDepth = async (
+  wants: readonly string[],
+  clientShallow: readonly string[],
+  depth: number,
+  source: UploadPackObjectSource,
+  repositoryShallow: ReadonlySet<string>,
+): Promise<DepthPlan> => {
+  const pending: Array<{ readonly oid: string; readonly depth: number }> = wants.map((oid) => ({
+    oid,
+    depth: 1,
+  }));
+  const commits = new Map<
+    string,
+    { readonly depth: number; readonly parents: readonly string[] }
+  >();
+  const visitedNonCommits = new Set<string>();
+
+  for (let at = 0; at < pending.length; at += 1) {
+    const next = pending[at]!;
+    const knownCommit = commits.get(next.oid);
+    if (knownCommit !== undefined && knownCommit.depth <= next.depth) {
+      continue;
+    }
+
+    const object = await source.read(next.oid);
+    if (object === null) {
+      throw new UploadPackError(`The wanted object ${next.oid} does not exist.`);
+    }
+
+    if (object.type === "commit") {
+      const parents = commitParents(object.bytes);
+      commits.set(next.oid, { depth: next.depth, parents });
+      if (!repositoryShallow.has(next.oid) && next.depth < depth) {
+        for (const oid of parents) {
+          pending.push({ oid, depth: next.depth + 1 });
+        }
+      }
+      continue;
+    }
+
+    if (visitedNonCommits.has(next.oid)) {
+      continue;
+    }
+    visitedNonCommits.add(next.oid);
+    if (object.type === "tag") {
+      for (const link of linksToFetch(object.type, object.bytes)) {
+        pending.push({ oid: link.oid, depth: next.depth });
+      }
+    }
+  }
+
+  const shallow = new Set<string>();
+  for (const [oid, commit] of commits) {
+    if (repositoryShallow.has(oid) || (commit.depth >= depth && commit.parents.length > 0)) {
+      shallow.add(oid);
+    }
+  }
+
+  const unshallow = new Set(clientShallow.filter((oid) => commits.has(oid) && !shallow.has(oid)));
+  return { shallow, unshallow };
+};
+
 async function* uploadPackResult(
   body: ReadableStream<Uint8Array>,
   source: UploadPackObjectSource,
   advertisedOids: ReadonlySet<string>,
+  shallow: ReadonlySet<string>,
 ): AsyncGenerator<Uint8Array> {
   const request = await readRequest(body);
   if (request.wants.length === 0) {
@@ -378,7 +472,28 @@ async function* uploadPackResult(
     return;
   }
 
-  const client = await reachable(request.haves, source, false);
+  const depthPlan =
+    request.depth === undefined
+      ? null
+      : await planDepth(request.wants, request.shallow, request.depth, source, shallow);
+  if (depthPlan !== null) {
+    for (const oid of depthPlan.shallow) {
+      yield pktLine(`shallow ${oid}\n`);
+    }
+    for (const oid of depthPlan.unshallow) {
+      yield pktLine(`unshallow ${oid}\n`);
+    }
+    yield flushPkt();
+    // Stateless Smart HTTP performs one depth-only exchange before normal
+    // have/done negotiation. That response is exactly the shallow update;
+    // an early NAK would be left unread and corrupt the next RPC round.
+    if (!request.done && request.haves.length === 0) {
+      return;
+    }
+  }
+
+  const clientBoundaries = new Set([...shallow, ...request.shallow]);
+  const client = await reachable(request.haves, source, false, new Set(), clientBoundaries);
   const acknowledgements = request.haves.filter((oid) => client.held.has(oid));
   const acknowledgement = acknowledgements.at(-1);
 
@@ -395,7 +510,18 @@ async function* uploadPackResult(
     return;
   }
 
-  const wanted = await reachable(request.wants, source, true, client.held);
+  // Deepening has to walk through the client's otherwise-known tips to reach
+  // the parents behind an old graft. The final filter still omits every object
+  // the client already holds from the pack.
+  const stopAt =
+    depthPlan !== null && depthPlan.unshallow.size > 0 ? new Set<string>() : client.held;
+  const wanted = await reachable(
+    request.wants,
+    source,
+    true,
+    stopAt,
+    depthPlan?.shallow ?? shallow,
+  );
   const missing = wanted.objects.filter((oid) => !client.held.has(oid));
   const prefix = pktLine(acknowledgement === undefined ? "NAK\n" : `ACK ${acknowledgement}\n`);
   const pack = packBytes(missing, client.held, request.capabilities.includes(THIN_PACK), source);
@@ -414,4 +540,6 @@ export const uploadPackResultStream = (
   body: ReadableStream<Uint8Array>,
   source: UploadPackObjectSource,
   advertisedOids: ReadonlySet<string>,
-): ReadableStream<Uint8Array> => streamFrom(uploadPackResult(body, source, advertisedOids));
+  shallow: ReadonlySet<string> = new Set(),
+): ReadableStream<Uint8Array> =>
+  streamFrom(uploadPackResult(body, source, advertisedOids, shallow));

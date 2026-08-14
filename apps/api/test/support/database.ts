@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import type { SyncSqliteDatabase } from "../../src/db/database.ts";
 import type { SyncKv } from "../../src/db/kv.ts";
-import { refs } from "../../src/db/repository-schema.ts";
+import { refs, shallowCommits } from "../../src/db/repository-schema.ts";
 
 const migrationsFolder = (durableObject: "registry" | "repository"): string =>
   fileURLToPath(new URL(`../../drizzle/${durableObject}`, import.meta.url));
@@ -131,5 +131,15 @@ export const seedRefs = async (
 
   if (rows.length > 0) {
     await db.insert(refs).values(rows);
+  }
+};
+
+/** Shallow boundaries written as import would persist them. */
+export const seedShallowCommits = async (
+  db: SyncSqliteDatabase,
+  oids: readonly string[],
+): Promise<void> => {
+  if (oids.length > 0) {
+    await db.insert(shallowCommits).values(oids.map((oid) => ({ oid })));
   }
 };

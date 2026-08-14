@@ -3,7 +3,12 @@ import { asc, eq, sql } from "drizzle-orm";
 import { findMissingObject, linksToFetch, type WalkOptions } from "./connectivity.ts";
 import type { SyncSqliteDatabase } from "./db/database.ts";
 import type { SyncKv } from "./db/kv.ts";
-import { REPOSITORY_STATE_ID, refs, repositoryState } from "./db/repository-schema.ts";
+import {
+  REPOSITORY_STATE_ID,
+  refs,
+  repositoryState,
+  shallowCommits,
+} from "./db/repository-schema.ts";
 import {
   receivePackAdvertisementStream,
   uploadPackAdvertisementStream,
@@ -38,6 +43,11 @@ import {
   symbolicHead,
   type Head,
 } from "./head.ts";
+import {
+  fetchRemoteBranch,
+  type RemoteBranchRequest,
+  type RemoteFetch,
+} from "./git/remote-branch.ts";
 import { ObjectStore, RepositoryStorageExhaustedError } from "./object-store.ts";
 import type { ObjectType } from "./object.ts";
 import { PackError, readPack, type PackBase, type PackObject } from "./pack.ts";
@@ -127,9 +137,22 @@ export interface RepositoryObjectClient {
   readonly readObject: (oid: string) => Promise<PackBase | null>;
   readonly readBlob: (oid: string) => Promise<ReadableStream<Uint8Array> | null>;
   readonly hasObject: (oid: string) => Promise<boolean>;
+  readonly importBranch: (request: RemoteBranchRequest) => Promise<ImportedBranch>;
   readonly sweep: () => Promise<SweepProgress>;
   readonly destroy: () => Promise<void>;
 }
+
+export interface ImportedBranch {
+  readonly branch: string;
+  readonly oid: string;
+  readonly shallow: readonly string[];
+}
+
+export {
+  RemoteBranchError,
+  type RemoteBranchRequest,
+  type RemoteFetch,
+} from "./git/remote-branch.ts";
 
 /** The wire strings live with the wire; this is where callers found them. */
 export { REJECTIONS } from "./git/receive-pack.ts";
@@ -222,7 +245,13 @@ export class RepositoryStore {
   async advertiseUploadPack(
     protocolVersion: UploadProtocolVersion,
   ): Promise<ReadableStream<Uint8Array>> {
-    return uploadPackAdvertisementStream(await this.#uploadRefs(), this.#head(), protocolVersion);
+    const shallow = [...(await this.#shallow())].sort();
+    return uploadPackAdvertisementStream(
+      await this.#uploadRefs(),
+      this.#head(),
+      protocolVersion,
+      shallow,
+    );
   }
 
   /** A fetch response is pulled object by object rather than assembled here. */
@@ -233,7 +262,58 @@ export class RepositoryStore {
       advertisedOids.add(head.oid);
     }
 
-    return uploadPackResultStream(body, this.#objects, advertisedOids);
+    return uploadPackResultStream(body, this.#objects, advertisedOids, await this.#shallow());
+  }
+
+  async importBranch(
+    request: RemoteBranchRequest,
+    fetchRemote: RemoteFetch = globalThis.fetch,
+    before: Promise<void> = Promise.resolve(),
+  ): Promise<ImportedBranch> {
+    return this.#exclusive(async () => {
+      await before;
+      const fetched = await fetchRemoteBranch(request, fetchRemote);
+      await readPack(fetched.pack, this.#objects);
+
+      // A remote advertisement carries repository-wide grafts. Keep only the
+      // advertised boundaries that arrived with this one selected branch.
+      const importedShallow: string[] = [];
+      for (const oid of new Set(fetched.shallow)) {
+        const object = await this.#objects.read(oid);
+        if (object?.type === "commit") {
+          importedShallow.push(oid);
+        }
+      }
+
+      const missing = await findMissingObject(fetched.oid, this.#objects, {
+        verified: new Set(),
+        visited: new Set(),
+        shallow: new Set(importedShallow),
+      });
+      if (missing !== null) {
+        throw new PackError("truncated", `The imported branch is missing object ${missing}.`);
+      }
+
+      await this.#db.transaction((tx) => {
+        tx.delete(refs).run();
+        tx.delete(shallowCommits).run();
+        tx.insert(refs)
+          .values({ name: `${BRANCH_REF_PREFIX}${fetched.branch}`, objectId: fetched.oid })
+          .run();
+        if (importedShallow.length > 0) {
+          tx.insert(shallowCommits)
+            .values(importedShallow.map((oid) => ({ oid })))
+            .run();
+        }
+        this.#kv.put(HEAD_KEY, formatHead(symbolicHead(fetched.branch)));
+        tx.update(repositoryState)
+          .set({ refVersion: sql`${repositoryState.refVersion} + 1` })
+          .where(eq(repositoryState.id, REPOSITORY_STATE_ID))
+          .run();
+      });
+
+      return { branch: fetched.branch, oid: fetched.oid, shallow: importedShallow };
+    });
   }
 
   /**
@@ -467,7 +547,11 @@ export class RepositoryStore {
       await lines.cancel();
     }
 
-    const walk = { verified: new Set(current.values()), visited: new Set<string>() };
+    const walk = {
+      verified: new Set(current.values()),
+      visited: new Set<string>(),
+      shallow: await this.#shallow(),
+    };
     const updates: PendingUpdate[] = [];
 
     for (const update of pending) {
@@ -543,6 +627,14 @@ export class RepositoryStore {
 
   async #refMap(): Promise<ReadonlyMap<string, string>> {
     return new Map((await this.#refs()).map((ref) => [ref.name, ref.oid]));
+  }
+
+  async #shallow(): Promise<ReadonlySet<string>> {
+    return new Set(
+      (await this.#db.select({ oid: shallowCommits.oid }).from(shallowCommits)).map(
+        ({ oid }) => oid,
+      ),
+    );
   }
 
   /** Upload-pack peels an annotated tag immediately after the tag ref itself. */

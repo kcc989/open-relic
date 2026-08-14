@@ -8,6 +8,7 @@ import {
   objects,
   refs,
   repositoryState,
+  shallowCommits,
   sweepReachable,
   sweepState,
   type SweepStateRow,
@@ -162,6 +163,11 @@ export class RepositorySweeper {
   }
 
   async #mark(batchSize: number): Promise<void> {
+    const shallow = new Set(
+      (await this.#db.select({ oid: shallowCommits.oid }).from(shallowCommits)).map(
+        ({ oid }) => oid,
+      ),
+    );
     const pending = await this.#db
       .select({ oid: sweepReachable.oid, expectedType: sweepReachable.expectedType })
       .from(sweepReachable)
@@ -195,7 +201,7 @@ export class RepositorySweeper {
       if (object === null) {
         throw new SweepError(`Reachable object ${oid} disappeared while it was being marked.`);
       }
-      const links = linksToReach(object.type, object.bytes);
+      const links = linksToReach(object.type, object.bytes, shallow.has(oid));
       await this.#finishMark(oid, links);
     }
 

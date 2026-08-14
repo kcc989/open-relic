@@ -96,6 +96,60 @@ describe("a real Git client", () => {
     }
   });
 
+  test("depth-clones and subsequently fetches from a shallow repository", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch: (request) => harness.app.fetch(request),
+    });
+    const writer = join(directory, "writer");
+    const reader = join(directory, "reader");
+
+    try {
+      await run(["git", "clone", remoteFor(server.port), writer]);
+      await run(["git", "-C", writer, "config", "user.name", "Open Relic"]);
+      await run(["git", "-C", writer, "config", "user.email", "tests@open-relic.dev"]);
+      await writeFile(join(writer, "README.md"), "Anvil firmware, second\n");
+      await run(["git", "-C", writer, "add", "README.md"]);
+      await run(["git", "-C", writer, "commit", "-m", "Second"]);
+      await writeFile(join(writer, "README.md"), "Anvil firmware, third\n");
+      await run(["git", "-C", writer, "add", "README.md"]);
+      await run(["git", "-C", writer, "commit", "-m", "Third"]);
+      await run(["git", "-C", writer, "push", "origin", "HEAD:main"]);
+
+      const [durableObjectId] = harness.objects.mintedIds;
+      await harness.objects.seedShallowCommits(durableObjectId!, [FIRST.oid]);
+
+      await run([
+        "git",
+        "-c",
+        "protocol.version=1",
+        "clone",
+        "--depth=1",
+        remoteFor(server.port),
+        reader,
+      ]);
+      expect(await run(["git", "-C", reader, "rev-list", "--count", "HEAD"])).toBe("1");
+
+      await writeFile(join(writer, "README.md"), "Anvil firmware, fourth\n");
+      await run(["git", "-C", writer, "add", "README.md"]);
+      await run(["git", "-C", writer, "commit", "-m", "Fourth"]);
+      const remoteTip = await run(["git", "-C", writer, "rev-parse", "HEAD"]);
+      await run(["git", "-C", writer, "push", "origin", "HEAD:main"]);
+
+      await run(["git", "-C", reader, "fetch", "origin"]);
+
+      expect(await run(["git", "-C", reader, "rev-parse", "origin/main"])).toBe(remoteTip);
+      expect(await run(["git", "-C", reader, "show", "origin/main:README.md"])).toBe(
+        "Anvil firmware, fourth",
+      );
+
+      await run(["git", "-C", reader, "fetch", "--depth=3", "origin"]);
+      expect(await run(["git", "-C", reader, "rev-list", "--count", "origin/main"])).toBe("3");
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("fetches a coalesced multi-round response after a fast-forward push", async () => {
     let coalesceUploadPackResponses = false;
     let uploadPackRounds = 0;
