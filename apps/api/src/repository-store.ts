@@ -38,7 +38,7 @@ import {
   symbolicHead,
   type Head,
 } from "./head.ts";
-import { ObjectStore } from "./object-store.ts";
+import { ObjectStore, RepositoryStorageExhaustedError } from "./object-store.ts";
 import { PackError, readPack, type PackBase } from "./pack.ts";
 import { RepositorySweeper, type SweepProgress } from "./sweep.ts";
 
@@ -274,7 +274,7 @@ export class RepositoryStore {
       try {
         await readPack(lines.rest(), this.#objects);
       } catch (error) {
-        if (!(error instanceof PackError)) {
+        if (!(error instanceof PackError) && !(error instanceof RepositoryStorageExhaustedError)) {
           throw error;
         }
 

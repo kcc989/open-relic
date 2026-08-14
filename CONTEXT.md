@@ -57,16 +57,6 @@ _Avoid_: master token, installation token, token
 An immutable blob, tree, commit, or tag, named by the SHA-1 of its contents. The
 unit everything in a repository is made of.
 
-**Logical usage**:
-The sum of the inflated sizes of the unique objects stored by a repository.
-Orphans count until collected; pack compression, chunks, and retained delta
-representations do not change the total.
-_Avoid_: repository size, physical storage, billed storage
-
-**Storage quota**:
-The maximum logical usage a storage boundary permits.
-_Avoid_: disk limit, object limit, storage size
-
 **Chunk**:
 A slice of one object's bytes, sized to fit a single storage row. An object is
 one or more chunks; nothing but storage knows about them.

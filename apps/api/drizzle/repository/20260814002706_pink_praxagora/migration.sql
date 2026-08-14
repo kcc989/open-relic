@@ -1,0 +1,1 @@
+ALTER TABLE `objects` ADD `complete` integer DEFAULT true NOT NULL;

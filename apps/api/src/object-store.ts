@@ -1,4 +1,4 @@
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 import type { SyncSqliteDatabase } from "./db/database.ts";
 import type { SyncKv } from "./db/kv.ts";
@@ -33,12 +33,35 @@ export class ObjectStoreError extends Error {
   }
 }
 
+/** A stable failure callers can translate without exposing SQLite internals. */
+export class RepositoryStorageExhaustedError extends ObjectStoreError {
+  constructor() {
+    super("Repository storage is full.");
+    this.name = "RepositoryStorageExhaustedError";
+  }
+}
+
+const isStorageExhaustion = (error: Error, seen = new Set<Error>()): boolean => {
+  if (seen.has(error)) {
+    return false;
+  }
+  seen.add(error);
+
+  if (error.message.includes("SQLITE_FULL") || ("code" in error && error.code === "SQLITE_FULL")) {
+    return true;
+  }
+
+  return error.cause instanceof Error && isStorageExhaustion(error.cause, seen);
+};
+
 export interface ReclaimedObject {
   readonly objects: 1;
   readonly chunks: number;
   /** Inflated object bytes plus persisted delta bytes; storage overhead is excluded. */
   readonly bytes: number;
 }
+
+export type ObjectDescription = Omit<ObjectRow, "complete">;
 
 /**
  * Git objects as chunked rows in the repository's own Durable Object: metadata
@@ -65,32 +88,67 @@ export class ObjectStore implements PackSink {
    * chunks would cost megabytes to arrive where we are.
    */
   async write(object: PackObject): Promise<void> {
-    const inserted = await this.#db
-      .insert(objects)
-      .values({
-        oid: object.oid,
-        type: object.type,
-        size: object.bytes.length,
-        chunkCount: chunkCount(object.bytes.length),
-      })
-      .onConflictDoNothing()
-      .returning({ oid: objects.oid });
+    const objectChunks = chunkCount(object.bytes.length);
+    const deltaChunks = object.delta === null ? 0 : chunkCount(object.delta.bytes.length);
+    let claimed = false;
 
-    if (inserted.length === 0) {
-      return;
-    }
+    try {
+      const existing = await this.#stored(object.oid);
+      if (existing?.complete) {
+        return;
+      }
+      if (existing !== null) {
+        await this.#discardIncomplete(existing);
+      }
 
-    this.#writeChunks(OBJECT_PREFIX, object.oid, object.bytes);
+      const inserted = await this.#db
+        .insert(objects)
+        .values({
+          oid: object.oid,
+          type: object.type,
+          size: object.bytes.length,
+          chunkCount: objectChunks,
+          complete: false,
+        })
+        .onConflictDoNothing()
+        .returning({ oid: objects.oid });
 
-    if (object.delta !== null) {
-      await this.#db.insert(objectDeltas).values({
-        oid: object.oid,
-        baseOid: object.delta.baseOid,
-        size: object.delta.bytes.length,
-        chunkCount: chunkCount(object.delta.bytes.length),
-      });
+      if (inserted.length === 0) {
+        return;
+      }
+      claimed = true;
 
-      this.#writeChunks(DELTA_PREFIX, object.oid, object.delta.bytes);
+      this.#writeChunks(OBJECT_PREFIX, object.oid, object.bytes);
+
+      if (object.delta !== null) {
+        await this.#db.insert(objectDeltas).values({
+          oid: object.oid,
+          baseOid: object.delta.baseOid,
+          size: object.delta.bytes.length,
+          chunkCount: deltaChunks,
+        });
+
+        this.#writeChunks(DELTA_PREFIX, object.oid, object.delta.bytes);
+      }
+
+      await this.#db
+        .update(objects)
+        .set({ complete: true })
+        .where(and(eq(objects.oid, object.oid), eq(objects.complete, false)));
+    } catch (error) {
+      const storageExhausted = error instanceof Error && isStorageExhaustion(error);
+      if (claimed) {
+        try {
+          await this.#discardWrite(object.oid, objectChunks, deltaChunks);
+        } catch {
+          // Keep the write failure as the operation's result. An incomplete row
+          // remains hidden and lets a retry or sweep finish the cleanup.
+        }
+      }
+      if (storageExhausted) {
+        throw new RepositoryStorageExhaustedError();
+      }
+      throw error;
     }
   }
 
@@ -106,8 +164,17 @@ export class ObjectStore implements PackSink {
     };
   }
 
-  async describe(oid: string): Promise<ObjectRow | null> {
-    const rows = await this.#db.select().from(objects).where(eq(objects.oid, oid)).limit(1);
+  async describe(oid: string): Promise<ObjectDescription | null> {
+    const rows = await this.#db
+      .select({
+        oid: objects.oid,
+        type: objects.type,
+        size: objects.size,
+        chunkCount: objects.chunkCount,
+      })
+      .from(objects)
+      .where(and(eq(objects.oid, oid), eq(objects.complete, true)))
+      .limit(1);
 
     return rows[0] ?? null;
   }
@@ -118,6 +185,10 @@ export class ObjectStore implements PackSink {
 
   /** `null` when the object arrived whole rather than as a delta. */
   async readDeltaBase(oid: string): Promise<string | null> {
+    if (!(await this.has(oid))) {
+      return null;
+    }
+
     const rows = await this.#db
       .select({ baseOid: objectDeltas.baseOid })
       .from(objectDeltas)
@@ -129,6 +200,10 @@ export class ObjectStore implements PackSink {
 
   /** `null` when the object arrived whole rather than as a delta. */
   async readDelta(oid: string): Promise<PackDelta | null> {
+    if (!(await this.has(oid))) {
+      return null;
+    }
+
     const rows = await this.#db
       .select()
       .from(objectDeltas)
@@ -195,6 +270,35 @@ export class ObjectStore implements PackSink {
       const at = index * CHUNK_BYTES;
       this.#kv.put<Uint8Array>(chunkKey(prefix, oid, index), bytes.slice(at, at + CHUNK_BYTES));
     }
+  }
+
+  /** SQL and synchronous KV share this transaction in a SQLite Durable Object. */
+  async #discardWrite(oid: string, objectChunks: number, deltaChunks: number): Promise<void> {
+    await this.#db.transaction((tx) => {
+      for (let index = 0; index < objectChunks; index += 1) {
+        this.#kv.delete(chunkKey(OBJECT_PREFIX, oid, index));
+      }
+      for (let index = 0; index < deltaChunks; index += 1) {
+        this.#kv.delete(chunkKey(DELTA_PREFIX, oid, index));
+      }
+
+      tx.delete(objects).where(eq(objects.oid, oid)).run();
+    });
+  }
+
+  async #stored(oid: string): Promise<ObjectRow | null> {
+    const [row] = await this.#db.select().from(objects).where(eq(objects.oid, oid)).limit(1);
+    return row ?? null;
+  }
+
+  async #discardIncomplete(object: ObjectRow): Promise<void> {
+    const [delta] = await this.#db
+      .select()
+      .from(objectDeltas)
+      .where(eq(objectDeltas.oid, object.oid))
+      .limit(1);
+
+    await this.#discardWrite(object.oid, object.chunkCount, delta?.chunkCount ?? 0);
   }
 
   #readChunks(prefix: string, oid: string, size: number, count: number): Uint8Array {

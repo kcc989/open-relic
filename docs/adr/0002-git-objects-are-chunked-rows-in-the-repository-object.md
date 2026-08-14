@@ -39,6 +39,14 @@ for the same reason: the delta passes through our hands exactly once, during the
 parse. Discarding it means a migration _and_ re-deriving data from packs we no
 longer keep.
 
+**A metadata row is not visibility.** New object rows begin incomplete, and
+reads ignore them until every resolved chunk, optional retained-delta row, and
+retained-delta chunk has been written. Storage exhaustion reports a repository-
+storage failure and removes that pending representation in one storage
+transaction. If cleanup itself is interrupted, the hidden row remains so a
+retry or Sweep can finish it. Objects completed earlier in the same failed Pack
+remain ordinary Orphans for the Sweep to reclaim.
+
 Objects are stored inflated rather than in the zlib form they arrived in. Reads
 and delta-base lookups are then free of an inflate, at a storage cost we would
 otherwise pay in CPU on a 30-second budget. Revisit if storage, not CPU, becomes
