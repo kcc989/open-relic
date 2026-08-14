@@ -3,7 +3,7 @@ import type { Hono } from "hono";
 
 import type { ApiEnv } from "../../../alchemy.run.ts";
 import type { RepositoryObjects } from "./bindings.ts";
-import { fail, forkInProgress, notFound, ok } from "./envelope.ts";
+import { fail, forkInProgress, importInProgress, notFound, ok } from "./envelope.ts";
 import { isObjectId, type ObjectType } from "./object.ts";
 import { ObjectParseError } from "./object-parse.ts";
 import { parseCommit, parseTree } from "./repository-content.ts";
@@ -47,6 +47,9 @@ const repositoryNotFound = (namespaceSlug: string, repositoryName: string): Resp
 const repositoryIsForking = (namespaceSlug: string, repositoryName: string): Response =>
   forkInProgress(`The repository "${namespaceSlug}/${repositoryName}" is still being forked.`);
 
+const repositoryIsImporting = (namespaceSlug: string, repositoryName: string): Response =>
+  importInProgress(`The repository "${namespaceSlug}/${repositoryName}" is still being imported.`);
+
 const corruptObject = (): Response =>
   documentedFailure(500, ERROR_CODES.internalError, "A stored git object is corrupt.");
 
@@ -62,6 +65,9 @@ export const registerContentRoutes = (
     }
     if (found.status === "forking") {
       return { response: repositoryIsForking(namespaceSlug, repositoryName) } as const;
+    }
+    if (found.status === "importing") {
+      return { response: repositoryIsImporting(namespaceSlug, repositoryName) } as const;
     }
     return { repository: resolveObjects(env).get(found.durableObjectId) } as const;
   };

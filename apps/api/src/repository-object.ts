@@ -4,8 +4,17 @@ import { drizzle, type DrizzleSqliteDODatabase } from "drizzle-orm/durable-sqlit
 import { migrate } from "drizzle-orm/durable-sqlite/migrator";
 
 import migrations from "../drizzle/repository/migrations.js";
+import type { ApiEnv } from "../../../alchemy.run.ts";
+import { repositoryIndexFromEnv } from "./bindings.ts";
 import { fail } from "./envelope.ts";
 import type { UploadProtocolVersion } from "./git/advertisement.ts";
+import {
+  ImportOperation,
+  type ImportCheckpoint,
+  type ImportJob,
+  type ImportJobOutcome,
+  type StoredImportJob,
+} from "./import-operation.ts";
 import type { PackBase } from "./pack.ts";
 import {
   RepositoryStore,
@@ -34,12 +43,43 @@ import type { SweepProgress } from "./sweep.ts";
 export class RepositoryObject extends DurableObject {
   readonly #db: DrizzleSqliteDODatabase;
   readonly #store: RepositoryStore;
+  readonly #importOperation: ImportOperation;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
 
     this.#db = drizzle(ctx.storage);
     this.#store = new RepositoryStore(this.#db, ctx.storage.kv);
+    // SAFETY: this class is bound only by ApiWorker, whose inferred bindings are ApiEnv.
+    const apiEnv = env as ApiEnv;
+    this.#importOperation = new ImportOperation({
+      durableObjectId: ctx.id.toString(),
+      storage: {
+        persistScheduledJob: (job) =>
+          ctx.storage.transaction(async (transaction) => {
+            await transaction.put(IMPORT_JOB_KEY, job);
+            await transaction.delete(IMPORT_CHECKPOINT_KEY);
+            await transaction.setAlarm(Date.now());
+          }),
+        readJob: () => ctx.storage.get<StoredImportJob>(IMPORT_JOB_KEY),
+        writeJob: (job) => ctx.storage.put(IMPORT_JOB_KEY, job),
+        readCheckpoint: () => ctx.storage.get<ImportCheckpoint>(IMPORT_CHECKPOINT_KEY),
+        writeCheckpoint: (checkpoint) => ctx.storage.put(IMPORT_CHECKPOINT_KEY, checkpoint),
+        completePublishedJob: () =>
+          ctx.storage.transaction(async (transaction) => {
+            await transaction.delete(IMPORT_JOB_KEY);
+            await transaction.delete(IMPORT_CHECKPOINT_KEY);
+            await transaction.setAlarm(Date.now());
+          }),
+        armAlarm: () => ctx.storage.setAlarm(Date.now()),
+      },
+      repository: {
+        resetImport: (init) => this.#store.resetImport(init),
+        importBranch: (request) => this.#store.importBranch(request, globalThis.fetch),
+        destroy: () => this.#store.destroyStorage(() => ctx.storage.deleteAll()),
+      },
+      registry: repositoryIndexFromEnv(apiEnv),
+    });
 
     ctx.blockConcurrencyWhile(async () => {
       migrate(this.#db, migrations);
@@ -99,12 +139,25 @@ export class RepositoryObject extends DurableObject {
     return this.#store.importBranch(request, globalThis.fetch, scheduled);
   }
 
+  resetImport(init: RepositoryInit): Promise<void> {
+    return this.#store.resetImport(init);
+  }
+
+  /** Persist and alarm the job before any network request can begin. */
+  async scheduleImport(job: ImportJob): Promise<ImportJobOutcome> {
+    return this.#importOperation.schedule(job);
+  }
+
   /** Start or resume reclamation; alarms carry subsequent batches. */
   async sweep(): Promise<SweepProgress> {
     return this.#advanceSweep();
   }
 
   override async alarm(): Promise<void> {
+    if (await this.#importOperation.hasJob()) {
+      await this.#importOperation.run();
+      return;
+    }
     await this.#advanceSweep();
   }
 
@@ -128,7 +181,7 @@ export class RepositoryObject extends DurableObject {
    * somehow reach it again, the constructor migrates it from scratch.
    */
   async destroy(): Promise<void> {
-    await this.#store.destroyStorage(() => this.ctx.storage.deleteAll());
+    await this.#importOperation.destroy();
   }
 
   async #advanceSweep(): Promise<SweepProgress> {
@@ -156,3 +209,6 @@ export class RepositoryObject extends DurableObject {
     });
   }
 }
+
+const IMPORT_JOB_KEY = "operation:import";
+const IMPORT_CHECKPOINT_KEY = "operation:import:checkpoint";

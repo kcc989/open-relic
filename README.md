@@ -10,10 +10,10 @@ Artifacts should work against an installation with nothing changed but the host.
 [ADR-0001](./docs/adr/0001-wire-compatible-with-cloudflare-artifacts.md) records
 what that binds us to, and where the API below does not match yet.
 
-**`git push`, `git clone`, `git fetch`, and repository forks work.** The
-namespace and repository APIs are implemented, and a Git client can round-trip
-branches over authenticated Git Smart HTTP. Contents and imports are still
-registered routes that answer `501`:
+**`git push`, `git clone`, `git fetch`, repository forks, and public HTTPS
+imports work.** The namespace and repository APIs are implemented, and a Git
+client can round-trip branches over authenticated Git Smart HTTP. The remaining
+content routes are registered endpoints that answer `501`:
 
 - Hono routes for every REST and Git Smart HTTP endpoint in the initial API
 - Effect v4 as the typed stub service boundary
@@ -189,8 +189,11 @@ that keeps listing a namespace one query.
 Multi-step creation reserves the registry row with a repository status before
 copying. A fork stays `forking` until its object, ref, HEAD, and initial-token
 writes are complete; targeted REST access returns `409/10303` in that window.
-Failure deletes the row and cascaded tokens, then destroys the incomplete
-repository object so the name can be retried from scratch.
+An import stays `importing` and returns `409/10302` while its durable alarm-backed
+job is running. A transient upstream failure clears the incomplete Git data and
+restarts the whole import, up to three attempts. Terminal failure deletes the
+row and cascaded tokens, then destroys the incomplete repository object so the
+name can be retried from scratch.
 
 | Endpoint                                                                   | Behavior                                                                                                                                                         |
 | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -199,13 +202,15 @@ repository object so the name can be retried from scratch.
 | `GET /namespaces/:namespace/repos/:repo`                                   | `200` or `404`                                                                                                                                                   |
 | `DELETE /namespaces/:namespace/repos/:repo`                                | `202` with `{ "id": … }` or `404`; discards the repository object's storage                                                                                      |
 | `POST /namespaces/:namespace/repos/:repo/fork`                             | `201` after one stable reachable snapshot is copied into an independent repository; `409` while a source or target is still forking                              |
+| `POST /namespaces/:namespace/repos/:repo/import`                           | `201` after a durable public-HTTPS import, with the actual branch, normalized source, object count, remote, and one-day write token                              |
 
 A create answers with a deliberately narrower shape than a list or get: the
 identity, the remote to clone from, and the one token it will not show again.
 List and get carry the full `RepoInfo` — `id`, `name`, `description`,
 `default_branch`, `created_at`, `updated_at`, `last_push_at`, `source`,
 `read_only` — plus `remote`. `last_push_at` is stamped by a push that moved a
-ref; `source` stays `null` until import exists to write it.
+ref; `source` is `null` for an empty create and records the stable fork address
+or normalized `git:https://…git` import source for copied repositories.
 
 `sort` is one of `created_at`, `updated_at`, `last_push_at`, or `name`,
 defaulting to `created_at` descending. `search` filters on an infix of the name.
@@ -430,14 +435,22 @@ unsupported, matching Artifacts.
 
 ## Outbound branch fetch
 
-`RepositoryObject.importBranch` is the storage-side operation behind the future
-REST import workflow. It acts as a small protocol-v1 Smart HTTP client: discover
+`RepositoryObject.importBranch` is the storage-side operation behind the REST
+import workflow. It acts as a small protocol-v1 Smart HTTP client: discover
 the remote HEAD or select one requested branch, negotiate full or shallow
 history, and hand the response stream directly to `readPack`. Only after the
 pack is complete and its selected history is connected does one transaction
 write the branch ref, shallow boundaries, and HEAD. The method returns the
-actual branch and tip so the registry can copy `default_branch` when the REST
-workflow lands; the import route itself remains a `501` stub for now.
+actual branch, tip, and pack object count so the REST workflow can publish the
+verified create result and copy the actual `default_branch` into the registry.
+
+The repository object persists the import command and attempt count before it
+arms an alarm, so the work survives the initiating HTTP connection and object
+eviction. A retry deliberately has no per-object cursor: it reclaims the prior
+attempt and fetches the selected branch again. Once the object is complete, the
+repository object atomically moves the registry status from `importing` to
+`ready`; an alarm can perform that publication even when the initiating Worker
+request is gone.
 
 Outbound requests accept only HTTPS remotes without URL user information.
 Literal loopback, private, and link-local destinations are refused, including
@@ -664,6 +677,5 @@ If the binding is absent, empty, or shorter than 32 UTF-8 bytes, protected
 routes fail closed with `401` and `/healthz` answers `503` with `status` set to
 `"unavailable"`.
 
-Alongside the endpoints above, routes for forks, imports, and the remaining
-repository content operations are registered from the manifest in
-`packages/contracts/src/index.ts`, answer `501`, and are covered by tests.
+The remaining repository content operations are registered from the manifest
+in `packages/contracts/src/index.ts`, answer `501`, and are covered by tests.

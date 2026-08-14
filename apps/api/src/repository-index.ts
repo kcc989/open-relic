@@ -98,7 +98,18 @@ export interface RepositoryIndexClient {
     namespaceSlug: string,
     name: string,
   ) => Promise<DeletedRepository | null>;
+  readonly deleteImportIfOwned: (
+    namespaceSlug: string,
+    name: string,
+    durableObjectId: string,
+  ) => Promise<DeletedRepository | null>;
   readonly finishFork: (namespaceSlug: string, name: string) => Promise<boolean>;
+  readonly finishImport: (
+    namespaceSlug: string,
+    name: string,
+    durableObjectId: string,
+    defaultBranch: string,
+  ) => Promise<boolean>;
   readonly recordPush: (namespaceSlug: string, name: string, record: PushRecord) => Promise<void>;
 }
 
@@ -310,6 +321,30 @@ export class RepositoryIndex {
     return deleted[0] ?? null;
   }
 
+  /** A stale multi-step create may clean up only the row it originally reserved. */
+  async deleteImportIfOwned(
+    namespaceSlug: string,
+    name: string,
+    durableObjectId: string,
+  ): Promise<DeletedRepository | null> {
+    const deleted = await this.#db
+      .delete(repositories)
+      .where(
+        and(
+          eq(repositories.namespaceSlug, namespaceSlug),
+          eq(repositories.name, name),
+          eq(repositories.durableObjectId, durableObjectId),
+          eq(repositories.status, "importing"),
+        ),
+      )
+      .returning({
+        id: repositories.id,
+        durableObjectId: repositories.durableObjectId,
+      });
+
+    return deleted[0] ?? null;
+  }
+
   async finishFork(namespaceSlug: string, name: string): Promise<boolean> {
     const updated = await this.#db
       .update(repositories)
@@ -319,6 +354,29 @@ export class RepositoryIndex {
           eq(repositories.namespaceSlug, namespaceSlug),
           eq(repositories.name, name),
           eq(repositories.status, "forking"),
+        ),
+      )
+      .returning({ name: repositories.name });
+
+    return updated.length > 0;
+  }
+
+  /** Publish the remote's actual HEAD only if this is still the reserved import. */
+  async finishImport(
+    namespaceSlug: string,
+    name: string,
+    durableObjectId: string,
+    defaultBranch: string,
+  ): Promise<boolean> {
+    const updated = await this.#db
+      .update(repositories)
+      .set({ status: "ready", defaultBranch })
+      .where(
+        and(
+          eq(repositories.namespaceSlug, namespaceSlug),
+          eq(repositories.name, name),
+          eq(repositories.durableObjectId, durableObjectId),
+          eq(repositories.status, "importing"),
         ),
       )
       .returning({ name: repositories.name });

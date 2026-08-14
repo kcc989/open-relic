@@ -212,6 +212,7 @@ export const IMPLEMENTED_ENDPOINT_IDS = [
   "repositories.get",
   "repositories.delete",
   "repositories.fork",
+  "repositories.import",
   "tokens.create",
   "tokens.list",
   "tokens.delete",
@@ -289,6 +290,7 @@ export const ERROR_CODES = {
   invalidRepoName: 10101,
   invalidTtl: 10103,
   invalidUrl: 10104,
+  branchNotFound: 10105,
   remoteAuthRequired: 10106,
   notFound: 10200,
   alreadyExists: 10201,
@@ -431,6 +433,19 @@ export interface ForkRepoRequest {
  * addition to the documented object count and create fields.
  */
 export interface ForkRepoResult extends CreateRepoResult {
+  readonly objects: number;
+  readonly source: string;
+}
+
+export interface ImportRepoRequest {
+  readonly url: string;
+  readonly branch?: string;
+  readonly depth?: number;
+  readonly read_only?: boolean;
+}
+
+/** The verified repository Artifacts returns after a public HTTPS import. */
+export interface ImportRepoResult extends CreateRepoResult {
   readonly objects: number;
   readonly source: string;
 }

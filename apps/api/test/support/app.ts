@@ -11,10 +11,17 @@ import {
   allowControlPlane,
   type AuthorizeControlPlaneRequest,
 } from "../../src/control-plane-authorization.ts";
+import {
+  ImportOperation,
+  type ImportCheckpoint,
+  type ImportOperationStorage,
+  type StoredImportJob,
+} from "../../src/import-operation.ts";
 import { NamespaceRegistry } from "../../src/namespace-registry.ts";
-import { RepositoryIndex } from "../../src/repository-index.ts";
+import { RepositoryIndex, type RepositoryIndexClient } from "../../src/repository-index.ts";
 import {
   RepositoryStore,
+  type RemoteFetch,
   type RepositoryObjectClient,
   type RepositorySnapshot,
 } from "../../src/repository-store.ts";
@@ -33,6 +40,39 @@ export interface PausedForkSnapshot {
   readonly release: () => void;
 }
 
+class MemoryImportOperationStorage implements ImportOperationStorage {
+  #job: StoredImportJob | undefined;
+  #checkpoint: ImportCheckpoint | undefined;
+
+  async persistScheduledJob(job: StoredImportJob): Promise<void> {
+    this.#job = structuredClone(job);
+    this.#checkpoint = undefined;
+  }
+
+  async readJob(): Promise<StoredImportJob | undefined> {
+    return this.#job === undefined ? undefined : structuredClone(this.#job);
+  }
+
+  async writeJob(job: StoredImportJob): Promise<void> {
+    this.#job = structuredClone(job);
+  }
+
+  async readCheckpoint(): Promise<ImportCheckpoint | undefined> {
+    return this.#checkpoint === undefined ? undefined : structuredClone(this.#checkpoint);
+  }
+
+  async writeCheckpoint(checkpoint: ImportCheckpoint): Promise<void> {
+    this.#checkpoint = structuredClone(checkpoint);
+  }
+
+  async completePublishedJob(): Promise<void> {
+    this.#job = undefined;
+    this.#checkpoint = undefined;
+  }
+
+  async armAlarm(): Promise<void> {}
+}
+
 /**
  * The `REPOSITORIES` binding, standing in for the Durable Object namespace.
  * Each id gets a real {@link RepositoryStore} over its own in-memory storage;
@@ -41,13 +81,22 @@ export interface PausedForkSnapshot {
  * no object behind and a delete takes one with it.
  */
 export class FakeRepositoryObjects implements RepositoryObjects {
+  readonly #index: RepositoryIndexClient;
   readonly #storages = new Map<string, TestRepositoryStorage>();
   readonly #stores = new Map<string, RepositoryStore>();
+  readonly #importStorages = new Map<string, MemoryImportOperationStorage>();
+  readonly #importOperations = new Map<string, ImportOperation>();
   readonly #minted: string[] = [];
   readonly #destroyed: string[] = [];
   #serializedRpcLimit = Number.POSITIVE_INFINITY;
   #forkWriteError: Error | null = null;
   #afterForkSnapshot: (() => Promise<void>) | null = null;
+  #importFetches: RemoteFetch[] = [];
+  #importFailures: Error[] = [];
+
+  constructor(index: RepositoryIndexClient) {
+    this.#index = index;
+  }
 
   createId(): string {
     const id = `repository-object-${this.#minted.length + 1}`;
@@ -89,13 +138,11 @@ export class FakeRepositoryObjects implements RepositoryObjects {
       readBlob: (oid) => store.readBlob(oid),
       hasObject: (oid) => store.hasObject(oid),
       importBranch: (request) => store.importBranch(request),
+      resetImport: (init) => store.resetImport(init),
+      scheduleImport: (job) => this.#importOperationFor(durableObjectId, store).schedule(job),
       sweep: () => store.sweep(),
-      destroy: async () => {
-        this.#destroyed.push(durableObjectId);
-        this.#storages.get(durableObjectId)?.close();
-        this.#storages.delete(durableObjectId);
-        this.#stores.delete(durableObjectId);
-      },
+      destroy: () =>
+        this.#importOperations.get(durableObjectId)?.destroy() ?? this.#destroy(durableObjectId),
     };
   }
 
@@ -147,6 +194,14 @@ export class FakeRepositoryObjects implements RepositoryObjects {
     return { captured, release };
   }
 
+  queueImportFetch(...fetches: readonly RemoteFetch[]): void {
+    this.#importFetches.push(...fetches);
+  }
+
+  queueImportFailure(...failures: readonly Error[]): void {
+    this.#importFailures.push(...failures);
+  }
+
   /** Stands in for the shallow boundaries persisted by an import. */
   seedShallowCommits(durableObjectId: string, oids: readonly string[]): Promise<void> {
     return seedShallowCommits(this.#storageFor(durableObjectId).db, oids);
@@ -158,6 +213,8 @@ export class FakeRepositoryObjects implements RepositoryObjects {
     }
     this.#storages.clear();
     this.#stores.clear();
+    this.#importStorages.clear();
+    this.#importOperations.clear();
   }
 
   #storageFor(durableObjectId: string): TestRepositoryStorage {
@@ -180,6 +237,44 @@ export class FakeRepositoryObjects implements RepositoryObjects {
     const created = new RepositoryStore(storage.db, storage.kv);
     this.#stores.set(durableObjectId, created);
     return created;
+  }
+
+  #importOperationFor(durableObjectId: string, store: RepositoryStore): ImportOperation {
+    const existing = this.#importOperations.get(durableObjectId);
+    if (existing !== undefined) {
+      return existing;
+    }
+
+    const storage = new MemoryImportOperationStorage();
+    const created = new ImportOperation({
+      durableObjectId,
+      storage,
+      repository: {
+        resetImport: (init) => store.resetImport(init),
+        importBranch: (request) => {
+          const failure = this.#importFailures.shift();
+          if (failure !== undefined) {
+            return Promise.reject(failure);
+          }
+          const fetchRemote = this.#importFetches.shift() ?? globalThis.fetch;
+          return store.importBranch(request, fetchRemote);
+        },
+        destroy: () => this.#destroy(durableObjectId),
+      },
+      registry: this.#index,
+    });
+    this.#importStorages.set(durableObjectId, storage);
+    this.#importOperations.set(durableObjectId, created);
+    return created;
+  }
+
+  async #destroy(durableObjectId: string): Promise<void> {
+    this.#destroyed.push(durableObjectId);
+    this.#storages.get(durableObjectId)?.close();
+    this.#storages.delete(durableObjectId);
+    this.#stores.delete(durableObjectId);
+    this.#importStorages.delete(durableObjectId);
+    this.#importOperations.delete(durableObjectId);
   }
 }
 
@@ -228,7 +323,7 @@ export const createTestApp = (
   const registry = new NamespaceRegistry(registryDatabase.db);
   const index = new RepositoryIndex(registryDatabase.db);
   const tokenRegistry = new TokenRegistry(registryDatabase.db, now);
-  const objects = new FakeRepositoryObjects();
+  const objects = new FakeRepositoryObjects(index);
 
   const app = createApp({
     namespaceRegistry: () => registry,

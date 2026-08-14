@@ -95,8 +95,25 @@ export class NamespaceRegistryObject extends DurableObject {
     return this.#repositories.deleteRepository(namespaceSlug, name);
   }
 
+  deleteImportIfOwned(
+    namespaceSlug: string,
+    name: string,
+    durableObjectId: string,
+  ): Promise<DeletedRepository | null> {
+    return this.#repositories.deleteImportIfOwned(namespaceSlug, name, durableObjectId);
+  }
+
   finishFork(namespaceSlug: string, name: string): Promise<boolean> {
     return this.#repositories.finishFork(namespaceSlug, name);
+  }
+
+  finishImport(
+    namespaceSlug: string,
+    name: string,
+    durableObjectId: string,
+    defaultBranch: string,
+  ): Promise<boolean> {
+    return this.#repositories.finishImport(namespaceSlug, name, durableObjectId, defaultBranch);
   }
 
   recordPush(namespaceSlug: string, name: string, record: PushRecord): Promise<void> {

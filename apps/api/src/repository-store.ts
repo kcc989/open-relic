@@ -5,9 +5,12 @@ import type { SyncSqliteDatabase } from "./db/database.ts";
 import type { SyncKv } from "./db/kv.ts";
 import {
   REPOSITORY_STATE_ID,
+  objects,
   refs,
   repositoryState,
   shallowCommits,
+  sweepReachable,
+  sweepState,
 } from "./db/repository-schema.ts";
 import {
   receivePackAdvertisementStream,
@@ -43,6 +46,7 @@ import {
   symbolicHead,
   type Head,
 } from "./head.ts";
+import type { ImportedBranch, ImportJob, ImportJobOutcome } from "./import-operation.ts";
 import {
   fetchRemoteBranch,
   type RemoteBranchRequest,
@@ -138,14 +142,10 @@ export interface RepositoryObjectClient {
   readonly readBlob: (oid: string) => Promise<ReadableStream<Uint8Array> | null>;
   readonly hasObject: (oid: string) => Promise<boolean>;
   readonly importBranch: (request: RemoteBranchRequest) => Promise<ImportedBranch>;
+  readonly resetImport: (init: RepositoryInit) => Promise<void>;
+  readonly scheduleImport: (job: ImportJob) => Promise<ImportJobOutcome>;
   readonly sweep: () => Promise<SweepProgress>;
   readonly destroy: () => Promise<void>;
-}
-
-export interface ImportedBranch {
-  readonly branch: string;
-  readonly oid: string;
-  readonly shallow: readonly string[];
 }
 
 export {
@@ -153,6 +153,7 @@ export {
   type RemoteBranchRequest,
   type RemoteFetch,
 } from "./git/remote-branch.ts";
+export { type ImportedBranch, type ImportJob, type ImportJobOutcome } from "./import-operation.ts";
 
 /** The wire strings live with the wire; this is where callers found them. */
 export { REJECTIONS } from "./git/receive-pack.ts";
@@ -273,7 +274,7 @@ export class RepositoryStore {
     return this.#exclusive(async () => {
       await before;
       const fetched = await fetchRemoteBranch(request, fetchRemote);
-      await readPack(fetched.pack, this.#objects);
+      const summary = await readPack(fetched.pack, this.#objects);
 
       // A remote advertisement carries repository-wide grafts. Keep only the
       // advertised boundaries that arrived with this one selected branch.
@@ -312,7 +313,38 @@ export class RepositoryStore {
           .run();
       });
 
-      return { branch: fetched.branch, oid: fetched.oid, shallow: importedShallow };
+      return {
+        branch: fetched.branch,
+        oid: fetched.oid,
+        shallow: importedShallow,
+        objects: summary.objectCount,
+      };
+    });
+  }
+
+  /**
+   * Restart an incomplete import from an empty bare repository. There is no
+   * per-object cursor: completed and partial objects from the failed attempt
+   * are reclaimed before the remote is asked again.
+   */
+  async resetImport(init: RepositoryInit): Promise<void> {
+    await this.#exclusive(async () => {
+      const stored = await this.#db.select({ oid: objects.oid }).from(objects);
+      for (const object of stored) {
+        await this.#objects.reclaim(object.oid);
+      }
+
+      await this.#db.transaction((tx) => {
+        tx.delete(refs).run();
+        tx.delete(shallowCommits).run();
+        tx.delete(sweepReachable).run();
+        tx.delete(sweepState).run();
+        tx.delete(repositoryState).run();
+        tx.insert(repositoryState)
+          .values({ id: REPOSITORY_STATE_ID, createdAt: init.createdAt })
+          .run();
+        this.#kv.put(HEAD_KEY, formatHead(symbolicHead(init.defaultBranch)));
+      });
     });
   }
 

@@ -143,7 +143,7 @@ describe("fetching one public HTTPS branch", () => {
       fetchRemote,
     );
 
-    expect(imported).toEqual({ branch: "trunk", oid: selected.oid, shallow: [] });
+    expect(imported).toEqual({ branch: "trunk", oid: selected.oid, shallow: [], objects: 5 });
     expect(await repository.describe()).toEqual({
       defaultBranch: "trunk",
       createdAt: "2026-08-13T00:00:00.000Z",
@@ -271,7 +271,12 @@ describe("fetching one public HTTPS branch", () => {
       }),
     );
 
-    expect(imported).toEqual({ branch: "main", oid: tip.oid, shallow: [boundary.oid] });
+    expect(imported).toEqual({
+      branch: "main",
+      oid: tip.oid,
+      shallow: [boundary.oid],
+      objects: 3,
+    });
     expect(await repository.readObject(absentParent.oid)).toBeNull();
     expect(await new Response(await repository.advertiseUploadPack(1)).text()).toContain(
       `shallow ${boundary.oid}\n`,

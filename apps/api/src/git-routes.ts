@@ -6,6 +6,7 @@ import type { RepositoryObjects } from "./bindings.ts";
 import {
   forbidden,
   forkInProgress,
+  importInProgress,
   gitAuthenticationRequired,
   invalidInput,
   notFound,
@@ -79,6 +80,9 @@ export const registerGitRoutes = (
     }
     if (found.status === "forking") {
       return forkInProgress(`The repository "${namespace}/${name}" is still being forked.`);
+    }
+    if (found.status === "importing") {
+      return importInProgress(`The repository "${namespace}/${name}" is still being imported.`);
     }
     return found;
   };
