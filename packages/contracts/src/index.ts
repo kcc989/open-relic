@@ -8,7 +8,7 @@
  */
 export const NAMESPACES_PATH = "/namespaces" as const;
 
-export type HttpMethod = "DELETE" | "GET" | "PATCH" | "POST";
+export type HttpMethod = "DELETE" | "GET" | "POST";
 
 export interface EndpointContract {
   readonly id: string;
@@ -65,12 +65,6 @@ export const REST_ENDPOINTS = [
   {
     id: "repositories.get",
     method: "GET",
-    path: REPO,
-    samplePath: SAMPLE_REPO,
-  },
-  {
-    id: "repositories.update",
-    method: "PATCH",
     path: REPO,
     samplePath: SAMPLE_REPO,
   },
