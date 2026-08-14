@@ -639,6 +639,12 @@ runtime with real Git repositories, follow the
 script removes all temporary clones on exit and destroys the smoke stage by
 default.
 
+To compare an arbitrary public GitHub repository across GitHub, hosted
+Cloudflare Artifacts, and a deployed Open Relic installation, follow the
+[Git host benchmarking runbook](./docs/git-host-benchmarking.md). The tracked
+harness records push, clone, integrity, pack-size, and incremental-fetch
+measurements and removes its disposable repositories by default.
+
 ### Test coverage
 
 `bun test` requires `git` on `PATH` and fails at startup when it is missing. The
