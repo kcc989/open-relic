@@ -94,11 +94,15 @@ export const receivePackAdvertisementStream = (
   refs: readonly AdvertisedRef[],
 ): ReadableStream<Uint8Array> => pktLineStream(receivePackAdvertisement(refs));
 
-export const uploadPackCapabilities = (head: Head | null): readonly string[] => [
+export const uploadPackCapabilities = (
+  head: Head | null,
+  shallow: readonly string[] = [],
+): readonly string[] => [
   "multi_ack_detailed",
   "thin-pack",
   "side-band-64k",
   "ofs-delta",
+  ...(shallow.length === 0 ? [] : ["shallow"]),
   "object-format=sha1",
   `agent=open-relic/${SERVICE_VERSION}`,
   ...(head?.kind === "symbolic" ? [`symref=HEAD:${head.ref}`] : []),
@@ -129,6 +133,7 @@ export function* uploadPackAdvertisement(
   refs: readonly AdvertisedRef[],
   head: Head | null,
   protocolVersion: UploadProtocolVersion,
+  shallow: readonly string[] = [],
 ): Generator<Uint8Array> {
   yield pktLine(`# service=${UPLOAD_PACK_SERVICE}\n`);
   yield flushPkt();
@@ -138,7 +143,7 @@ export function* uploadPackAdvertisement(
 
   const advertisedHead = uploadHeadRef(refs, head);
   const [first, ...rest] = advertisedHead === undefined ? refs : [advertisedHead, ...refs];
-  const capabilities = uploadPackCapabilities(head);
+  const capabilities = uploadPackCapabilities(head, shallow);
 
   if (first === undefined) {
     yield refLine({ name: NO_REFS_REF_NAME, oid: ZERO_OID }, capabilities);
@@ -149,6 +154,10 @@ export function* uploadPackAdvertisement(
     }
   }
 
+  for (const oid of shallow) {
+    yield pktLine(`shallow ${oid}\n`);
+  }
+
   yield flushPkt();
 }
 
@@ -156,5 +165,6 @@ export const uploadPackAdvertisementStream = (
   refs: readonly AdvertisedRef[],
   head: Head | null,
   protocolVersion: UploadProtocolVersion,
+  shallow: readonly string[] = [],
 ): ReadableStream<Uint8Array> =>
-  pktLineStream(uploadPackAdvertisement(refs, head, protocolVersion));
+  pktLineStream(uploadPackAdvertisement(refs, head, protocolVersion, shallow));

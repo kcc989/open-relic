@@ -23,6 +23,7 @@ import {
   createTestDatabase,
   createTestRepositoryStorage,
   seedRefs,
+  seedShallowCommits,
   type TestRepositoryStorage,
 } from "./database.ts";
 import { result } from "./envelope.ts";
@@ -87,6 +88,7 @@ export class FakeRepositoryObjects implements RepositoryObjects {
       },
       readBlob: (oid) => store.readBlob(oid),
       hasObject: (oid) => store.hasObject(oid),
+      importBranch: (request) => store.importBranch(request),
       sweep: () => store.sweep(),
       destroy: async () => {
         this.#destroyed.push(durableObjectId);
@@ -143,6 +145,11 @@ export class FakeRepositoryObjects implements RepositoryObjects {
       await paused;
     };
     return { captured, release };
+  }
+
+  /** Stands in for the shallow boundaries persisted by an import. */
+  seedShallowCommits(durableObjectId: string, oids: readonly string[]): Promise<void> {
+    return seedShallowCommits(this.#storageFor(durableObjectId).db, oids);
   }
 
   close(): void {

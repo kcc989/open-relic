@@ -42,6 +42,14 @@ export const refs = sqliteTable("refs", {
 export type RefRow = typeof refs.$inferSelect;
 
 /**
+ * Commits whose parents are intentionally absent after a shallow import. Git's
+ * `$GIT_DIR/shallow` file carries the same set in a filesystem repository.
+ */
+export const shallowCommits = sqliteTable("shallow_commits", {
+  oid: text("oid").primaryKey(),
+});
+
+/**
  * One row per Git object, with the bytes themselves in the KV half under
  * `o:<oid>:<n>` (ADR-0002). `chunk_count` is what tells a read how many keys to
  * ask for, so the row and the chunks are only meaningful together.
