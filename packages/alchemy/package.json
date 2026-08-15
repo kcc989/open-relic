@@ -1,0 +1,56 @@
+{
+  "name": "@openrelic/alchemy",
+  "version": "0.1.0",
+  "description": "Deploy Open Relic with Alchemy and bind Artifacts-compatible namespaces to Cloudflare Workers.",
+  "homepage": "https://github.com/kcc989/open-relic#readme",
+  "bugs": {
+    "url": "https://github.com/kcc989/open-relic/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kcc989/open-relic.git",
+    "directory": "packages/alchemy"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "bun": "./src/index.ts",
+      "worker": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./worker": {
+      "types": "./src/worker.ts",
+      "bun": "./src/worker.ts",
+      "worker": "./src/worker.ts",
+      "import": "./dist/worker.js",
+      "default": "./dist/worker.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "bun run build:js && bun run build:worker && bun run build:types",
+    "build:js": "bun build ./src/index.ts ./src/worker.ts --outdir ./dist --target node --format esm --external alchemy --external 'alchemy/*' --external effect --external 'effect/*'",
+    "build:worker": "bun build ../../apps/api/src/index.ts --outfile ./dist/open-relic-worker.js --target node --format esm --external cloudflare:workers --loader .sql:text && bun build ./src/namespace-worker.ts --outfile ./dist/namespace-worker.js --target browser --format esm --external cloudflare:workers",
+    "build:types": "tsc --project ./tsconfig.build.json",
+    "prepack": "bun run build",
+    "test": "bun test"
+  },
+  "peerDependencies": {
+    "alchemy": ">=2.0.0-beta.72 <3",
+    "effect": ">=4.0.0-rc.108 <5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

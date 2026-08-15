@@ -42,6 +42,7 @@ const resolver = (
       return found;
     },
     deleteRepository: unused,
+    deleteRepositoryIfOwned: unused,
     deleteImportIfOwned: unused,
     finishFork: unused,
     finishImport: unused,

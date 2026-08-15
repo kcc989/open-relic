@@ -3,11 +3,13 @@
   "private": true,
   "license": "MIT",
   "workspaces": [
-    "apps/*"
+    "apps/*",
+    "packages/*"
   ],
   "type": "module",
   "scripts": {
-    "check": "bun run typecheck && bun run lint && bun run fmt:check && bun test",
+    "build:package": "bun run --cwd packages/alchemy build",
+    "check": "bun run typecheck && bun run lint && bun run fmt:check && bun test && bun run build:package",
     "db:generate": "drizzle-kit generate && drizzle-kit generate --config drizzle.repository.config.ts",
     "deploy": "bun alchemy deploy",
     "deploy:prod": "bun alchemy deploy --stage prod",
