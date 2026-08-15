@@ -571,7 +571,7 @@ export const registerRepositoryRoutes = (
       // Removing the index row also cascades any token minted before the last
       // step failed. The fresh object is then emptied, freeing the name for a
       // complete retry rather than exposing a resumable partial copy.
-      await index.deleteRepository(namespaceSlug, reserved.repository.name);
+      await index.deleteRepositoryIfOwned(namespaceSlug, reserved.repository.name, durableObjectId);
       // An exception poisons the RPC stub that observed it. Resolve a fresh
       // target stub for cleanup so storage exhaustion cannot prevent deletion.
       await objects.get(durableObjectId).destroy();

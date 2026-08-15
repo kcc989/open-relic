@@ -95,6 +95,7 @@ object rather than one pack.
 ├── drizzle.config.ts              # drizzle-kit output for the registry object
 ├── drizzle.repository.config.ts   # drizzle-kit output for a repository object
 ├── apps/api                       # Worker, Durable Objects, Git implementation
+├── packages/alchemy               # Published deployment and runtime bindings
 └── docs/adr                       # Architecture decisions
 ```
 
@@ -106,13 +107,19 @@ observability, and CPU limits — there is no `wrangler.toml`. Its exported
 `ApiEnv` types `context.env` in the router, so bindings and RPC methods are typed
 at the call site.
 
+The [`@openrelic/alchemy`](./packages/alchemy) package makes the same
+installation reusable from another Alchemy stack. It deploys Open Relic into
+the consumer's Cloudflare account and exposes a typed, Artifacts-compatible
+namespace binding to application Workers. Installing the package does not start
+a Node server or connect to a shared service.
+
 ## Development
 
 Requires [Bun](https://bun.sh/) and a Cloudflare account for Alchemy commands.
 
 ```sh
 bun install
-bun run check      # typecheck, lint, format, test
+bun run check      # typecheck, lint, format, test, package build
 bun run dev
 ```
 

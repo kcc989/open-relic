@@ -1,5 +1,5 @@
 import type { RepoInfo, RepoSortField, SortDirection } from "./contracts.ts";
-import { and, asc, desc, eq, sql, type SQL } from "drizzle-orm";
+import { and, asc, count, desc, eq, sql, type SQL } from "drizzle-orm";
 
 import type { SyncSqliteDatabase } from "./db/database.ts";
 import {
@@ -62,6 +62,8 @@ export interface ListRepositoriesQuery {
 
 export interface RepositoryPage {
   readonly repositories: readonly RepoInfo[];
+  /** Total repositories matching this query, independent of the current page. */
+  readonly totalCount: number;
   /** Where the next page resumes; `null` once the walk has finished. */
   readonly next: RepositoryCursor | null;
 }
@@ -238,21 +240,32 @@ export const withRepositoryIndex = <TBase extends RegistryStorageConstructor>(Ba
         );
       }
 
-      const rows = await this.#db
-        .select()
-        .from(repositories)
-        .where(and(...filters))
-        .orderBy(
-          ascending ? asc(expression) : desc(expression),
-          ascending ? asc(repositories.name) : desc(repositories.name),
-        )
-        .limit(query.limit + 1);
+      const pageFilter = and(...filters);
+      const totalFilter = and(
+        eq(repositories.namespaceSlug, namespaceSlug),
+        query.search === null
+          ? undefined
+          : sql`${repositories.name} LIKE ${`%${escapeLikePattern(query.search)}%`} ESCAPE '\\'`,
+      );
+      const [rows, totals] = await Promise.all([
+        this.#db
+          .select()
+          .from(repositories)
+          .where(pageFilter)
+          .orderBy(
+            ascending ? asc(expression) : desc(expression),
+            ascending ? asc(repositories.name) : desc(repositories.name),
+          )
+          .limit(query.limit + 1),
+        this.#db.select({ count: count() }).from(repositories).where(totalFilter),
+      ]);
 
       const page = rows.slice(0, query.limit);
       const last = page.at(-1);
 
       return {
         repositories: page.map(toRepository),
+        totalCount: totals[0]?.count ?? 0,
         next:
           rows.length > query.limit && last !== undefined
             ? { value: sortValue(last, query.sort), name: last.name }
@@ -294,7 +307,30 @@ export const withRepositoryIndex = <TBase extends RegistryStorageConstructor>(Ba
       return deleted[0] ?? null;
     }
 
-    /** A stale multi-step create may clean up only the row it originally reserved. */
+    /** A failed multi-step operation may clean up only the row it reserved. */
+    async deleteRepositoryIfOwned(
+      namespaceSlug: string,
+      name: string,
+      durableObjectId: string,
+    ): Promise<DeletedRepository | null> {
+      const deleted = await this.#db
+        .delete(repositories)
+        .where(
+          and(
+            eq(repositories.namespaceSlug, namespaceSlug),
+            eq(repositories.name, name),
+            eq(repositories.durableObjectId, durableObjectId),
+          ),
+        )
+        .returning({
+          id: repositories.id,
+          durableObjectId: repositories.durableObjectId,
+        });
+
+      return deleted[0] ?? null;
+    }
+
+    /** A stale import may clean up only its still-importing reservation. */
     async deleteImportIfOwned(
       namespaceSlug: string,
       name: string,

@@ -338,6 +338,9 @@ export class FakeRepositoryObjects implements RepositoryObjects {
 export interface TestApp {
   readonly app: ReturnType<typeof createApp>;
   readonly objects: FakeRepositoryObjects;
+  readonly namespaces: NamespaceRegistry;
+  readonly repositories: RepositoryIndex;
+  readonly tokens: TokenRegistry;
   /** The write token returned once when `createGitTestApp` creates its repository. */
   readonly repositoryToken: string | null;
   readonly close: () => void;
@@ -393,6 +396,9 @@ export const createTestApp = (
   return {
     app,
     objects,
+    namespaces: registry,
+    repositories: index,
+    tokens: tokenRegistry,
     repositoryToken: null,
     close: () => {
       objects.close();

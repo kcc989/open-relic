@@ -211,6 +211,7 @@ describe("reads", () => {
 
     expect(await store.repositories.listRepositories("acme", query())).toEqual({
       repositories: [],
+      totalCount: 0,
       next: null,
     });
     expect(await store.repositories.listRepositories("nope", query())).toBeNull();
@@ -390,6 +391,20 @@ describe("deleteRepository", () => {
     const store = await withNamespace();
 
     expect(await store.repositories.deleteRepository("acme", "nope")).toBeNull();
+  });
+
+  test("a stale operation cannot delete a replacement with the same name", async () => {
+    const store = await withNamespace();
+    await store.repositories.createRepository(command("acme", "demo", "object-old"));
+    await store.repositories.deleteRepository("acme", "demo");
+    await store.repositories.createRepository(command("acme", "demo", "object-new"));
+
+    expect(
+      await store.repositories.deleteRepositoryIfOwned("acme", "demo", "object-old"),
+    ).toBeNull();
+    expect((await store.repositories.getRepository("acme", "demo"))?.durableObjectId).toBe(
+      "object-new",
+    );
   });
 });
 

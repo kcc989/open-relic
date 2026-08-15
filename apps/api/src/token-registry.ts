@@ -4,7 +4,7 @@ import {
   type TokenListState,
   type TokenScope,
 } from "./contracts.ts";
-import { and, count, desc, eq, gt, isNotNull, isNull, lte, type SQL } from "drizzle-orm";
+import { and, count, desc, eq, gt, isNotNull, isNull, lte, or, type SQL } from "drizzle-orm";
 
 import type { SyncSqliteDatabase } from "./db/database.ts";
 import { repositories, tokens, type TokenRow } from "./db/registry-schema.ts";
@@ -171,6 +171,36 @@ export const withTokenRegistry = <TBase extends RegistryStorageConstructor>(Base
         .update(tokens)
         .set({ revokedAt: this.#now().toISOString() })
         .where(and(eq(tokens.namespaceSlug, namespaceSlug), eq(tokens.id, id)))
+        .returning({ id: tokens.id });
+      return rows.length > 0;
+    }
+
+    /**
+     * The Workers repository handle is scoped more tightly than the REST
+     * revoke endpoint and accepts either the opaque id or the plaintext Git
+     * token. A plaintext lookup compares only its digest; the secret itself is
+     * never stored.
+     */
+    async revokeRepositoryToken(
+      namespaceSlug: string,
+      repositoryName: string,
+      tokenOrId: string,
+    ): Promise<boolean> {
+      const parsed = parseToken(tokenOrId);
+      const secretHash = parsed === null ? null : await hashTokenSecret(parsed.secret);
+      const rows = await this.#db
+        .update(tokens)
+        .set({ revokedAt: this.#now().toISOString() })
+        .where(
+          and(
+            eq(tokens.namespaceSlug, namespaceSlug),
+            eq(tokens.repositoryName, repositoryName),
+            or(
+              eq(tokens.id, tokenOrId),
+              secretHash === null ? undefined : eq(tokens.secretHash, secretHash),
+            ),
+          ),
+        )
         .returning({ id: tokens.id });
       return rows.length > 0;
     }
