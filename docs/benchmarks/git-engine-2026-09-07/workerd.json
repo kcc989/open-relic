@@ -1,0 +1,633 @@
+{
+  "runtime": "workerd 2026-07-04",
+  "storage": "local disk SQLite Durable Objects",
+  "integrity": "git index-pack --strict on each fetched pack; git fsck --full on each client",
+  "samples": 7,
+  "warmups": 1,
+  "order": "alternating",
+  "results": [
+    {
+      "workload": "parse-small",
+      "baseline": {
+        "ms": 94.63023500000008,
+        "bytes": 21,
+        "objects": null
+      },
+      "updated": {
+        "ms": 79.74109300000009,
+        "bytes": 21,
+        "objects": null
+      },
+      "samples": [
+        [
+          {
+            "ms": 94.63023500000008,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 99.19879400000036,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 96.88434000000007,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 100.4638030000001,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 91.16375400000015,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 86.50510699999995,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 85.02919199999997,
+            "bytes": 21,
+            "objects": null
+          }
+        ],
+        [
+          {
+            "ms": 102.17730299999994,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 84.23242600000003,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 79.74109300000009,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 73.80312099999992,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 80.75173300000006,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 70.0827549999999,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 78.00951600000008,
+            "bytes": 21,
+            "objects": null
+          }
+        ]
+      ]
+    },
+    {
+      "workload": "parse-source",
+      "baseline": {
+        "ms": 355.6774399999995,
+        "bytes": 19,
+        "objects": null
+      },
+      "updated": {
+        "ms": 353.6069559999996,
+        "bytes": 19,
+        "objects": null
+      },
+      "samples": [
+        [
+          {
+            "ms": 368.27167999999983,
+            "bytes": 19,
+            "objects": null
+          },
+          {
+            "ms": 355.6774399999995,
+            "bytes": 19,
+            "objects": null
+          },
+          {
+            "ms": 351.4159749999999,
+            "bytes": 19,
+            "objects": null
+          },
+          {
+            "ms": 348.865554,
+            "bytes": 19,
+            "objects": null
+          },
+          {
+            "ms": 351.23515899999984,
+            "bytes": 19,
+            "objects": null
+          },
+          {
+            "ms": 374.86344199999985,
+            "bytes": 19,
+            "objects": null
+          },
+          {
+            "ms": 394.6672320000016,
+            "bytes": 19,
+            "objects": null
+          }
+        ],
+        [
+          {
+            "ms": 348.6383100000003,
+            "bytes": 19,
+            "objects": null
+          },
+          {
+            "ms": 352.9211430000005,
+            "bytes": 19,
+            "objects": null
+          },
+          {
+            "ms": 363.2054709999993,
+            "bytes": 19,
+            "objects": null
+          },
+          {
+            "ms": 351.69883000000027,
+            "bytes": 19,
+            "objects": null
+          },
+          {
+            "ms": 353.6069559999996,
+            "bytes": 19,
+            "objects": null
+          },
+          {
+            "ms": 365.58198900000025,
+            "bytes": 19,
+            "objects": null
+          },
+          {
+            "ms": 362.84660299999996,
+            "bytes": 19,
+            "objects": null
+          }
+        ]
+      ]
+    },
+    {
+      "workload": "ingest-small",
+      "baseline": {
+        "ms": 1066.9067250000007,
+        "bytes": 21,
+        "objects": null
+      },
+      "updated": {
+        "ms": 918.5042629999989,
+        "bytes": 21,
+        "objects": null
+      },
+      "samples": [
+        [
+          {
+            "ms": 1157.462136,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 1066.9067250000007,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 1011.7969409999987,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 1088.6333250000025,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 1099.2560340000018,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 1023.276966999998,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 1012.093363,
+            "bytes": 21,
+            "objects": null
+          }
+        ],
+        [
+          {
+            "ms": 957.9102390000007,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 891.9949259999994,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 871.306026000002,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 906.6133489999993,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 929.3949560000001,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 918.5042629999989,
+            "bytes": 21,
+            "objects": null
+          },
+          {
+            "ms": 1016.3763250000011,
+            "bytes": 21,
+            "objects": null
+          }
+        ]
+      ]
+    },
+    {
+      "workload": "clone-1000-files",
+      "baseline": {
+        "ms": 78.03261000000202,
+        "bytes": 68571,
+        "objects": 1002
+      },
+      "updated": {
+        "ms": 67.06220100000064,
+        "bytes": 68571,
+        "objects": 1002
+      },
+      "samples": [
+        [
+          {
+            "ms": 88.56708799999979,
+            "bytes": 68571,
+            "objects": 1002
+          },
+          {
+            "ms": 61.746846000001824,
+            "bytes": 68571,
+            "objects": 1002
+          },
+          {
+            "ms": 86.29603899999711,
+            "bytes": 68571,
+            "objects": 1002
+          },
+          {
+            "ms": 76.49010099999941,
+            "bytes": 68571,
+            "objects": 1002
+          },
+          {
+            "ms": 83.78826800000024,
+            "bytes": 68571,
+            "objects": 1002
+          },
+          {
+            "ms": 78.03261000000202,
+            "bytes": 68571,
+            "objects": 1002
+          },
+          {
+            "ms": 68.3360079999984,
+            "bytes": 68571,
+            "objects": 1002
+          }
+        ],
+        [
+          {
+            "ms": 86.50426599999992,
+            "bytes": 68571,
+            "objects": 1002
+          },
+          {
+            "ms": 67.06220100000064,
+            "bytes": 68571,
+            "objects": 1002
+          },
+          {
+            "ms": 63.58975999999893,
+            "bytes": 68571,
+            "objects": 1002
+          },
+          {
+            "ms": 58.228338000000804,
+            "bytes": 68571,
+            "objects": 1002
+          },
+          {
+            "ms": 62.72539499999766,
+            "bytes": 68571,
+            "objects": 1002
+          },
+          {
+            "ms": 76.98908099999971,
+            "bytes": 68571,
+            "objects": 1002
+          },
+          {
+            "ms": 74.71720999999889,
+            "bytes": 68571,
+            "objects": 1002
+          }
+        ]
+      ]
+    },
+    {
+      "workload": "fetch-empty-commit",
+      "baseline": {
+        "ms": 62.04019200000039,
+        "bytes": 68638,
+        "objects": 1002
+      },
+      "updated": {
+        "ms": 8.569609999998647,
+        "bytes": 240,
+        "objects": 1
+      },
+      "samples": [
+        [
+          {
+            "ms": 56.574790999999095,
+            "bytes": 68638,
+            "objects": 1002
+          },
+          {
+            "ms": 62.04019200000039,
+            "bytes": 68638,
+            "objects": 1002
+          },
+          {
+            "ms": 85.5927010000014,
+            "bytes": 68638,
+            "objects": 1002
+          },
+          {
+            "ms": 52.01656300000104,
+            "bytes": 68638,
+            "objects": 1002
+          },
+          {
+            "ms": 63.79915299999993,
+            "bytes": 68638,
+            "objects": 1002
+          },
+          {
+            "ms": 59.10595299999841,
+            "bytes": 68638,
+            "objects": 1002
+          },
+          {
+            "ms": 69.00917800000025,
+            "bytes": 68638,
+            "objects": 1002
+          }
+        ],
+        [
+          {
+            "ms": 9.76447200000257,
+            "bytes": 240,
+            "objects": 1
+          },
+          {
+            "ms": 8.137353999998595,
+            "bytes": 240,
+            "objects": 1
+          },
+          {
+            "ms": 8.490873999999167,
+            "bytes": 240,
+            "objects": 1
+          },
+          {
+            "ms": 12.718058999998902,
+            "bytes": 240,
+            "objects": 1
+          },
+          {
+            "ms": 8.569609999998647,
+            "bytes": 240,
+            "objects": 1
+          },
+          {
+            "ms": 7.613798999998835,
+            "bytes": 240,
+            "objects": 1
+          },
+          {
+            "ms": 8.944421000000148,
+            "bytes": 240,
+            "objects": 1
+          }
+        ]
+      ]
+    },
+    {
+      "workload": "fetch-one-file",
+      "baseline": {
+        "ms": 63.286503999999695,
+        "bytes": 68624,
+        "objects": 1002
+      },
+      "updated": {
+        "ms": 9.757701999998972,
+        "bytes": 23777,
+        "objects": 3
+      },
+      "samples": [
+        [
+          {
+            "ms": 68.25010699999984,
+            "bytes": 68624,
+            "objects": 1002
+          },
+          {
+            "ms": 81.03790300000037,
+            "bytes": 68624,
+            "objects": 1002
+          },
+          {
+            "ms": 53.81399699999747,
+            "bytes": 68624,
+            "objects": 1002
+          },
+          {
+            "ms": 58.03636999999799,
+            "bytes": 68624,
+            "objects": 1002
+          },
+          {
+            "ms": 63.286503999999695,
+            "bytes": 68624,
+            "objects": 1002
+          },
+          {
+            "ms": 81.76698100000067,
+            "bytes": 68624,
+            "objects": 1002
+          },
+          {
+            "ms": 61.42812599999888,
+            "bytes": 68624,
+            "objects": 1002
+          }
+        ],
+        [
+          {
+            "ms": 10.410705999998754,
+            "bytes": 23777,
+            "objects": 3
+          },
+          {
+            "ms": 10.080040000000736,
+            "bytes": 23777,
+            "objects": 3
+          },
+          {
+            "ms": 9.141820000000735,
+            "bytes": 23777,
+            "objects": 3
+          },
+          {
+            "ms": 8.857081999998627,
+            "bytes": 23777,
+            "objects": 3
+          },
+          {
+            "ms": 9.757701999998972,
+            "bytes": 23777,
+            "objects": 3
+          },
+          {
+            "ms": 8.919834999996965,
+            "bytes": 23777,
+            "objects": 3
+          },
+          {
+            "ms": 10.092908999999054,
+            "bytes": 23777,
+            "objects": 3
+          }
+        ]
+      ]
+    },
+    {
+      "workload": "connectivity-500-commits",
+      "baseline": {
+        "ms": 45.09364500000083,
+        "bytes": 16,
+        "objects": null
+      },
+      "updated": {
+        "ms": 3.636646999999357,
+        "bytes": 16,
+        "objects": null
+      },
+      "samples": [
+        [
+          {
+            "ms": 51.180710000000545,
+            "bytes": 16,
+            "objects": null
+          },
+          {
+            "ms": 45.09364500000083,
+            "bytes": 16,
+            "objects": null
+          },
+          {
+            "ms": 47.959649000000354,
+            "bytes": 16,
+            "objects": null
+          },
+          {
+            "ms": 52.830331000001024,
+            "bytes": 16,
+            "objects": null
+          },
+          {
+            "ms": 40.57078099999853,
+            "bytes": 16,
+            "objects": null
+          },
+          {
+            "ms": 42.99030700000003,
+            "bytes": 16,
+            "objects": null
+          },
+          {
+            "ms": 42.53207400000247,
+            "bytes": 16,
+            "objects": null
+          }
+        ],
+        [
+          {
+            "ms": 3.636646999999357,
+            "bytes": 16,
+            "objects": null
+          },
+          {
+            "ms": 3.083674000001338,
+            "bytes": 16,
+            "objects": null
+          },
+          {
+            "ms": 5.380832000002556,
+            "bytes": 16,
+            "objects": null
+          },
+          {
+            "ms": 4.0223689999984344,
+            "bytes": 16,
+            "objects": null
+          },
+          {
+            "ms": 3.75837600000159,
+            "bytes": 16,
+            "objects": null
+          },
+          {
+            "ms": 3.297237999999197,
+            "bytes": 16,
+            "objects": null
+          },
+          {
+            "ms": 3.4424010000002454,
+            "bytes": 16,
+            "objects": null
+          }
+        ]
+      ]
+    }
+  ]
+}

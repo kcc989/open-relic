@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { HEAD_KEY } from "../src/head.ts";
 import type { SyncKv } from "../src/db/kv.ts";
 import { ZERO_OID } from "../src/object.ts";
+import { PACK_WRITE_BATCH_COUNT } from "../src/pack.ts";
 import { REJECTIONS, RepositoryStore, type ReceivePackOutcome } from "../src/repository-store.ts";
 import {
   createSqliteFullError,
@@ -373,7 +374,13 @@ describe("a push that exhausts repository storage", () => {
       streamOf(
         pushBody({
           commands: [{ oldOid: FIRST.oid, newOid: SECOND.oid, name: MAIN }],
-          objects: [SECOND_ROOT, REVISED, SECOND],
+          // Finish one batch before the next batch exhausts storage.
+          objects: [
+            ...Array.from({ length: PACK_WRITE_BATCH_COUNT - 2 }, (_, i) => blob(`orphan ${i}`)),
+            SECOND_ROOT,
+            REVISED,
+            SECOND,
+          ],
         }),
       ),
     );

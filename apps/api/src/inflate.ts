@@ -227,7 +227,7 @@ export class Inflater {
     }
 
     this.#state = "done";
-    this.#leftover = this.#input.slice(this.#bitAt >> 3);
+    this.#leftover = this.#input.subarray(this.#bitAt >> 3);
     this.#input = EMPTY;
     this.#bitAt = 0;
   }

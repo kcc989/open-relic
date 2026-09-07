@@ -17,6 +17,7 @@
 import { isObjectId, isObjectType, type ObjectType } from "./object.ts";
 import { ObjectParseError } from "./object-parse.ts";
 import type { PackBase } from "./pack.ts";
+import type { IndexedObject } from "./object-store.ts";
 import { GITLINK_MODE, TREE_MODE, treeEntries } from "./tree-entry.ts";
 
 export { ObjectParseError } from "./object-parse.ts";
@@ -25,6 +26,14 @@ export { GITLINK_MODE, TREE_MODE } from "./tree-entry.ts";
 /** Where the walk reads from; {@link ObjectStore} is the one that matters. */
 export interface ObjectSource {
   readonly read: (oid: string) => Promise<PackBase | null>;
+  readonly readConnectivity?: (
+    tip: string,
+    verified: ReadonlySet<string>,
+    shallow: ReadonlySet<string>,
+  ) => Promise<readonly string[] | null>;
+  readonly readIndexedObjects?: (
+    oids: readonly string[],
+  ) => Promise<ReadonlyMap<string, IndexedObject>>;
 }
 
 export interface ObjectLink {
@@ -220,32 +229,54 @@ export const findMissingObject = async (
   source: ObjectSource,
   { verified, visited, shallow = new Set() }: WalkOptions,
 ): Promise<string | null> => {
+  if (verified.has(tip) || visited.has(tip)) return null;
+  const indexedClosure = await source.readConnectivity?.(
+    tip,
+    new Set([...verified, ...visited]),
+    shallow,
+  );
+  if (indexedClosure !== undefined && indexedClosure !== null) {
+    for (const oid of indexedClosure) visited.add(oid);
+    return null;
+  }
   const pending: string[] = [tip];
+  const traversed = new Set<string>();
 
   while (pending.length > 0) {
-    const oid = pending.pop()!;
-
-    if (visited.has(oid) || verified.has(oid)) {
-      continue;
-    }
-    visited.add(oid);
-
-    const object = await source.read(oid);
-    if (object === null) {
-      return oid;
-    }
-
-    try {
-      for (const link of linksToVerify(object.type, object.bytes, shallow.has(oid))) {
-        pending.push(link.oid);
+    const frontier = [
+      ...new Set(pending.splice(Math.max(0, pending.length - 98)).reverse()),
+    ].filter((oid) => !visited.has(oid) && !verified.has(oid) && !traversed.has(oid));
+    const indexed = await source.readIndexedObjects?.(frontier);
+    for (const oid of frontier) {
+      traversed.add(oid);
+      const cached = indexed?.get(oid);
+      if (cached !== undefined) {
+        for (const link of cached.links) {
+          if (cached.type === "tree" && link.type === "blob") continue;
+          if (cached.type === "commit" && shallow.has(oid) && link.type === "commit") continue;
+          pending.push(link.oid);
+        }
+        continue;
       }
-    } catch (error) {
-      if (error instanceof ObjectParseError) {
+
+      const object = await source.read(oid);
+      if (object === null) {
         return oid;
       }
-      throw error;
+      try {
+        for (const link of linksToVerify(object.type, object.bytes, shallow.has(oid))) {
+          pending.push(link.oid);
+        }
+      } catch (error) {
+        if (error instanceof ObjectParseError) {
+          return oid;
+        }
+        throw error;
+      }
     }
   }
 
+  // Only a successful walk can establish boundaries for another push command.
+  for (const oid of traversed) visited.add(oid);
   return null;
 };
