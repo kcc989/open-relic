@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS `object_links_target_oid_idx`;
