@@ -1,6 +1,6 @@
 import { deflateSync } from "node:zlib";
 
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 
 import { linksToFetch, ObjectParseError, type ObjectLink } from "./connectivity.ts";
 import type { SyncSqliteDatabase } from "./db/database.ts";
@@ -759,6 +759,24 @@ export class ObjectStore implements PackSink {
     if (roots.size === 0) {
       return [];
     }
+    // The boundary sets are materialized `not in` lists, present only when they
+    // have members. A correlated `exists` over `json_each` is re-scanned for
+    // every edge, and on a clone both sets are empty: that was most of the walk.
+    const stops = stopAt.size === 0 ? null : JSON.stringify([...stopAt]);
+    const grafts = shallow.size === 0 ? null : JSON.stringify([...shallow]);
+    const outsideStops = (oid: SQLWrapper): SQL =>
+      stops === null ? sql`` : sql`and ${oid} not in (select oid from closure_stops)`;
+    // Only the blob filter needs the source row inside the recursion. An
+    // incomplete or unindexed object has no edges to follow, and the final join
+    // is what fails the closure for it, so the walk itself can stay on the
+    // edge table.
+    const sourceObject = includeBlobs
+      ? sql``
+      : sql`
+          join ${objects}
+            on ${objects.oid} = reachable.oid
+           and ${objects.complete} = true
+           and ${objects.linksIndexed} = true`;
     const rows = await this.#db.all<{
       readonly oid: string;
       readonly complete: number | boolean | null;
@@ -768,39 +786,29 @@ export class ObjectStore implements PackSink {
         closure_roots(oid) as (
           select value from json_each(${JSON.stringify([...roots])})
         ),
-        closure_stops(oid) as (
-          select value from json_each(${JSON.stringify([...stopAt])})
-        ),
-        closure_shallow(oid) as (
-          select value from json_each(${JSON.stringify([...shallow])})
-        ),
+        ${stops === null ? sql`` : sql`closure_stops(oid) as (select value from json_each(${stops})),`}
+        ${grafts === null ? sql`` : sql`closure_shallow(oid) as (select value from json_each(${grafts})),`}
         reachable(oid) as (
           select closure_roots.oid
           from closure_roots
-          where not exists (
-            select 1 from closure_stops where closure_stops.oid = closure_roots.oid
-          )
+          where true ${outsideStops(sql`closure_roots.oid`)}
           union
           select ${objectLinks.targetOid}
           from reachable
-          join ${objects}
-            on ${objects.oid} = reachable.oid
-           and ${objects.complete} = true
-           and ${objects.linksIndexed} = true
+          ${sourceObject}
           join ${objectLinks}
             on ${objectLinks.sourceOid} = reachable.oid
-          where not exists (
-            select 1
-            from closure_stops
-            where closure_stops.oid = ${objectLinks.targetOid}
-          )
-            and (${includeBlobs ? 1 : 0} = 1 or ${objects.type} <> 'tree' or ${objectLinks.targetType} <> 'blob')
-            and (
-              ${objectLinks.targetType} <> 'commit'
-              or not exists (
-                select 1 from closure_shallow where closure_shallow.oid = reachable.oid
-              )
-            )
+          where true
+            ${outsideStops(objectLinks.targetOid)}
+            ${includeBlobs ? sql`` : sql`and (${objects.type} <> 'tree' or ${objectLinks.targetType} <> 'blob')`}
+            ${
+              grafts === null
+                ? sql``
+                : sql`and (
+                    ${objectLinks.targetType} <> 'commit'
+                    or reachable.oid not in (select oid from closure_shallow)
+                  )`
+            }
         )
       select
         reachable.oid as oid,
