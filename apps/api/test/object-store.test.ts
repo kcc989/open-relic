@@ -676,3 +676,44 @@ test("reclaim removes object chunks, metadata, and a persisted delta", async () 
   expect(opened.kv.get(`d:${oid}:1`)).toBeUndefined();
   expect(await objects.reclaim(oid)).toBeNull();
 });
+
+test("reads a planned window through one multi-get and merges past the key limit", async () => {
+  const opened = storage();
+  let multiGets = 0;
+  const counting: SyncKv = {
+    get: <T>(key: string): T | undefined => opened.kv.get<T>(key),
+    getMany: <T>(keys: readonly string[]): Promise<ReadonlyMap<string, T>> => {
+      multiGets += 1;
+      expect(keys.length).toBeLessThanOrEqual(128);
+      return opened.kv.getMany!<T>(keys);
+    },
+    put: <T>(key: string, value: T): void => opened.kv.put(key, value),
+    delete: (key: string): void => opened.kv.delete(key),
+  };
+  const objects = new ObjectStore(opened.db, counting);
+  // A stored-block deflate stays larger than one chunk; the rest fit in one apiece.
+  const contents = filled(CHUNK_BYTES + 7, 29);
+  const split = {
+    ...blob(contents),
+    compressed: new Uint8Array(deflateSync(contents, { level: 0 })),
+  };
+  const small = Array.from({ length: 130 }, (_, at) => blob(utf8(`entry ${at}`)));
+  await objects.writeBatch([split, ...small]);
+  const oids = [split.oid, ...small.map(({ oid }) => oid)];
+  const metadata = await objects.readPackMetadata(oids);
+  const requests = oids.map((oid) => ({ metadata: metadata.get(oid)!, preferredBaseOid: null }));
+
+  const entries = await objects.readCachedPackEntries(requests);
+
+  expect(entries.size).toBe(oids.length);
+  expect(entries.get(split.oid)?.compressed).toEqual(split.compressed);
+  expect(entries.get(small[0]!.oid)?.compressed).toEqual(
+    new Uint8Array(deflateSync(small[0]!.bytes)),
+  );
+  // 132 keys: one full multi-get and one for the remainder.
+  expect(multiGets).toBe(2);
+
+  multiGets = 0;
+  expect((await objects.readCachedPackEntries(requests.slice(1, 100))).size).toBe(99);
+  expect(multiGets).toBe(1);
+});

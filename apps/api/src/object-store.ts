@@ -27,6 +27,8 @@ const DELTA_PREFIX = "d";
 const COMPRESSED_OBJECT_PREFIX = "z";
 const COMPRESSED_DELTA_PREFIX = "zd";
 const SQLITE_MAX_BOUND_VALUES = 100;
+/** SQLite-backed Durable Objects fetch at most this many explicit keys in one `get`. */
+const KV_GET_MANY_KEYS = 128;
 /** Leave room for completeness/index predicates beside an `IN` frontier. */
 const OBJECT_METADATA_BATCH_SIZE = SQLITE_MAX_BOUND_VALUES - 2;
 const OBJECT_LINK_BOUND_VALUES_PER_ROW = 3;
@@ -874,17 +876,25 @@ export class ObjectStore implements PackSink {
       const entry = selectCachedPackEntry(request);
       return entry === null ? [] : [entry];
     });
-    const keys = selected.flatMap((entry) =>
-      Array.from({ length: entry.chunkCount }, (_, index) =>
-        chunkKey(entry.prefix, entry.oid, index),
-      ),
-    );
-    const chunks = new Map<string, Uint8Array>();
-    for (let at = 0; at < keys.length; at += 128) {
-      const read = await this.#kv.getMany<Uint8Array>(keys.slice(at, at + 128));
-      for (const [key, value] of read) {
-        chunks.set(key, value);
+    const keys: string[] = [];
+    for (const entry of selected) {
+      for (let index = 0; index < entry.chunkCount; index += 1) {
+        keys.push(chunkKey(entry.prefix, entry.oid, index));
       }
+    }
+    // A planned window fits one multi-get; only an oversized entry needs more.
+    let chunks: ReadonlyMap<string, Uint8Array>;
+    if (keys.length <= KV_GET_MANY_KEYS) {
+      chunks = await this.#kv.getMany<Uint8Array>(keys);
+    } else {
+      const merged = new Map<string, Uint8Array>();
+      for (let at = 0; at < keys.length; at += KV_GET_MANY_KEYS) {
+        const read = await this.#kv.getMany<Uint8Array>(keys.slice(at, at + KV_GET_MANY_KEYS));
+        for (const [key, value] of read) {
+          merged.set(key, value);
+        }
+      }
+      chunks = merged;
     }
 
     const entries = new Map<string, CachedPackEntry>();
@@ -1331,6 +1341,23 @@ export class ObjectStore implements PackSink {
     count: number,
     readChunk: (key: string) => Uint8Array | undefined,
   ): Uint8Array {
+    // Most representations are one chunk holding exactly `size` bytes. That
+    // value is handed over as read rather than copied: every reader treats it
+    // as immutable, and KV yields a fresh value per read in production.
+    if (count === 1) {
+      const key = chunkKey(prefix, oid, 0);
+      const chunk = readChunk(key);
+      if (chunk === undefined) {
+        throw new ObjectStoreError(`Chunk ${key} is missing.`);
+      }
+      if (chunk.length !== size) {
+        throw new ObjectStoreError(
+          `Object ${oid} holds ${chunk.length} bytes where its row declares ${size}.`,
+        );
+      }
+      return chunk;
+    }
+
     const bytes = new Uint8Array(size);
     let at = 0;
 
