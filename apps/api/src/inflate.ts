@@ -43,37 +43,54 @@ const CODE_LENGTH_ORDER = [
 ] as const;
 
 /** Match lengths for literal/length symbols 257–285, and their extra bits. */
-const LENGTH_BASE = [
+const LENGTH_BASE = new Uint16Array([
   3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131,
   163, 195, 227, 258,
-] as const;
-const LENGTH_EXTRA = [
+]);
+const LENGTH_EXTRA = new Uint8Array([
   0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
-] as const;
+]);
 
-const DISTANCE_BASE = [
+const DISTANCE_BASE = new Uint16Array([
   1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049,
   3073, 4097, 6145, 8193, 12289, 16385, 24577,
-] as const;
-const DISTANCE_EXTRA = [
+]);
+const DISTANCE_EXTRA = new Uint8Array([
   0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13,
-] as const;
+]);
 
 /**
- * Canonical Huffman decoding tables in zlib's `puff` shape: how many codes
- * there are of each length, and the symbols in code order. Decoding walks one
- * bit at a time, which costs a little and saves building a 32k-entry lookup
- * for every block.
+ * Codes of up to this many bits decode in one table lookup. Nearly every code
+ * in a Git object's stream is that short — longer ones name the rarest symbols
+ * — so the fallback walk below is exercised without being paid for.
+ */
+const TABLE_BITS = 9;
+
+/** A `symbol << 4 | length` table entry, as the decoders hand back. */
+const entryOf = (symbol: number, length: number): number => (symbol << 4) | length;
+
+/**
+ * Canonical Huffman decoding tables: a lookup indexed by the next input bits
+ * under `mask`, holding `symbol << 4 | length` (zero where the code is
+ * longer), plus zlib's `puff` shape — how many codes of each length, and the
+ * symbols in code order — which resolves the long codes one bit at a time.
+ * The lookup is only as wide as the longest code, up to `TABLE_BITS`: a small
+ * object's block has short codes, and its tables are built more often than
+ * they are read.
  */
 interface Huffman {
+  readonly table: Uint16Array;
+  readonly mask: number;
   readonly counts: Uint16Array;
   readonly symbols: Uint16Array;
 }
 
 const buildHuffman = (lengths: Uint8Array): Huffman => {
   const counts = new Uint16Array(MAX_CODE_BITS + 1);
+  let longest = 0;
   for (const length of lengths) {
     counts[length] = counts[length]! + 1;
+    longest = Math.max(longest, length);
   }
   counts[0] = 0;
 
@@ -91,7 +108,66 @@ const buildHuffman = (lengths: Uint8Array): Huffman => {
     }
   }
 
-  return { counts, symbols };
+  // Deflate packs a code most-significant bit first, so the table is indexed
+  // by the code's bits reversed, and every index that begins with a short code
+  // holds that code.
+  const tableBits = Math.min(longest, TABLE_BITS);
+  const tableSize = 1 << tableBits;
+  const table = new Uint16Array(tableSize);
+  let code = 0;
+  let next = 0;
+  for (let length = 1; length <= tableBits; length += 1) {
+    for (const last = next + counts[length]!; next < last; next += 1) {
+      let reversed = 0;
+      for (let bit = 0; bit < length; bit += 1) {
+        reversed = (reversed << 1) | ((code >> bit) & 1);
+      }
+      const entry = entryOf(symbols[next]!, length);
+      for (let at = reversed; at < tableSize; at += 1 << length) {
+        table[at] = entry;
+      }
+      code += 1;
+    }
+    code <<= 1;
+  }
+
+  return { table, mask: tableSize - 1, counts, symbols };
+};
+
+/**
+ * Decodes one symbol from `bits`, the next `available` bits of input least
+ * significant first: a table entry when the code is short, the same shape from
+ * the bit-by-bit walk when it is not, or `-1` when the code runs past
+ * `available`.
+ */
+const decode = (huffman: Huffman, bits: number, available: number): number => {
+  const entry = huffman.table[bits & huffman.mask]!;
+  if (entry !== 0) {
+    return (entry & 15) <= available ? entry : -1;
+  }
+
+  const { counts, symbols } = huffman;
+  let code = 0;
+  let first = 0;
+  let index = 0;
+
+  for (let length = 1; length <= MAX_CODE_BITS; length += 1) {
+    if (length > available) {
+      return -1;
+    }
+    code |= (bits >>> (length - 1)) & 1;
+    const count = counts[length]!;
+
+    if (code - first < count) {
+      return entryOf(symbols[index + (code - first)]!, length);
+    }
+
+    index += count;
+    first = (first + count) << 1;
+    code <<= 1;
+  }
+
+  throw new InflateError("corrupt", "An incomplete Huffman code was used.");
 };
 
 const fixedLiteralLengths = (): Uint8Array => {
@@ -126,6 +202,12 @@ const adler32 = (bytes: Uint8Array): number => {
 
   return ((high << 16) | low) >>> 0;
 };
+
+/**
+ * Matches at least this long that do not overlap themselves are copied by the
+ * runtime; shorter ones cost less to copy in a loop than to call out for.
+ */
+const BULK_COPY_BYTES = 32;
 
 type Step = "continue" | "wait" | "done";
 
@@ -265,7 +347,7 @@ export class Inflater {
       case "stored":
         return this.#copyStored();
       case "compressed":
-        return this.#decodeSymbol();
+        return this.#inflateBlock();
       case "checksum":
         return this.#readChecksum();
       case "done":
@@ -394,52 +476,134 @@ export class Inflater {
   }
 
   /**
-   * One literal or one match. Every bit this reads is read before a byte is
-   * written, so `push` can rewind and retry the whole symbol when the input
-   * runs out mid-way.
+   * The literals and matches of one block, as many as the input holds. Bits
+   * are pulled through a 32-bit accumulator that is topped up before every
+   * read, so nothing here indexes past the input; a symbol that needs bits the
+   * accumulator cannot supply is abandoned and the position rewound to where
+   * it began, since a symbol reads everything before it writes anything.
    */
-  #decodeSymbol(): Step {
-    const symbol = this.#decode(this.#literals);
+  #inflateBlock(): Step {
+    const input = this.#input;
+    const output = this.#output;
+    const literals = this.#literals;
+    const distances = this.#distances;
+    const inputLength = input.length;
+    let outputAt = this.#outputAt;
 
-    if (symbol < 256) {
-      this.#writeByte(symbol);
-      return "continue";
+    let at = this.#bitAt >> 3;
+    let bits = 0;
+    let held = 0;
+    if (at < inputLength) {
+      bits = input[at]! >> (this.#bitAt & 7);
+      held = 8 - (this.#bitAt & 7);
+      at += 1;
     }
 
-    if (symbol === 256) {
-      this.#state = this.#stateAfterBlock();
-      return "continue";
-    }
+    for (;;) {
+      while (held <= 24 && at < inputLength) {
+        bits |= input[at]! << held;
+        at += 1;
+        held += 8;
+      }
+      const symbolAt = at * 8 - held;
 
-    const lengthCode = symbol - 257;
-    if (lengthCode >= LENGTH_BASE.length) {
-      throw new InflateError("corrupt", "Invalid length symbol.");
-    }
-    const length = LENGTH_BASE[lengthCode]! + this.#bits(LENGTH_EXTRA[lengthCode]!);
+      let entry = decode(literals, bits, held);
+      if (entry < 0) {
+        this.#bitAt = symbolAt;
+        this.#outputAt = outputAt;
+        return "wait";
+      }
+      let used = entry & 15;
+      bits >>>= used;
+      held -= used;
+      const symbol = entry >> 4;
 
-    const distanceCode = this.#decode(this.#distances);
-    if (distanceCode >= DISTANCE_BASE.length) {
-      throw new InflateError("corrupt", "Invalid distance symbol.");
-    }
-    const distance = DISTANCE_BASE[distanceCode]! + this.#bits(DISTANCE_EXTRA[distanceCode]!);
+      if (symbol < 256) {
+        if (outputAt >= output.length) {
+          throw new InflateError("corrupt", "The inflated data overruns its size.");
+        }
+        output[outputAt] = symbol;
+        outputAt += 1;
+        continue;
+      }
 
-    if (distance > this.#outputAt) {
-      throw new InflateError("corrupt", "A match reaches before the output.");
-    }
-    if (this.#outputAt + length > this.#output.length) {
-      throw new InflateError("corrupt", "The inflated data overruns its size.");
-    }
+      if (symbol === 256) {
+        this.#bitAt = at * 8 - held;
+        this.#outputAt = outputAt;
+        this.#state = this.#stateAfterBlock();
+        return "continue";
+      }
 
-    // Byte at a time on purpose: a match may overlap itself, which is how
-    // deflate encodes runs.
-    let from = this.#outputAt - distance;
-    for (let i = 0; i < length; i += 1) {
-      this.#output[this.#outputAt] = this.#output[from]!;
-      this.#outputAt += 1;
-      from += 1;
-    }
+      const lengthCode = symbol - 257;
+      if (lengthCode >= LENGTH_BASE.length) {
+        throw new InflateError("corrupt", "Invalid length symbol.");
+      }
+      // A match's four fields total at most 48 bits, so one more top-up is
+      // enough for the rest of it when the accumulator was nearly empty.
+      while (held <= 24 && at < inputLength) {
+        bits |= input[at]! << held;
+        at += 1;
+        held += 8;
+      }
+      used = LENGTH_EXTRA[lengthCode]!;
+      if (used > held) {
+        this.#bitAt = symbolAt;
+        this.#outputAt = outputAt;
+        return "wait";
+      }
+      const length = LENGTH_BASE[lengthCode]! + (bits & ((1 << used) - 1));
+      bits >>>= used;
+      held -= used;
 
-    return "continue";
+      entry = decode(distances, bits, held);
+      if (entry < 0) {
+        this.#bitAt = symbolAt;
+        this.#outputAt = outputAt;
+        return "wait";
+      }
+      used = entry & 15;
+      bits >>>= used;
+      held -= used;
+      const distanceCode = entry >> 4;
+      if (distanceCode >= DISTANCE_BASE.length) {
+        throw new InflateError("corrupt", "Invalid distance symbol.");
+      }
+      while (held <= 24 && at < inputLength) {
+        bits |= input[at]! << held;
+        at += 1;
+        held += 8;
+      }
+      used = DISTANCE_EXTRA[distanceCode]!;
+      if (used > held) {
+        this.#bitAt = symbolAt;
+        this.#outputAt = outputAt;
+        return "wait";
+      }
+      const distance = DISTANCE_BASE[distanceCode]! + (bits & ((1 << used) - 1));
+      bits >>>= used;
+      held -= used;
+
+      if (distance > outputAt) {
+        throw new InflateError("corrupt", "A match reaches before the output.");
+      }
+      if (outputAt + length > output.length) {
+        throw new InflateError("corrupt", "The inflated data overruns its size.");
+      }
+
+      let from = outputAt - distance;
+      if (distance >= length && length >= BULK_COPY_BYTES) {
+        output.copyWithin(outputAt, from, from + length);
+        outputAt += length;
+        continue;
+      }
+
+      // Byte at a time on purpose: a match may overlap itself, which is how
+      // deflate encodes runs.
+      for (const end = outputAt + length; outputAt < end; outputAt += 1) {
+        output[outputAt] = output[from]!;
+        from += 1;
+      }
+    }
   }
 
   #readChecksum(): Step {
@@ -477,17 +641,24 @@ export class Inflater {
     this.#outputAt += bytes.length;
   }
 
-  #writeByte(byte: number): void {
-    if (this.#outputAt >= this.#output.length) {
-      throw new InflateError("corrupt", "The inflated data overruns its size.");
-    }
-
-    this.#output[this.#outputAt] = byte;
-    this.#outputAt += 1;
-  }
-
   #align(): void {
     this.#bitAt = (this.#bitAt + 7) & ~7;
+  }
+
+  /**
+   * The next 17 or more bits of input, least significant first, from the
+   * three bytes under the read position; bytes past the input read as zero.
+   */
+  #peek(): number {
+    const input = this.#input;
+    const at = this.#bitAt >> 3;
+    let bytes = input[at] ?? 0;
+    if (at + 2 < input.length) {
+      bytes |= (input[at + 1]! << 8) | (input[at + 2]! << 16);
+    } else if (at + 1 < input.length) {
+      bytes |= input[at + 1]! << 8;
+    }
+    return bytes >>> (this.#bitAt & 7);
   }
 
   #bits(count: number): number {
@@ -498,40 +669,19 @@ export class Inflater {
       throw NEED_INPUT;
     }
 
-    let value = 0;
-    let filled = 0;
-    let at = this.#bitAt;
-
-    while (filled < count) {
-      const used = at & 7;
-      const take = Math.min(8 - used, count - filled);
-      value |= ((this.#input[at >> 3]! >> used) & ((1 << take) - 1)) << filled;
-      filled += take;
-      at += take;
-    }
-
-    this.#bitAt = at;
-    return value >>> 0;
+    const value = this.#peek() & ((1 << count) - 1);
+    this.#bitAt += count;
+    return value;
   }
 
-  #decode(table: Huffman): number {
-    let code = 0;
-    let first = 0;
-    let index = 0;
-
-    for (let length = 1; length <= MAX_CODE_BITS; length += 1) {
-      code |= this.#bits(1);
-      const count = table.counts[length]!;
-
-      if (code - first < count) {
-        return table.symbols[index + (code - first)]!;
-      }
-
-      index += count;
-      first = (first + count) << 1;
-      code <<= 1;
+  #decode(huffman: Huffman): number {
+    const available = Math.min(this.#input.length * 8 - this.#bitAt, MAX_CODE_BITS);
+    const entry = decode(huffman, this.#peek(), available);
+    if (entry < 0) {
+      throw NEED_INPUT;
     }
 
-    throw new InflateError("corrupt", "An incomplete Huffman code was used.");
+    this.#bitAt += entry & 15;
+    return entry >> 4;
   }
 }
