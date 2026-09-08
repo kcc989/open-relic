@@ -160,6 +160,18 @@ export class ImportOperation {
     }
 
     for (;;) {
+      // Checked before the try, not only after a caught failure: a run that
+      // dies without throwing (a memory kill, a wall-clock limit) comes back
+      // through the alarm with its attempt already counted, and must not loop.
+      if (job.attempts >= MAX_IMPORT_ATTEMPTS) {
+        const terminal = terminalFailure(
+          "upstream-unavailable",
+          `The import did not complete in ${MAX_IMPORT_ATTEMPTS} attempts.`,
+        );
+        await this.#storage.writeCheckpoint({ kind: "failed", failure: terminal });
+        return this.#cleanup(job, terminal);
+      }
+
       job = { ...job, attempts: job.attempts + 1 };
       await this.#storage.writeJob(job);
 

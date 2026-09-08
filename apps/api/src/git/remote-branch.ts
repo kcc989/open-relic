@@ -97,16 +97,26 @@ const ipv4Octets = (hostname: string): readonly number[] | null => {
   return octets.some((octet) => octet > 255) ? null : octets;
 };
 
+/** Every IPv4 range IANA reserves from public routing, not only the private ones. */
 const publicIpv4 = (octets: readonly number[]): boolean => {
   const first = octets[0]!;
   const second = octets[1]!;
+  const third = octets[2]!;
   return (
     first !== 0 &&
     first !== 10 &&
+    !(first === 100 && second >= 64 && second <= 127) &&
     first !== 127 &&
     !(first === 169 && second === 254) &&
     !(first === 172 && second >= 16 && second <= 31) &&
-    !(first === 192 && second === 168)
+    !(first === 192 && second === 0 && third === 0) &&
+    !(first === 192 && second === 0 && third === 2) &&
+    !(first === 192 && second === 88 && third === 99) &&
+    !(first === 192 && second === 168) &&
+    !(first === 198 && (second === 18 || second === 19)) &&
+    !(first === 198 && second === 51 && third === 100) &&
+    !(first === 203 && second === 0 && third === 113) &&
+    first < 224
   );
 };
 
@@ -129,27 +139,45 @@ const ipv6Words = (hostname: string): readonly number[] | null => {
   ];
 };
 
+const embeddedIpv4 = (words: readonly number[]): readonly number[] => [
+  words[6]! >>> 8,
+  words[6]! & 0xff,
+  words[7]! >>> 8,
+  words[7]! & 0xff,
+];
+
 const publicIpv6 = (words: readonly number[]): boolean => {
-  const allZero = words.every((word) => word === 0);
-  const loopback = words.slice(0, 7).every((word) => word === 0) && words[7] === 1;
+  const leadingZeroWords = words.slice(0, 6).every((word) => word === 0);
+  const allZero = leadingZeroWords && words[6] === 0 && words[7] === 0;
+  const loopback = leadingZeroWords && words[6] === 0 && words[7] === 1;
   const uniqueLocal = (words[0]! & 0xfe00) === 0xfc00;
   const linkLocal = (words[0]! & 0xffc0) === 0xfe80;
-  const mappedIpv4 =
-    words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff
-      ? [words[6]! >>> 8, words[6]! & 0xff, words[7]! >>> 8, words[7]! & 0xff]
-      : null;
+  const siteLocal = (words[0]! & 0xffc0) === 0xfec0;
+  const multicast = (words[0]! & 0xff00) === 0xff00;
+  const documentation = words[0] === 0x2001 && words[1] === 0x0db8;
+  // The three encodings that carry an IPv4 address inside an IPv6 one:
+  // mapped (`::ffff:a.b.c.d`), the deprecated compatible form (`::a.b.c.d`),
+  // and NAT64's well-known prefix (`64:ff9b::a.b.c.d`).
+  const mappedIpv4 = words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff;
+  const compatibleIpv4 = leadingZeroWords && !allZero && !loopback;
+  const nat64 =
+    words[0] === 0x0064 && words[1] === 0xff9b && words.slice(2, 6).every((word) => word === 0);
+  const carriedIpv4 = mappedIpv4 || compatibleIpv4 || nat64 ? embeddedIpv4(words) : null;
 
   return (
     !allZero &&
     !loopback &&
     !uniqueLocal &&
     !linkLocal &&
-    (mappedIpv4 === null || publicIpv4(mappedIpv4))
+    !siteLocal &&
+    !multicast &&
+    !documentation &&
+    (carriedIpv4 === null || publicIpv4(carriedIpv4))
   );
 };
 
 const isPublicHost = (hostname: string): boolean => {
-  const normalized = hostname.toLowerCase();
+  const normalized = hostname.toLowerCase().replace(/\.$/, "");
   if (normalized === "localhost" || normalized.endsWith(".localhost")) return false;
   const ipv4 = ipv4Octets(normalized);
   if (ipv4 !== null) return publicIpv4(ipv4);
@@ -241,11 +269,19 @@ const requireResponse = (response: Response, contentType: string): ReadableStrea
 
 const lineText = (payload: Uint8Array): string => decoder.decode(payload).replace(/\n$/, "");
 
+/**
+ * More refs than any repository worth importing advertises, and the point at
+ * which an untrusted remote streaming refs forever is cut off rather than
+ * allowed to grow the map until the repository object is killed for memory.
+ */
+export const MAX_ADVERTISED_REFS = 100_000;
+
 const readAdvertisement = async (body: ReadableStream<Uint8Array>): Promise<Advertisement> => {
   const lines = new PktLineReader(body);
   const refs = new Map<string, string>();
   const capabilities = new Set<string>();
   const shallow: string[] = [];
+  let advertised = 0;
 
   try {
     const service = await lines.next();
@@ -279,6 +315,14 @@ const readAdvertisement = async (body: ReadableStream<Uint8Array>): Promise<Adve
         throw new RemoteBranchError(
           "invalid-advertisement",
           "The remote ended its upload-pack advertisement early.",
+        );
+      }
+
+      advertised += 1;
+      if (advertised > MAX_ADVERTISED_REFS) {
+        throw new RemoteBranchError(
+          "invalid-advertisement",
+          `The remote advertised more than ${MAX_ADVERTISED_REFS} refs.`,
         );
       }
 

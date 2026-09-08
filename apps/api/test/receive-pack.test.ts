@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { flushPkt, pktLine, PktLineReader } from "../src/git/pkt-line.ts";
 import {
+  MAX_RECEIVE_PACK_COMMANDS,
   REJECTIONS,
   ReceivePackError,
   accepted,
@@ -267,6 +268,23 @@ describe("what this server accepts", () => {
     expect(screen([{ oldOid: MAIN, name: "refs/heads/main" }])).toEqual([null]);
   });
 
+  test("refuses to delete the branch HEAD points at, as Git does by default", () => {
+    expect(
+      screenCommands(
+        [{ oldOid: MAIN, newOid: ZERO_OID, name: "refs/heads/main" }],
+        HELD,
+        "refs/heads/main",
+      ),
+    ).toEqual([REJECTIONS.deleteCurrent]);
+    expect(
+      screenCommands(
+        [{ oldOid: MAIN, newOid: ZERO_OID, name: "refs/heads/main" }],
+        HELD,
+        "refs/heads/other",
+      ),
+    ).toEqual([null]);
+  });
+
   test("refuses a stale delete", () => {
     expect(screen([{ oldOid: NEXT, name: "refs/heads/main" }])).toEqual([REJECTIONS.stale]);
   });
@@ -310,5 +328,21 @@ describe("what this server accepts", () => {
   test("lets a ref that is already where the push wants it through", () => {
     // Git's own receive-pack answers a no-op with `ok`.
     expect(screen([{ oldOid: MAIN, newOid: MAIN, name: "refs/heads/main" }])).toEqual([null]);
+  });
+});
+
+describe("how much a push may ask for", () => {
+  test("refuses a command list past the ceiling before reading a pack", async () => {
+    const commands = Array.from({ length: MAX_RECEIVE_PACK_COMMANDS + 1 }, (_, at) => ({
+      oldOid: ZERO_OID,
+      newOid: "1".repeat(40),
+      name: `refs/heads/b${at}`,
+    }));
+    const reader = new PktLineReader(streamOf(commandLines(commands, ["report-status"])));
+
+    await expect(readReceivePackRequest(reader)).rejects.toMatchObject({
+      name: "ReceivePackError",
+      message: expect.stringContaining(`${MAX_RECEIVE_PACK_COMMANDS}`),
+    });
   });
 });

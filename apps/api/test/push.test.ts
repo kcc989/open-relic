@@ -235,13 +235,16 @@ describe("a second push", () => {
   });
 
   test("deletes a ref", async () => {
+    const topic = "refs/heads/topic";
+    await push({ commands: [{ newOid: FIRST.oid, name: topic }], objects: FIRST_OBJECTS });
+
     const outcome = await push({
-      commands: [{ oldOid: FIRST.oid, newOid: ZERO_OID, name: MAIN }],
+      commands: [{ oldOid: FIRST.oid, newOid: ZERO_OID, name: topic }],
     });
 
-    expect(report(outcome).lines).toEqual(["unpack ok", `ok ${MAIN}`]);
+    expect(report(outcome).lines).toEqual(["unpack ok", `ok ${topic}`]);
     expect(outcome.accepted).toBe(true);
-    expect(await advertised()).toContain("capabilities^{}");
+    expect(await advertised()).not.toContain(topic);
   });
 
   test("accepts a thin pack whose ref-delta base arrived in the first push", async () => {
@@ -297,6 +300,33 @@ describe("a second push", () => {
   });
 });
 
+describe("a push that deletes", () => {
+  beforeEach(async () => {
+    await push({ commands: [{ newOid: FIRST.oid, name: MAIN }], objects: FIRST_OBJECTS });
+    await push({
+      commands: [{ newOid: ELSEWHERE.oid, name: "refs/heads/elsewhere" }],
+      objects: [ELSEWHERE],
+    });
+  });
+
+  test("refuses to delete the branch HEAD points at, so a clone can still check out", async () => {
+    const outcome = await push({ commands: [{ oldOid: FIRST.oid, name: MAIN }] });
+
+    expect(report(outcome).lines).toEqual(["unpack ok", `ng ${MAIN} ${REJECTIONS.deleteCurrent}`]);
+    expect(outcome.accepted).toBe(false);
+    expect(await advertised()).toContain(`${FIRST.oid} ${MAIN}`);
+  });
+
+  test("deletes any other branch", async () => {
+    const outcome = await push({
+      commands: [{ oldOid: ELSEWHERE.oid, name: "refs/heads/elsewhere" }],
+    });
+
+    expect(report(outcome).lines).toEqual(["unpack ok", "ok refs/heads/elsewhere"]);
+    expect(await advertised()).not.toContain("refs/heads/elsewhere");
+  });
+});
+
 describe("a push whose objects are not all there", () => {
   test("moves no refs, and says which object it wanted", async () => {
     // The pack carries the commit but not the tree it names.
@@ -319,6 +349,19 @@ describe("a push whose objects are not all there", () => {
     });
 
     expect(await store.readObject(FIRST.oid)).not.toBeNull();
+  });
+
+  test("rejects a tree naming a blob the push did not carry, so the ref stays fetchable", async () => {
+    // The pack parsed completely, and that proves nothing about this blob:
+    // the pack holds what the client chose to send.
+    const outcome = await push({
+      commands: [{ newOid: FIRST.oid, name: MAIN }],
+      objects: [FIRST, ROOT],
+    });
+
+    expect(report(outcome).lines).toEqual(["unpack ok", `ng ${MAIN} ${REJECTIONS.missingObjects}`]);
+    expect(report(outcome).progress.join("")).toContain(README.oid);
+    expect(await advertised()).toContain("capabilities^{}");
   });
 
   test("rejects a ref pointing at an object the push never mentioned", async () => {

@@ -124,18 +124,20 @@ describe("POST /git/:namespace/:repo.git/git-receive-pack", () => {
   test("deletes a ref through the Git protocol", async () => {
     // A push that Git can talk about is answered in Git's protocol; the
     // envelope is for requests that never reached a repository.
+    const topic = "refs/heads/topic";
     await createMain();
-    const response = await post(pushBody({ commands: [{ oldOid: FIRST.oid, name: MAIN }] }));
+    await post(pushBody({ commands: [{ newOid: FIRST.oid, name: topic }], objects: OBJECTS }));
+    const response = await post(pushBody({ commands: [{ oldOid: FIRST.oid, name: topic }] }));
 
     expect(response.status).toBe(200);
-    expect((await reportOf(response)).lines).toEqual(["unpack ok", `ok ${MAIN}`]);
+    expect((await reportOf(response)).lines).toEqual(["unpack ok", `ok ${topic}`]);
 
     const advertisement = await harness.app.request(
       new Request(ADVERTISE, {
         headers: { Authorization: `Bearer ${harness.repositoryToken}` },
       }),
     );
-    expect(await advertisement.text()).toContain("capabilities^{}");
+    expect(await advertisement.text()).not.toContain(topic);
   });
 
   test("refuses a read-only repository, which is what that flag is for", async () => {

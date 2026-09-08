@@ -13,6 +13,7 @@ import {
   sweepState,
   type SweepStateRow,
 } from "./db/repository-schema.ts";
+import type { Head } from "./head.ts";
 import { ObjectStore } from "./object-store.ts";
 
 /** One alarm turn stays bounded even when a repository contains millions of objects. */
@@ -85,9 +86,12 @@ type SweepStatements = ReturnType<typeof sweepStatements>;
 export class RepositorySweeper {
   readonly #db: SyncSqliteDatabase;
   readonly #objects: ObjectStore;
+  /** A detached HEAD names a commit no ref does, and it is reachable all the same. */
+  readonly #head: () => Head | null;
   #statements: SweepStatements | null = null;
 
-  constructor(db: SyncSqliteDatabase, objects: ObjectStore) {
+  constructor(db: SyncSqliteDatabase, objects: ObjectStore, head: () => Head | null = () => null) {
+    this.#head = head;
     this.#db = db;
     this.#objects = objects;
   }
@@ -148,6 +152,10 @@ export class RepositorySweeper {
 
   async #reset(refVersion: number, previous: SweepStateRow | null): Promise<SweepStateRow> {
     const roots = await this.#db.select({ oid: refs.objectId }).from(refs);
+    const head = this.#head();
+    if (head?.kind === "detached") {
+      roots.push({ oid: head.oid });
+    }
     const startedAt = previous?.startedAt ?? new Date().toISOString();
 
     await this.#db.transaction((tx) => {

@@ -166,19 +166,14 @@ describe("marking from refs", () => {
   });
 
   test("a tree naming a missing blob does not wedge reclamation", async () => {
+    // A push can no longer create this state, but a repository written before
+    // blobs were verified can still hold it, and a sweep must survive it.
     const missing = blob("named but deliberately absent");
     const root = tree([treeEntry("missing.txt", missing)]);
     const tip = commit({ tree: root });
 
-    const pushed = await store.receivePack(
-      streamOf(
-        pushBody({
-          commands: [{ newOid: tip.oid, name: MAIN }],
-          objects: [tip, root],
-        }),
-      ),
-    );
-    expect(pushed.accepted).toBe(true);
+    await write(tip, root);
+    await seedRefs(opened.db, { [MAIN]: tip.oid });
 
     const orphan = blob("still reclaimed despite the absent reachable blob");
     await write(orphan);

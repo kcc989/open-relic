@@ -6,12 +6,12 @@
  * naming an object that is not there is a repository no client can read and
  * that nothing after the fact can repair.
  *
- * **Blobs are skipped.** They are the expensive half of any real repository —
- * most of the objects and nearly all of the bytes — and a pack that parsed
- * completely already implies them: every entry was inflated, hashed, and
- * written. What the walk is really looking for is the shape a truncated or
- * hand-made pack gets wrong, which is a commit or a tree naming something that
- * was never sent.
+ * **Blobs are checked for existence only.** They are the expensive half of any
+ * real repository — most of the objects and nearly all of the bytes — but a
+ * pack that parsed completely does not imply them: it holds what the client
+ * chose to send, and a tree may name a blob that is in neither the pack nor
+ * the repository. A blob names nothing, so the walk never reads one; it asks
+ * whether the blob is there, batched through the link index where possible.
  */
 
 import { isObjectId, isObjectType, type ObjectType } from "./object.ts";
@@ -26,6 +26,8 @@ export { GITLINK_MODE, TREE_MODE } from "./tree-entry.ts";
 /** Where the walk reads from; {@link ObjectStore} is the one that matters. */
 export interface ObjectSource {
   readonly read: (oid: string) => Promise<PackBase | null>;
+  /** Existence without the bytes, for blobs; `read` is the fallback. */
+  readonly has?: (oid: string) => Promise<boolean>;
   readonly readConnectivity?: (
     tip: string,
     verified: ReadonlySet<string>,
@@ -146,32 +148,9 @@ const treeLinks = (bytes: Uint8Array, includeBlobs: boolean): readonly ObjectLin
 };
 
 /**
- * The objects this one names that we insist on holding. Not everything it
- * references — see the note at the top of this file about blobs.
- */
-export const linksToVerify = (
-  type: ObjectType,
-  bytes: Uint8Array,
-  shallowCommit = false,
-): readonly ObjectLink[] => {
-  switch (type) {
-    case "commit": {
-      const links = commitLinks(bytes);
-      return shallowCommit ? links.slice(0, 1) : links;
-    }
-    case "tree":
-      return treeLinks(bytes, false);
-    case "tag":
-      return tagLinks(bytes);
-    case "blob":
-      return [];
-  }
-};
-
-/**
- * Every object this one makes reachable. Unlike the connectivity walk, a
- * sweep must follow blobs too: skipping their existence is safe while proving
- * a complete pack, but skipping their mark would collect live file contents.
+ * Every object this one makes reachable, which is also every object a push
+ * has to have delivered: Git's own connectivity check walks blobs, and a ref
+ * whose tree names a missing blob is a ref no clone can fetch.
  */
 export const linksToReach = (
   type: ObjectType,
@@ -191,6 +170,9 @@ export const linksToReach = (
       return [];
   }
 };
+
+/** The objects this one names that a push must have delivered. */
+export const linksToVerify = linksToReach;
 
 /** Every object named by this one, for walking the closure a fetch must send. */
 export const linksToFetch = linksToReach;
@@ -239,22 +221,44 @@ export const findMissingObject = async (
     for (const oid of indexedClosure) visited.add(oid);
     return null;
   }
-  const pending: string[] = [tip];
+  const pending: { readonly oid: string; readonly type: ObjectType | null }[] = [
+    { oid: tip, type: null },
+  ];
   const traversed = new Set<string>();
 
   while (pending.length > 0) {
-    const frontier = [
-      ...new Set(pending.splice(Math.max(0, pending.length - 98)).reverse()),
-    ].filter((oid) => !visited.has(oid) && !verified.has(oid) && !traversed.has(oid));
-    const indexed = await source.readIndexedObjects?.(frontier);
-    for (const oid of frontier) {
+    const batch = pending.splice(Math.max(0, pending.length - 98)).reverse();
+    const frontier: typeof batch = [];
+    const queued = new Set<string>();
+    for (const link of batch) {
+      if (
+        visited.has(link.oid) ||
+        verified.has(link.oid) ||
+        traversed.has(link.oid) ||
+        queued.has(link.oid)
+      ) {
+        continue;
+      }
+      queued.add(link.oid);
+      frontier.push(link);
+    }
+    const indexed = await source.readIndexedObjects?.(frontier.map((link) => link.oid));
+    for (const { oid, type } of frontier) {
       traversed.add(oid);
       const cached = indexed?.get(oid);
       if (cached !== undefined) {
         for (const link of cached.links) {
-          if (cached.type === "tree" && link.type === "blob") continue;
           if (cached.type === "commit" && shallow.has(oid) && link.type === "commit") continue;
-          pending.push(link.oid);
+          pending.push(link);
+        }
+        continue;
+      }
+
+      // A blob names nothing, so whether it exists is the whole question and
+      // its bytes are never worth reading.
+      if (type === "blob" && source.has !== undefined) {
+        if (!(await source.has(oid))) {
+          return oid;
         }
         continue;
       }
@@ -265,7 +269,7 @@ export const findMissingObject = async (
       }
       try {
         for (const link of linksToVerify(object.type, object.bytes, shallow.has(oid))) {
-          pending.push(link.oid);
+          pending.push(link);
         }
       } catch (error) {
         if (error instanceof ObjectParseError) {

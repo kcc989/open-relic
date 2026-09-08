@@ -29,6 +29,13 @@ const HAVE_PATTERN = /^have ([0-9a-f]{40})\n?$/;
 const SHALLOW_PATTERN = /^shallow ([0-9a-f]{40})\n?$/;
 const DEEPEN_PATTERN = /^deepen ([0-9]+)\n?$/;
 
+/**
+ * A ceiling on the want, have, and shallow lines one request may carry. Git
+ * sends haves in rounds of at most a few hundred; this is far above any real
+ * request and bounds what a client can make the repository object hold.
+ */
+export const MAX_UPLOAD_PACK_LINES = 100_000;
+
 const MULTI_ACK_DETAILED = "multi_ack_detailed";
 const SIDE_BAND_64K = "side-band-64k";
 const THIN_PACK = "thin-pack";
@@ -173,10 +180,19 @@ const readRequest = async (body: ReadableStream<Uint8Array>): Promise<UploadPack
   let depth: number | undefined;
   let inHaves = false;
   let inShallow = false;
+  let count = 0;
 
   try {
     for (;;) {
       const line = await lines.next();
+      if (line.kind === "line") {
+        count += 1;
+        if (count > MAX_UPLOAD_PACK_LINES) {
+          throw new UploadPackError(
+            `An upload-pack request may carry at most ${MAX_UPLOAD_PACK_LINES} lines.`,
+          );
+        }
+      }
 
       if (line.kind === "end") {
         return { wants, shallow, depth, haves, capabilities, done: false };

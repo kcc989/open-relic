@@ -160,6 +160,40 @@ describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
     ).toBe("PACK");
   });
 
+  test("refuses a protocol-v2 want that is not a ref tip during negotiation", async () => {
+    const request = concat(
+      pktLine("command=fetch\n"),
+      delimiterPkt(),
+      pktLine(`want ${README.oid}\n`),
+      pktLine(`have ${FIRST.oid}\n`),
+      flushPkt(),
+    );
+    const response = await postV2(request);
+    const payloads = packetPayloads(new Uint8Array(await response.arrayBuffer()));
+
+    // Refused now, not after the client has spent its whole history on haves.
+    expect(new TextDecoder().decode(payloads[0])).toBe("acknowledgments\n");
+    expect(new TextDecoder().decode(payloads[1])).toBe(
+      `ERR upload-pack: not our ref ${README.oid}\n`,
+    );
+  });
+
+  test("refuses a protocol-v2 want that is not an object id", async () => {
+    const request = concat(
+      pktLine("command=fetch\n"),
+      delimiterPkt(),
+      pktLine(`want ${"z".repeat(60)}\n`),
+      pktLine("done\n"),
+      flushPkt(),
+    );
+    const response = await postV2(request);
+
+    await expect(response.arrayBuffer()).rejects.toMatchObject({
+      name: "UploadPackError",
+      message: expect.stringContaining("is not an object id"),
+    });
+  });
+
   test("sends repository shallow boundaries on a normal protocol-v2 fetch", async () => {
     const [durableObjectId] = harness.objects.mintedIds;
     await harness.objects.seedShallowCommits(durableObjectId!, [FIRST.oid]);

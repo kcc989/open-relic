@@ -191,14 +191,32 @@ describe("a real Git client over Smart HTTP", () => {
 
   test("deletes a ref", async () => {
     await commit("Anvil firmware\n", "First");
+    await gitSucceeds(
+      "push",
+      "--porcelain",
+      remote,
+      "HEAD:refs/heads/main",
+      "HEAD:refs/heads/topic",
+    );
+
+    const deleted = await runGit("push", "--porcelain", remote, ":refs/heads/topic");
+    const refs = await gitSucceeds("ls-remote", remote, "refs/heads/topic");
+
+    expect(deleted.exitCode).toBe(0);
+    expect(deleted.stdout).toContain("[deleted]");
+    expect(refs).toBe("");
+  });
+
+  test("refuses to delete the branch HEAD points at, as a stock Git server does", async () => {
+    await commit("Anvil firmware\n", "First");
     await gitSucceeds("push", "--porcelain", remote, "HEAD:refs/heads/main");
 
     const deleted = await runGit("push", "--porcelain", remote, ":refs/heads/main");
     const refs = await gitSucceeds("ls-remote", remote, "refs/heads/main");
 
-    expect(deleted.exitCode).toBe(0);
-    expect(deleted.stdout).toContain("[deleted]");
-    expect(refs).toBe("");
+    expect(deleted.exitCode).not.toBe(0);
+    expect(deleted.stdout).toContain("deletion of the current branch prohibited");
+    expect(refs).toContain("refs/heads/main");
   });
 
   test("accepts an atomic multi-ref push with push options", async () => {

@@ -41,8 +41,9 @@ const walk = (tip: string, source: ObjectSource) =>
   });
 
 const README = blob("Anvil firmware\n");
+const MAIN_C = blob("int");
 const DOCS = tree([treeEntry("README.md", README)]);
-const ROOT = tree([treeEntry("docs", DOCS), treeEntry("main.c", blob("int"))]);
+const ROOT = tree([treeEntry("docs", DOCS), treeEntry("main.c", MAIN_C)]);
 const FIRST = commit({ tree: ROOT, message: "First" });
 const SECOND = commit({ tree: ROOT, parents: [FIRST], message: "Second" });
 
@@ -60,16 +61,17 @@ describe("what an object names", () => {
     expect(commitParents(merge.bytes)).toEqual([FIRST.oid, SECOND.oid]);
   });
 
-  test("a tree names its subtrees and not its blobs", () => {
-    // Blobs are the expensive half — most of the objects and nearly all of the
-    // bytes — and a pack that parsed completely already implies them.
-    expect(linksToVerify("tree", ROOT.bytes)).toEqual([{ oid: DOCS.oid, type: "tree" }]);
+  test("a tree names its subtrees and its blobs, since a push must deliver both", () => {
+    expect(linksToVerify("tree", ROOT.bytes)).toEqual([
+      { oid: DOCS.oid, type: "tree" },
+      { oid: MAIN_C.oid, type: "blob" },
+    ]);
   });
 
   test("a reachability walk names both trees and blobs", () => {
     expect(linksToReach("tree", ROOT.bytes)).toEqual([
       { oid: DOCS.oid, type: "tree" },
-      { oid: blob("int").oid, type: "blob" },
+      { oid: MAIN_C.oid, type: "blob" },
     ]);
   });
 
@@ -80,6 +82,7 @@ describe("what an object names", () => {
     ]);
 
     expect(linksToVerify("tree", withSubmodule.bytes)).toEqual([{ oid: DOCS.oid, type: "tree" }]);
+    expect(linksToReach("tree", withSubmodule.bytes)).toEqual([{ oid: DOCS.oid, type: "tree" }]);
   });
 
   test("a tag names what it points at, with the type it declares", () => {
@@ -118,7 +121,7 @@ describe("what an object names", () => {
 
 describe("the connectivity walk", () => {
   test("finds nothing missing when the whole history is there", async () => {
-    const source = holding(SECOND, FIRST, ROOT, DOCS);
+    const source = holding(SECOND, FIRST, ROOT, DOCS, README, MAIN_C);
 
     expect(await walk(SECOND.oid, source)).toBeNull();
   });
@@ -132,20 +135,36 @@ describe("the connectivity walk", () => {
   });
 
   test("names a missing subtree several levels down", async () => {
-    expect(await walk(FIRST.oid, holding(FIRST, ROOT))).toBe(DOCS.oid);
+    expect(await walk(FIRST.oid, holding(FIRST, ROOT, MAIN_C))).toBe(DOCS.oid);
   });
 
-  test("does not go looking for blobs", async () => {
-    // Everything but the blobs is here, and that is enough: the pack carried
-    // them or it would not have parsed.
-    expect(await walk(FIRST.oid, holding(FIRST, ROOT, DOCS))).toBeNull();
+  test("names a missing blob, since a tree naming one nobody sent is unfetchable", async () => {
+    expect(await walk(FIRST.oid, holding(FIRST, ROOT, DOCS, MAIN_C))).toBe(README.oid);
+  });
+
+  test("asks whether a blob exists rather than reading it", async () => {
+    const reads: string[] = [];
+    const present = holding(FIRST, ROOT, DOCS, README, MAIN_C);
+    const source: ObjectSource = {
+      read: async (oid) => {
+        reads.push(oid);
+        return present.read(oid);
+      },
+      has: async (oid) => (await present.read(oid)) !== null,
+    };
+
+    expect(await walk(FIRST.oid, source)).toBeNull();
+    expect(reads).not.toContain(README.oid);
+    expect(reads).toContain(ROOT.oid);
   });
 
   test("walks through an annotated tag to what it tags", async () => {
     const annotated = tag({ target: FIRST, name: "v1" });
 
-    expect(await walk(annotated.oid, holding(annotated, FIRST, ROOT))).toBe(DOCS.oid);
-    expect(await walk(annotated.oid, holding(annotated, FIRST, ROOT, DOCS))).toBeNull();
+    expect(await walk(annotated.oid, holding(annotated, FIRST, ROOT, MAIN_C))).toBe(DOCS.oid);
+    expect(
+      await walk(annotated.oid, holding(annotated, FIRST, ROOT, DOCS, README, MAIN_C)),
+    ).toBeNull();
   });
 
   test("an object we cannot parse is as good as missing", async () => {
@@ -178,7 +197,7 @@ describe("the connectivity walk", () => {
 
   test("walks shared history once across the commands of one push", async () => {
     const reads: string[] = [];
-    const store = holding(SECOND, FIRST, ROOT, DOCS);
+    const store = holding(SECOND, FIRST, ROOT, DOCS, README, MAIN_C);
     const source: ObjectSource = {
       read: async (oid) => {
         reads.push(oid);

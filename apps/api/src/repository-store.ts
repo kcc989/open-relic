@@ -72,6 +72,8 @@ import { GITLINK_MODE, TREE_MODE, treeEntries, type ParsedTreeEntry } from "./tr
 
 const TREE_NAME_DECODER = new TextDecoder();
 
+const SHALLOW_INSERT_BATCH_SIZE = 50;
+
 interface ReceivePackTimings {
   readonly pack: PackTimings;
   requestedAt: number;
@@ -380,7 +382,7 @@ export const withRepositoryStore = <TBase extends RepositoryStorageConstructor>(
       this.#kv = this[REPOSITORY_KV];
       this.#objects = new ObjectStore(this.#db, this.#kv);
       this.#repacker = new RepositoryRepacker(this.#db, this.#objects);
-      this.#sweeper = new RepositorySweeper(this.#db, this.#objects);
+      this.#sweeper = new RepositorySweeper(this.#db, this.#objects, () => this.#head());
     }
 
     /**
@@ -504,9 +506,12 @@ export const withRepositoryStore = <TBase extends RepositoryStorageConstructor>(
           tx.insert(refs)
             .values({ name: `${BRANCH_REF_PREFIX}${fetched.branch}`, objectId: fetched.oid })
             .run();
-          if (importedShallow.length > 0) {
+          // SQLite binds at most 100 values per statement in a Durable Object.
+          for (let at = 0; at < importedShallow.length; at += SHALLOW_INSERT_BATCH_SIZE) {
             tx.insert(shallowCommits)
-              .values(importedShallow.map((oid) => ({ oid })))
+              .values(
+                importedShallow.slice(at, at + SHALLOW_INSERT_BATCH_SIZE).map((oid) => ({ oid })),
+              )
               .run();
           }
           this.#kv.put(HEAD_KEY, formatHead(symbolicHead(fetched.branch)));
@@ -795,7 +800,9 @@ export const withRepositoryStore = <TBase extends RepositoryStorageConstructor>(
       const rejections = new Map<number, RefStatus>();
       const pending: PendingUpdate[] = [];
 
-      screenCommands(commands, current).forEach((reason, at) => {
+      const head = this.#head();
+      const currentBranch = head?.kind === "symbolic" ? head.ref : null;
+      screenCommands(commands, current, currentBranch).forEach((reason, at) => {
         const command = commands[at]!;
         if (reason === null) {
           pending.push({ at, command });

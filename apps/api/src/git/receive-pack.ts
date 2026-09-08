@@ -142,6 +142,13 @@ export const readReceivePackRequest = async (lines: PktLineReader): Promise<Rece
       );
     }
 
+    if (commands.length >= MAX_RECEIVE_PACK_COMMANDS) {
+      throw new ReceivePackError(
+        `A push may carry at most ${MAX_RECEIVE_PACK_COMMANDS} ref update commands.`,
+        capabilities,
+      );
+    }
+
     const parsed = parseCommandLine(line.payload, capabilities);
     if (parsed.capabilities !== null && commands.length === 0) {
       capabilities = parsed.capabilities;
@@ -162,6 +169,13 @@ export const readReceivePackRequest = async (lines: PktLineReader): Promise<Rece
  * Open Relic has no receive hooks yet, so honoring them means consuming and
  * validating the section without changing repository behavior.
  */
+/**
+ * More ref update commands than any real push carries, and a ceiling on what a
+ * client can make the repository object hold in memory. A mirror push of a
+ * very large repository stays well under it.
+ */
+export const MAX_RECEIVE_PACK_COMMANDS = 100_000;
+
 export const readPushOptions = async (
   lines: PktLineReader,
   capabilities: readonly string[],
@@ -302,6 +316,7 @@ export const REJECTIONS = {
   missingObjects: "missing necessary objects",
   atomic: "atomic push failure",
   unpacker: "n/a (unpacker error)",
+  deleteCurrent: "deletion of the current branch prohibited",
 } as const;
 
 /**
@@ -326,10 +341,15 @@ const isRefName = (name: string): boolean =>
  * client refuses a non-fast-forward before sending it; `--force` sends the
  * same command shape, and the repository accepts it when its old value is
  * still current.
+ *
+ * `currentBranch` is the ref a symbolic HEAD names. Deleting it is refused the
+ * way Git's `receive.denyDeleteCurrent` refuses it: a HEAD naming a ref that
+ * no longer exists is a repository no clone can check out.
  */
 export const screenCommands = (
   commands: readonly ReceivePackCommand[],
   refs: ReadonlyMap<string, string>,
+  currentBranch: string | null = null,
 ): readonly (string | null)[] => {
   const seen = new Set<string>();
 
@@ -351,7 +371,10 @@ export const screenCommands = (
       if (held === undefined) {
         return REJECTIONS.vanished;
       }
-      return held === command.oldOid ? null : REJECTIONS.stale;
+      if (held !== command.oldOid) {
+        return REJECTIONS.stale;
+      }
+      return command.name === currentBranch ? REJECTIONS.deleteCurrent : null;
     }
 
     if (isCreate(command)) {

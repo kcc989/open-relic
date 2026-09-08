@@ -111,6 +111,42 @@ describe("ImportOperation", () => {
     expect(storage.checkpoint).toBeUndefined();
   });
 
+  test("gives up when a crashed run already spent every attempt", async () => {
+    // A run that dies without throwing leaves its attempt counted in storage;
+    // the alarm brings it back here, and it must not fetch again forever.
+    const storage = new MemoryImportStorage();
+    let imports = 0;
+    let destroyed = false;
+    const operation = new ImportOperation({
+      durableObjectId: "object-old",
+      storage,
+      repository: {
+        resetImport: async () => {},
+        importBranch: async () => {
+          imports += 1;
+          return imported;
+        },
+        destroy: async () => {
+          destroyed = true;
+        },
+      },
+      registry: {
+        finishImport: async () => true,
+        getRepository: unusedPointer,
+        deleteImportIfOwned: unusedDelete,
+      },
+    });
+    storage.job = { ...job, attempts: 3 };
+
+    expect(await operation.run()).toMatchObject({
+      completed: false,
+      retrying: false,
+      code: "upstream-unavailable",
+    });
+    expect(imports).toBe(0);
+    expect(destroyed).toBe(true);
+  });
+
   test("cannot publish or delete a replacement owned by another object", async () => {
     const storage = new MemoryImportStorage();
     const guardedIds: string[] = [];

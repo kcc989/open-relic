@@ -827,7 +827,7 @@ export class ObjectStore implements PackSink {
     verified: ReadonlySet<string>,
     shallow: ReadonlySet<string>,
   ): Promise<readonly string[] | null> {
-    return this.readObjectClosure(new Set([tip]), verified, shallow, false);
+    return this.readObjectClosure(new Set([tip]), verified, shallow);
   }
 
   /** Read one already-planned representation using only synchronous KV lookups. */

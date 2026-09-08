@@ -70,12 +70,52 @@ interface Huffman {
   readonly symbols: Uint16Array;
 }
 
-const buildHuffman = (lengths: Uint8Array): Huffman => {
+/**
+ * Which alphabet a table decodes. zlib is strict about the shape of a code set
+ * and this decoder has to be exactly as strict: a pack entry's zlib stream is
+ * cached and served back to every fetching client, whose own zlib would reject
+ * a stream that was accepted here.
+ */
+type Alphabet = "code-lengths" | "literals" | "distances";
+
+const ALPHABET_NAMES = {
+  "code-lengths": "code lengths",
+  literals: "literal/lengths",
+  distances: "distances",
+} as const satisfies Record<Alphabet, string>;
+
+/**
+ * RFC 1951 §3.2.2 requires a complete prefix code, and zlib enforces it with
+ * one exception: a distance code set may be a single code of length one, or
+ * empty, since a block that never copies has no distances to name. Anything
+ * over-subscribed is refused everywhere.
+ */
+const checkCodeSet = (counts: Uint16Array, alphabet: Alphabet): void => {
+  let max = MAX_CODE_BITS;
+  while (max > 0 && counts[max] === 0) {
+    max -= 1;
+  }
+
+  let left = 1;
+  for (let length = 1; length <= MAX_CODE_BITS; length += 1) {
+    left = left * 2 - counts[length]!;
+    if (left < 0) {
+      throw new InflateError("corrupt", `Over-subscribed ${ALPHABET_NAMES[alphabet]} set.`);
+    }
+  }
+
+  if (left > 0 && max > 0 && (alphabet !== "distances" || max !== 1)) {
+    throw new InflateError("corrupt", `Incomplete ${ALPHABET_NAMES[alphabet]} set.`);
+  }
+};
+
+const buildHuffman = (lengths: Uint8Array, alphabet: Alphabet): Huffman => {
   const counts = new Uint16Array(MAX_CODE_BITS + 1);
   for (const length of lengths) {
     counts[length] = counts[length]! + 1;
   }
   counts[0] = 0;
+  checkCodeSet(counts, alphabet);
 
   const offsets = new Uint16Array(MAX_CODE_BITS + 2);
   for (let length = 1; length <= MAX_CODE_BITS; length += 1) {
@@ -103,8 +143,11 @@ const fixedLiteralLengths = (): Uint8Array => {
   return lengths;
 };
 
-const FIXED_LITERALS = buildHuffman(fixedLiteralLengths());
-const FIXED_DISTANCES = buildHuffman(new Uint8Array(30).fill(5));
+const FIXED_LITERALS = buildHuffman(fixedLiteralLengths(), "literals");
+// Thirty-two codes, not thirty: RFC 1951 §3.2.6 defines the fixed distance
+// code over 32 symbols so that it is complete, and codes 30 and 31 are refused
+// when decoded.
+const FIXED_DISTANCES = buildHuffman(new Uint8Array(32).fill(5), "distances");
 
 const ADLER_MODULUS = 65_521;
 
@@ -280,6 +323,9 @@ export class Inflater {
     if ((cmf & 0x0f) !== 8) {
       throw new InflateError("corrupt", "Not a deflate stream.");
     }
+    if (cmf >> 4 > 7) {
+      throw new InflateError("corrupt", "The zlib window size is invalid.");
+    }
     if ((flg & 0x20) !== 0) {
       throw new InflateError("corrupt", "A preset dictionary is not supported.");
     }
@@ -347,11 +393,17 @@ export class Inflater {
     const distanceCount = this.#bits(5) + 1;
     const codeLengthCount = this.#bits(4) + 4;
 
+    // The five bits can name 288 literal and 32 distance codes; deflate defines
+    // 286 and 30, and zlib refuses the rest before reading a code length.
+    if (literalCount > 286 || distanceCount > 30) {
+      throw new InflateError("corrupt", "Too many length or distance symbols.");
+    }
+
     const codeLengths = new Uint8Array(CODE_LENGTH_ORDER.length);
     for (let i = 0; i < codeLengthCount; i += 1) {
       codeLengths[CODE_LENGTH_ORDER[i]!] = this.#bits(3);
     }
-    const codeLengthCodes = buildHuffman(codeLengths);
+    const codeLengthCodes = buildHuffman(codeLengths, "code-lengths");
 
     const lengths = new Uint8Array(literalCount + distanceCount);
     let at = 0;
@@ -387,8 +439,12 @@ export class Inflater {
       at += repeat;
     }
 
-    this.#literals = buildHuffman(lengths.subarray(0, literalCount));
-    this.#distances = buildHuffman(lengths.subarray(literalCount));
+    if (lengths[256] === 0) {
+      throw new InflateError("corrupt", "A block has no end-of-block code.");
+    }
+
+    this.#literals = buildHuffman(lengths.subarray(0, literalCount), "literals");
+    this.#distances = buildHuffman(lengths.subarray(literalCount), "distances");
     this.#state = "compressed";
     return "continue";
   }

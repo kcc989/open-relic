@@ -294,6 +294,15 @@ describe("fetching one public HTTPS branch", () => {
       "https://[::1]/project.git",
       "https://[fc00::1]/project.git",
       "https://[fe80::1]/project.git",
+      "https://100.64.0.1/project.git",
+      "https://198.18.0.1/project.git",
+      "https://224.0.0.1/project.git",
+      "https://255.255.255.255/project.git",
+      "https://[::7f00:1]/project.git",
+      "https://[64:ff9b::a00:1]/project.git",
+      "https://[fec0::1]/project.git",
+      "https://[ff02::1]/project.git",
+      "https://localhost./project.git",
     ];
     let requests = 0;
     const fetchRemote: RemoteFetch = async () => {

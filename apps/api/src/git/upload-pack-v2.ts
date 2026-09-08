@@ -11,7 +11,9 @@ import {
   PktLineError,
   PktLineReader,
 } from "./pkt-line.ts";
+import { isObjectId } from "../object.ts";
 import {
+  MAX_UPLOAD_PACK_LINES,
   UploadPackError,
   type UploadPackObjectSource,
   uploadPackResultStream,
@@ -66,6 +68,11 @@ const readCommand = async (body: ReadableStream<Uint8Array>): Promise<CommandReq
       }
       if (line.kind !== "line") {
         throw new UploadPackError(`The protocol-v2 ${command} request ended early.`);
+      }
+      if (arguments_.length >= MAX_UPLOAD_PACK_LINES) {
+        throw new UploadPackError(
+          `A protocol-v2 request may carry at most ${MAX_UPLOAD_PACK_LINES} arguments.`,
+        );
       }
       arguments_.push(lineText(line.payload));
     }
@@ -166,10 +173,21 @@ const parseFetch = (arguments_: readonly string[]): FetchRequest => {
   let thinPack = false;
   let ofsDelta = false;
 
+  // Validated here rather than left to the v1 planner: these values are spliced
+  // into pkt-lines, and a payload longer than a pkt-line allows would throw
+  // rather than be refused.
+  const oidArgument = (argument: string, keyword: string): string => {
+    const oid = argument.slice(keyword.length);
+    if (!isObjectId(oid)) {
+      throw new UploadPackError(`"${oid}" is not an object id.`);
+    }
+    return oid;
+  };
+
   for (const argument of arguments_) {
-    if (argument.startsWith("want ")) wants.push(argument.slice("want ".length));
-    else if (argument.startsWith("have ")) haves.push(argument.slice("have ".length));
-    else if (argument.startsWith("shallow ")) shallow.push(argument.slice("shallow ".length));
+    if (argument.startsWith("want ")) wants.push(oidArgument(argument, "want "));
+    else if (argument.startsWith("have ")) haves.push(oidArgument(argument, "have "));
+    else if (argument.startsWith("shallow ")) shallow.push(oidArgument(argument, "shallow "));
     else if (argument.startsWith("deepen ")) {
       const parsed = Number(argument.slice("deepen ".length));
       if (!Number.isSafeInteger(parsed) || parsed <= 0 || depth !== undefined) {
@@ -255,6 +273,12 @@ async function* fetchResult(
         if (line.kind === "end") break;
         if (line.kind !== "line") continue;
         const text = lineText(line.payload);
+        // A refusal has to reach the client now, not after it has spent its
+        // whole history on haves and finally sent `done`.
+        if (text.startsWith("ERR ")) {
+          yield pktLine(line.payload);
+          return;
+        }
         const match = /^ACK ([0-9a-f]{40})(?: common)?$/.exec(text);
         if (match !== null) acknowledgements.push(pktLine(`ACK ${match[1]}\n`));
       }
