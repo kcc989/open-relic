@@ -26,6 +26,19 @@ const object = (type: ObjectType, bytes: Uint8Array): GitObject => ({
 
 export const blob = (contents: string): GitObject => object("blob", encoder.encode(contents));
 
+/**
+ * Random contents deflate to no less than their own size, so a test can say
+ * how many wire frames a blob of this size spans.
+ */
+export const incompressibleBlob = (size: number): GitObject => {
+  const contents = new Uint8Array(size);
+  // Web Crypto fills at most 65,536 bytes per call.
+  for (let at = 0; at < size; at += 65_536) {
+    crypto.getRandomValues(contents.subarray(at, at + 65_536));
+  }
+  return object("blob", contents);
+};
+
 export const FILE_MODE = "100644";
 
 /** Re-exported so the writer here and the parser under test cannot disagree. */

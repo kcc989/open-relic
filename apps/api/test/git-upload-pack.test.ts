@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { deflateSync } from "node:zlib";
 
-import { delimiterPkt, flushPkt, pktLine } from "../src/git/pkt-line.ts";
+import { PKT_LINE_MAX_BYTES, delimiterPkt, flushPkt, pktLine } from "../src/git/pkt-line.ts";
 import { uploadPackResultStream } from "../src/git/upload-pack.ts";
 import {
   RepositoryStorageExhaustedError,
@@ -9,7 +9,7 @@ import {
 } from "../src/object-store.ts";
 import { readPack, type PackBase, type PackObject } from "../src/pack.ts";
 import { createGitTestApp, type TestApp } from "./support/app.ts";
-import { blob, commit, tag, tree, treeEntry } from "./support/git-objects.ts";
+import { blob, commit, incompressibleBlob, tag, tree, treeEntry } from "./support/git-objects.ts";
 import { buildDelta, buildPack, concat, insertInstruction, streamOf } from "./support/pack.ts";
 import { pushBody } from "./support/receive-pack.ts";
 
@@ -239,14 +239,20 @@ describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
   });
 
   test("starts the response before reading pack entries and then reads them one at a time", async () => {
+    // Each blob spans several frames, so the frame the client holds and the
+    // one the stream fills behind it both fall inside one entry.
+    const first = incompressibleBlob(4 * PKT_LINE_MAX_BYTES);
+    const second = incompressibleBlob(4 * PKT_LINE_MAX_BYTES);
+    const root = tree([treeEntry("a.bin", first), treeEntry("b.bin", second)]);
+    const tip = commit({ tree: root, message: "One at a time" });
     const objects = new Map(
-      [FIRST, ROOT, README].map((object) => [
+      [tip, root, first, second].map((object) => [
         object.oid,
         { type: object.type, bytes: object.bytes },
       ]),
     );
     const reads = new Map<string, number>();
-    const request = concat(pktLine(`want ${FIRST.oid}\n`), flushPkt(), pktLine("done\n"));
+    const request = concat(pktLine(`want ${tip.oid}\n`), flushPkt(), pktLine("done\n"));
     const response = uploadPackResultStream(
       streamOf(request),
       {
@@ -258,7 +264,7 @@ describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
         readDeltaBase: async () => null,
         readDelta: async () => null,
       },
-      new Set([FIRST.oid]),
+      new Set([tip.oid]),
     );
     const reader = response.getReader();
 
@@ -266,28 +272,36 @@ describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
     expect(new TextDecoder().decode((await reader.read()).value)).toBe("0008NAK\n");
     expect(reads).toEqual(
       new Map([
-        [FIRST.oid, 1],
-        [ROOT.oid, 1],
+        [tip.oid, 1],
+        [root.oid, 1],
       ]),
     );
 
     const header = (await reader.read()).value!;
     expect(new TextDecoder().decode(header.subarray(0, 4))).toBe("PACK");
+    const [leading, trailing] = reads.has(first.oid) ? [first, second] : [second, first];
     expect(reads).toEqual(
       new Map([
-        [FIRST.oid, 1],
-        [ROOT.oid, 1],
+        [tip.oid, 2],
+        [root.oid, 2],
+        [leading.oid, 1],
       ]),
     );
 
     await reader.read();
+    expect(reads.has(trailing.oid)).toBe(false);
+
+    while (!(await reader.read()).done) {
+      /* Drain, so the second blob is read for its entry and nothing else is. */
+    }
     expect(reads).toEqual(
       new Map([
-        [FIRST.oid, 2],
-        [ROOT.oid, 1],
+        [tip.oid, 2],
+        [root.oid, 2],
+        [first.oid, 1],
+        [second.oid, 1],
       ]),
     );
-    await reader.cancel();
   });
 
   test("batches delta planning and emits cached full entries without rereading object bytes", async () => {

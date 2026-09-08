@@ -4,7 +4,7 @@ import { deflateSync } from "node:zlib";
 
 import { findMissingObject } from "../src/connectivity.ts";
 import { objects as objectRows } from "../src/db/repository-schema.ts";
-import { flushPkt, pktLine } from "../src/git/pkt-line.ts";
+import { PKT_LINE_MAX_BYTES, flushPkt, pktLine } from "../src/git/pkt-line.ts";
 import { PACK_PREFETCH_BYTES, uploadPackResultStream } from "../src/git/upload-pack.ts";
 import { ObjectStore, type PackRepresentationMetadata } from "../src/object-store.ts";
 import {
@@ -14,7 +14,7 @@ import {
   type PackObject,
 } from "../src/pack.ts";
 import { createTestRepositoryStorage } from "./support/database.ts";
-import { blob, commit, tree, treeEntry } from "./support/git-objects.ts";
+import { blob, commit, incompressibleBlob, tree, treeEntry } from "./support/git-objects.ts";
 import { buildDelta, buildPack, concat, insertInstruction, streamOf } from "./support/pack.ts";
 
 const handles: Array<() => void> = [];
@@ -211,7 +211,9 @@ for (const [size, initialReads] of [
   [PACK_PREFETCH_BYTES + 1, 1],
 ] as const) {
   test(`prefetch reserves active and queued entries of ${size} bytes`, async () => {
-    const leaves = [blob("first"), blob("second"), blob("third")];
+    // Each entry spans several frames, so the frame the client holds and the
+    // one the stream fills behind it both fall inside the first entry.
+    const leaves = Array.from({ length: 3 }, () => incompressibleBlob(4 * PKT_LINE_MAX_BYTES));
     const compressed = new Map(
       leaves.map((leaf) => [leaf.oid, new Uint8Array(deflateSync(leaf.bytes))]),
     );
@@ -262,8 +264,7 @@ for (const [size, initialReads] of [
     );
     const reader = response.getReader();
     await reader.read(); // ACK/NAK
-    await reader.read(); // pack header
-    await reader.read(); // first entry header
+    await reader.read(); // pack header and the opening of the first entry
     expect(reads).toEqual(leaves.slice(0, initialReads).map((leaf) => [leaf.oid]));
     while (!(await reader.read()).done) {
       /* Drain and check that every entry eventually arrives. */
