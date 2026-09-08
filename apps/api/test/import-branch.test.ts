@@ -5,7 +5,7 @@ import type { SyncKv } from "../src/db/kv.ts";
 import { HEAD_KEY } from "../src/head.ts";
 import { MAX_OBJECT_BYTES } from "../src/object.ts";
 import { ObjectStore, RepositoryStorageExhaustedError } from "../src/object-store.ts";
-import { PackError, readPack } from "../src/pack.ts";
+import { PACK_WRITE_BATCH_COUNT, PackError, readPack } from "../src/pack.ts";
 import { RemoteBranchError, RepositoryStore, type RemoteFetch } from "../src/repository-store.ts";
 import { blob, commit, tree, treeEntry } from "./support/git-objects.ts";
 import { buildPack, concat, streamOf } from "./support/pack.ts";
@@ -554,7 +554,11 @@ describe("fetching one public HTTPS branch", () => {
     const snapshot = tree([]);
     const selected = commit({ tree: snapshot });
     const pack = buildPack(
-      [snapshot, selected].map((object) => ({
+      [
+        snapshot,
+        ...Array.from({ length: PACK_WRITE_BATCH_COUNT - 1 }, (_, i) => blob(`orphan ${i}`)),
+        selected,
+      ].map((object) => ({
         kind: "object" as const,
         type: object.type,
         bytes: object.bytes,

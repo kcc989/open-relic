@@ -14,6 +14,8 @@
  * what makes those thin packs work without retaining prior packs in memory.
  */
 
+import { inflateSync } from "node:zlib";
+
 import { DeltaError, applyDelta } from "./delta.ts";
 import { InflateError, Inflater } from "./inflate.ts";
 import { MAX_OBJECT_BYTES, hashObject, type ObjectType } from "./object.ts";
@@ -74,6 +76,51 @@ export interface PackBase {
 export interface PackSink {
   readonly read: (oid: string) => Promise<PackBase | null>;
   readonly write: (object: PackObject, timings?: PackTimings) => Promise<void>;
+  readonly writeBatch?: (objects: readonly PackObject[], timings?: PackTimings) => Promise<void>;
+}
+
+export const PACK_WRITE_BATCH_BYTES = 4 * 1_024 * 1_024;
+export const PACK_WRITE_BATCH_COUNT = 128;
+
+/** Pending bases remain readable until their bounded batch reaches storage. */
+class PackWrites implements PackSink {
+  readonly #sink: PackSink;
+  readonly #timings: PackTimings;
+  readonly #pending = new Map<string, PackObject>();
+  #bytes = 0;
+
+  constructor(sink: PackSink, timings: PackTimings) {
+    this.#sink = sink;
+    this.#timings = timings;
+  }
+
+  async read(oid: string): Promise<PackBase | null> {
+    return this.#pending.get(oid) ?? this.#sink.read(oid);
+  }
+
+  async write(object: PackObject): Promise<void> {
+    if (this.#sink.writeBatch === undefined) {
+      await this.#sink.write(object, this.#timings);
+      return;
+    }
+    if (this.#pending.has(object.oid)) return;
+    const bytes =
+      object.bytes.length + (object.delta?.bytes.length ?? 0) + (object.compressed?.length ?? 0);
+    if (this.#bytes + bytes > PACK_WRITE_BATCH_BYTES) await this.flush();
+    this.#pending.set(object.oid, object);
+    this.#bytes += bytes;
+    if (this.#pending.size >= PACK_WRITE_BATCH_COUNT || this.#bytes >= PACK_WRITE_BATCH_BYTES) {
+      await this.flush();
+    }
+  }
+
+  async flush(): Promise<void> {
+    if (this.#pending.size === 0) return;
+    const batch = [...this.#pending.values()];
+    this.#pending.clear();
+    this.#bytes = 0;
+    await this.#sink.writeBatch!(batch, this.#timings);
+  }
 }
 
 export interface PackSummary {
@@ -99,6 +146,7 @@ export interface PackTimings {
   objects: number;
   deltas: number;
   recentBaseHits: number;
+  nativeInflates: number;
 }
 
 export const createPackTimings = (): PackTimings => ({
@@ -119,6 +167,7 @@ export const createPackTimings = (): PackTimings => ({
   objects: 0,
   deltas: 0,
   recentBaseHits: 0,
+  nativeInflates: 0,
 });
 
 const PACK_SIGNATURE = "PACK";
@@ -241,6 +290,11 @@ class PackStream {
       return;
     }
 
+    if (this.#buffer.length === 0) {
+      this.#buffer = bytes;
+      this.#position -= bytes.length;
+      return;
+    }
     const restored = new Uint8Array(bytes.length + this.#buffer.length);
     restored.set(bytes, 0);
     restored.set(this.#buffer, bytes.length);
@@ -381,6 +435,33 @@ interface InflatedEntry {
   readonly compressed: Uint8Array;
 }
 
+interface NativeInflation {
+  readonly buffer: Uint8Array;
+  readonly engine: { readonly bytesWritten: number };
+}
+
+/** Try once on buffered entries; split streams keep the resumable decoder. */
+const inflateBuffered = (chunk: Uint8Array, size: number): NativeInflation | null => {
+  // Small entries cost less to decode than to create a native engine. Require
+  // ample buffered input: speculative native calls on split streams regressed
+  // workerd. Bound the output too, since incomplete streams fall back to JS.
+  if (size < 1_024 || size > PACK_WRITE_BATCH_BYTES || chunk.length < size + 64) return null;
+  try {
+    // SAFETY: node:zlib returns { buffer, engine } with info:true. Node's type
+    // declarations omit that overload; the Uint8Array alternative is checked.
+    const result = inflateSync(chunk, { info: true, maxOutputLength: size }) as
+      | Uint8Array
+      | NativeInflation;
+    if (result instanceof Uint8Array) return null;
+    if (result.buffer.length !== size || result.engine.bytesWritten > chunk.length) return null;
+    return result;
+  } catch {
+    // The resumable decoder distinguishes truncation, corruption, and size
+    // errors. Retrying it also preserves the parser's existing error contract.
+    return null;
+  }
+};
+
 const compressedPrefix = (parts: readonly Uint8Array[], length: number): Uint8Array => {
   const bytes = new Uint8Array(length);
   let at = 0;
@@ -403,13 +484,24 @@ const inflateEntry = async (
   size: number,
   timings: PackTimings,
 ): Promise<InflatedEntry> => {
-  const inflater = new Inflater(size);
+  let inflater: Inflater | undefined;
   const compressedParts: Uint8Array[] = [];
   let compressedLength = 0;
   const started = performance.now();
   const ingressBefore = timings.bodyIngressMs;
 
   try {
+    const first = await stream.takeBuffered();
+    const native = inflateBuffered(first, size);
+    if (native !== null) {
+      timings.nativeInflates += 1;
+      stream.unread(first.subarray(native.engine.bytesWritten));
+      return { bytes: native.buffer, compressed: first.slice(0, native.engine.bytesWritten) };
+    }
+    inflater = new Inflater(size);
+    compressedParts.push(first);
+    compressedLength += first.length;
+    inflater.push(first);
     while (!inflater.done) {
       const chunk = await stream.takeBuffered();
       compressedParts.push(chunk);
@@ -463,10 +555,13 @@ export const readPack = async (
   // where each entry began. One entry per object, not per byte.
   const oidByOffset = new Map<number, string>();
   const recentBases = new RecentPackBases();
+  const writes = new PackWrites(sink, timings);
 
   for (let index = 0; index < objectCount; index += 1) {
     const offset = stream.position;
     const { kind, size } = await readEntryHeader(stream);
+    // Large entries need the parser's working set without a pending batch too.
+    if (size >= PACK_WRITE_BATCH_BYTES) await writes.flush();
 
     if (kind === OFS_DELTA) {
       const baseOffset = offset - (await readBackOffset(stream));
@@ -479,13 +574,13 @@ export const readPack = async (
         );
       }
 
-      oidByOffset.set(offset, await resolve(stream, sink, recentBases, timings, size, baseOid));
+      oidByOffset.set(offset, await resolve(stream, writes, recentBases, timings, size, baseOid));
       continue;
     }
 
     if (kind === REF_DELTA) {
       const baseOid = toHex(await stream.take(OID_BYTES));
-      oidByOffset.set(offset, await resolve(stream, sink, recentBases, timings, size, baseOid));
+      oidByOffset.set(offset, await resolve(stream, writes, recentBases, timings, size, baseOid));
       continue;
     }
 
@@ -499,16 +594,22 @@ export const readPack = async (
     const oid = hashObject(type, entry.bytes);
     timings.hashMs += performance.now() - hashStarted;
     const writeStarted = performance.now();
-    await sink.write(
-      { oid, type, bytes: entry.bytes, delta: null, compressed: entry.compressed },
-      timings,
-    );
+    await writes.write({
+      oid,
+      type,
+      bytes: entry.bytes,
+      delta: null,
+      compressed: entry.compressed,
+    });
     timings.storageWriteMs += performance.now() - writeStarted;
     timings.objects += 1;
     recentBases.remember(oid, { type, bytes: entry.bytes });
     oidByOffset.set(offset, oid);
   }
 
+  const flushStarted = performance.now();
+  await writes.flush();
+  timings.storageWriteMs += performance.now() - flushStarted;
   const trailer = await stream.take(TRAILER_BYTES);
 
   if (!(await stream.atEnd())) {

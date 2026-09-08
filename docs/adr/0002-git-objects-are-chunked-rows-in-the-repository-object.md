@@ -20,12 +20,13 @@ hop, and because it forecloses the property below.
 
 ## Consequences
 
-**Storage is the random-access structure.** Because every resolved object is
-written the moment it is complete, a delta resolves by reading its base back out
-of storage rather than by holding the pack in memory. Peak residency is one
-object plus one base plus one chunk, independent of pack size — which is what
-makes a streaming single-pass parser possible inside a 128 MB Durable Object.
-This is the reason for the decision, not a side effect of it.
+**Storage is the random-access structure.** A delta reads its base from a bounded
+pending batch, the recent-base cache, or storage. The parser publishes batches
+of at most 128 objects or 4 MiB of retained payloads. An object above the byte
+budget is published alone. A large entry flushes pending writes before inflation.
+The parser retains these bounded caches alongside the current entry, base,
+result, and input chunk. Its working set remains independent of pack size.
+This preserves streaming parsing while reducing SQLite transaction overhead.
 
 **Objects are written before the push is accepted, and orphans are kept.** A push
 that fails halfway leaves objects no ref points at. They are invisible — a ref is
@@ -45,7 +46,8 @@ retained-delta chunk has been written. Storage exhaustion reports a repository-
 storage failure and removes that pending representation in one storage
 transaction. If cleanup itself is interrupted, the hidden row remains so a
 retry or Sweep can finish it. Objects completed earlier in the same failed Pack
-remain ordinary Orphans for the Sweep to reclaim.
+remain ordinary Orphans for the Sweep to reclaim. A failed batch rolls back as
+a unit; completed batches and previously stored Objects remain intact.
 
 Resolved Objects are stored inflated so reads and delta-base lookups do not pay
 an inflate. They remain the authority, while derived zlib Pack representations

@@ -12,6 +12,7 @@
     "drizzle.repository.config.ts",
     "oxfmt.config.ts",
     "oxlint.config.ts",
+    "scripts/**/*.ts",
     "apps/*/src/**/*.ts",
     "apps/*/test/**/*.ts",
     "apps/*/types/**/*.d.ts",

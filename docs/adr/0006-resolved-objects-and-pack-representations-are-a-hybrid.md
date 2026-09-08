@@ -28,9 +28,9 @@ required to serve a fetch.
 
 Object ingestion pays compression once when publishing an Object, and a bounded
 alarm-driven Repack backfills older Objects and selects useful shallow Deltas.
-An Object resolved from a Delta defers both compressed representations to that
-alarm: ingest already holds the Delta instructions, base, and result, so adding
-another maximum-sized buffer there would break the parser's memory bound.
+Pack ingestion retains the incoming compressed representation. An Object
+resolved from a Delta defers its full compressed representation to that alarm:
+ingest already holds the Delta instructions, base, and result.
 Before loading a Repack base and target together, maintenance estimates the raw
 objects, candidate Delta, and compressed Delta against a 96 MiB working-set
 budget; it reads only the cached full-entry size and skips candidates over that
@@ -40,3 +40,9 @@ Fork copies retained Delta metadata and bytes when the base belongs to the same
 snapshot. Sweep's completed mark set remains as the current reachability index,
 and parsed object edges let Upload-pack traverse ids without repeatedly loading
 commit and tree contents.
+
+Upload-pack limits active and queued representation reads to 16 MiB in total.
+A representation above that budget runs alone. The reservation remains active
+until its window finishes emitting. Indexed connectivity uses one SQLite graph
+walk, with object reads as a fallback for missing indexes. Incremental fetches
+subtract client-reachable objects as well as stopping at common commit tips.

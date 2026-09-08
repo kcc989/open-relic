@@ -680,6 +680,7 @@ export class ObjectStore implements PackSink {
     roots: ReadonlySet<string>,
     stopAt: ReadonlySet<string> = new Set(),
     shallow: ReadonlySet<string> = new Set(),
+    includeBlobs = true,
   ): Promise<readonly string[] | null> {
     if (roots.size === 0) {
       return [];
@@ -719,6 +720,7 @@ export class ObjectStore implements PackSink {
             from closure_stops
             where closure_stops.oid = ${objectLinks.targetOid}
           )
+            and (${includeBlobs ? 1 : 0} = 1 or ${objects.type} <> 'tree' or ${objectLinks.targetType} <> 'blob')
             and (
               ${objectLinks.targetType} <> 'commit'
               or not exists (
@@ -743,6 +745,15 @@ export class ObjectStore implements PackSink {
       return null;
     }
     return rows.map(({ oid }) => oid);
+  }
+
+  /** Validate indexed connectivity in one query; old or broken indexes fall back. */
+  async readConnectivity(
+    tip: string,
+    verified: ReadonlySet<string>,
+    shallow: ReadonlySet<string>,
+  ): Promise<readonly string[] | null> {
+    return this.readObjectClosure(new Set([tip]), verified, shallow, false);
   }
 
   /** Read one already-planned representation using only synchronous KV lookups. */

@@ -529,7 +529,7 @@ describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
     expect(new Set(received)).toEqual(new Set([tip.oid, root.oid, shared.oid]));
   });
 
-  test("stops at common haves without enumerating the client's known closure", async () => {
+  test("uses indexed candidate subtraction without reading the client's known object bytes", async () => {
     const objects = new Map(
       [FIRST, ROOT, README, SECOND, SECOND_ROOT, REVISED].map((object) => [
         object.oid,
@@ -555,6 +555,8 @@ describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
           },
           readDeltaBase: async () => null,
           readDelta: async () => null,
+          readReachableObjects: async (_roots, candidates) =>
+            new Set([FIRST.oid, ROOT.oid, README.oid].filter((oid) => candidates.has(oid))),
         },
         new Set([SECOND.oid]),
       ),

@@ -371,6 +371,7 @@ const REF_DELTA = 7;
 const PACK_REPRESENTATION_READ_BYTES = 8 * 1024 * 1024;
 const PACK_REPRESENTATION_READ_KEYS = 96;
 const PACK_REPRESENTATION_READ_AHEAD = 4;
+export const PACK_PREFETCH_BYTES = 16 * 1024 * 1024;
 
 const entryHeader = (kind: number, size: number): Uint8Array => {
   const bytes: number[] = [];
@@ -408,6 +409,7 @@ interface PackReadWindow {
   readonly start: number;
   readonly end: number;
   readonly requests: readonly CachedPackEntryRequest[];
+  readonly bytes: number;
 }
 
 /**
@@ -544,7 +546,7 @@ const packReadWindows = (
     }
 
     const boundedEnd = Math.max(end, start + 1);
-    windows.push({ start, end: boundedEnd, requests });
+    windows.push({ start, end: boundedEnd, requests, bytes: compressedBytes });
     start = boundedEnd;
   }
 
@@ -596,12 +598,22 @@ async function* packBytes(
       ? Promise.resolve(new Map())
       : timedStorageRead(timings, () => source.readCachedPackEntries!(window.requests));
   const prefetchedWindows = new Map<number, Promise<ReadonlyMap<string, CachedPackEntry>>>();
+  let reservedBytes = 0;
+  let activeBytes = 0;
   const fillReadAhead = (): void => {
     while (
       nextReadWindow < readWindows.length &&
       nextReadWindow < readWindowAt + PACK_REPRESENTATION_READ_AHEAD
     ) {
-      prefetchedWindows.set(nextReadWindow, readWindow(readWindows[nextReadWindow]!));
+      const window = readWindows[nextReadWindow]!;
+      // An oversized entry runs alone. Its bytes remain reserved while emitted.
+      if (reservedBytes > 0 && reservedBytes + window.bytes > PACK_PREFETCH_BYTES) break;
+      reservedBytes += window.bytes;
+      const reading = readWindow(window);
+      // Cancellation can abandon a pending read. The consumer still observes
+      // its error when it reaches this window, without an unhandled rejection.
+      void reading.catch(() => {});
+      prefetchedWindows.set(nextReadWindow, reading);
       nextReadWindow += 1;
     }
   };
@@ -612,7 +624,12 @@ async function* packBytes(
   for (let index = 0; index < order.oids.length; index += 1) {
     const currentWindow = readWindows[readWindowAt];
     if (currentWindow !== undefined && index === currentWindow.start) {
+      prefetched.clear();
+      reservedBytes -= activeBytes;
+      activeBytes = 0;
+      fillReadAhead();
       prefetched = new Map(await prefetchedWindows.get(readWindowAt)!);
+      activeBytes = currentWindow.bytes;
       prefetchedWindows.delete(readWindowAt);
       readWindowAt += 1;
       fillReadAhead();
@@ -916,12 +933,20 @@ async function* uploadPackResult(
     stopAt,
     depthPlan?.shallow ?? shallow,
   );
-  const missing = wanted.objects.filter((oid) => !client.held.has(oid));
+  // A common commit also owns its trees and blobs. Stopping at the commit
+  // alone still sends unchanged objects reached through the new snapshot.
+  const heldCandidates =
+    commonHaves.size === 0 || wanted.objects.length === 0
+      ? new Set<string>()
+      : source.readReachableObjects !== undefined
+        ? await source.readReachableObjects(commonHaves, wanted.held, clientBoundaries)
+        : (await reachable([...commonHaves], source, false, new Set(), clientBoundaries)).held;
+  const missing = wanted.objects.filter((oid) => !client.held.has(oid) && !heldCandidates.has(oid));
   timings.negotiationMs += performance.now() - negotiationStarted;
   const prefix = pktLine(acknowledgement === undefined ? "NAK\n" : `ACK ${acknowledgement}\n`);
   const pack = packBytes(
     missing,
-    client.held,
+    new Set([...client.held, ...heldCandidates]),
     request.capabilities.includes(THIN_PACK),
     source,
     clientBoundaries,

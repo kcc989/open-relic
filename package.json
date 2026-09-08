@@ -8,6 +8,8 @@
   ],
   "type": "module",
   "scripts": {
+    "benchmark:engine": "bun scripts/benchmark-git-engine.ts",
+    "benchmark:workerd": "bun scripts/benchmark-workerd.ts",
     "build:package": "bun run --cwd packages/alchemy build",
     "check": "bun run typecheck && bun run lint && bun run fmt:check && bun test && bun run build:package",
     "db:generate": "drizzle-kit generate && drizzle-kit generate --config drizzle.repository.config.ts",
