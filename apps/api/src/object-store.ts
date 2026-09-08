@@ -218,44 +218,68 @@ const selectCachedPackEntry = ({
  * drivers do not agree on what a boolean parameter is.
  */
 const objectStatements = (db: SyncSqliteDatabase) => ({
-  insertObject: db
+  /**
+   * Claim every row of a batch at once. The rows travel as a JSON array of
+   * tuples, so one statement binds one value however many objects there are,
+   * and the returned ids are the ones this batch owns. The `where true` is
+   * SQLite's required disambiguation of `insert … select … on conflict`.
+   */
+  insertObjects: db
     .insert(objects)
-    .values({
-      oid: sql.placeholder("oid"),
-      type: sql.placeholder("type"),
-      size: sql.placeholder("size"),
-      chunkCount: sql.placeholder("chunkCount"),
-      compressedSize: sql.placeholder("compressedSize"),
-      compressedChunkCount: sql.placeholder("compressedChunkCount"),
-      linksIndexed: sql.placeholder("linksIndexed"),
-      complete: false,
-    })
+    .select(
+      db
+        .select({
+          oid: sql`json_extract(value, '$[0]')`.as("oid"),
+          type: sql`json_extract(value, '$[1]')`.as("type"),
+          size: sql`json_extract(value, '$[2]')`.as("size"),
+          chunkCount: sql`json_extract(value, '$[3]')`.as("chunk_count"),
+          compressedSize: sql`json_extract(value, '$[4]')`.as("compressed_size"),
+          compressedChunkCount: sql`json_extract(value, '$[5]')`.as("compressed_chunk_count"),
+          linksIndexed: sql`json_extract(value, '$[6]')`.as("links_indexed"),
+          complete: sql`0`.as("complete"),
+        })
+        .from(sql`json_each(${sql.placeholder("objects")})`)
+        .where(sql`true`),
+    )
     .onConflictDoNothing()
     .returning({ oid: objects.oid })
     .prepare(),
-  completeObject: db
+  completeObjects: db
     .update(objects)
     .set({ complete: true })
-    .where(and(eq(objects.oid, sql.placeholder("oid")), eq(objects.complete, false)))
+    .where(
+      and(
+        eq(objects.complete, false),
+        sql`${objects.oid} in (select value from json_each(${sql.placeholder("oids")}))`,
+      ),
+    )
     .prepare(),
-  insertDelta: db
+  insertDeltas: db
     .insert(objectDeltas)
-    .values({
-      oid: sql.placeholder("oid"),
-      baseOid: sql.placeholder("baseOid"),
-      size: sql.placeholder("size"),
-      chunkCount: sql.placeholder("chunkCount"),
-      compressedSize: sql.placeholder("compressedSize"),
-      compressedChunkCount: sql.placeholder("compressedChunkCount"),
-    })
+    .select(
+      db
+        .select({
+          oid: sql`json_extract(value, '$[0]')`.as("oid"),
+          baseOid: sql`json_extract(value, '$[1]')`.as("base_oid"),
+          size: sql`json_extract(value, '$[2]')`.as("size"),
+          chunkCount: sql`json_extract(value, '$[3]')`.as("chunk_count"),
+          compressedSize: sql`json_extract(value, '$[4]')`.as("compressed_size"),
+          compressedChunkCount: sql`json_extract(value, '$[5]')`.as("compressed_chunk_count"),
+        })
+        .from(sql`json_each(${sql.placeholder("deltas")})`),
+    )
     .prepare(),
-  insertLink: db
+  insertLinks: db
     .insert(objectLinks)
-    .values({
-      sourceOid: sql.placeholder("sourceOid"),
-      targetOid: sql.placeholder("targetOid"),
-      targetType: sql.placeholder("targetType"),
-    })
+    .select(
+      db
+        .select({
+          sourceOid: sql`json_extract(value, '$[0]')`.as("source_oid"),
+          targetOid: sql`json_extract(value, '$[1]')`.as("target_oid"),
+          targetType: sql`json_extract(value, '$[2]')`.as("target_type"),
+        })
+        .from(sql`json_each(${sql.placeholder("links")})`),
+    )
     .prepare(),
   describeObject: db
     .select({
@@ -412,20 +436,37 @@ export class ObjectStore implements PackSink {
         try {
           await this.#db.transaction(() => {
             const statements = this.#sql;
+            const claimed = new Set(
+              statements.insertObjects
+                .all({
+                  objects: JSON.stringify(
+                    prepared.map((write) => [
+                      write.object.oid,
+                      write.object.type,
+                      write.object.bytes.length,
+                      write.objectChunks,
+                      write.fullCompressed?.length ?? null,
+                      write.fullCompressed === null ? null : write.compressedObjectChunks,
+                      write.linksIndexed ? 1 : 0,
+                    ]),
+                  ),
+                })
+                .map(({ oid }) => oid),
+            );
+            const completed = [...claimed];
+            const deltas: (readonly [
+              string,
+              string,
+              number,
+              number,
+              number | null,
+              number | null,
+            ])[] = [];
+            const links: (readonly [string, string, ObjectLink["type"]])[] = [];
             for (const write of prepared) {
               const { object } = write;
-              const inserted = statements.insertObject.all({
-                oid: object.oid,
-                type: object.type,
-                size: object.bytes.length,
-                chunkCount: write.objectChunks,
-                compressedSize: write.fullCompressed?.length ?? null,
-                compressedChunkCount:
-                  write.fullCompressed === null ? null : write.compressedObjectChunks,
-                linksIndexed: write.linksIndexed ? 1 : 0,
-              });
-
-              if (inserted.length === 0) {
+              // A claim is spent by the first write that carries its id.
+              if (!claimed.delete(object.oid)) {
                 continue;
               }
               write.claimed = true;
@@ -444,15 +485,14 @@ export class ObjectStore implements PackSink {
               }
 
               if (object.delta !== null) {
-                statements.insertDelta.run({
-                  oid: object.oid,
-                  baseOid: object.delta.baseOid,
-                  size: object.delta.bytes.length,
-                  chunkCount: write.deltaChunks,
-                  compressedSize: write.deltaCompressed?.length ?? null,
-                  compressedChunkCount:
-                    write.deltaCompressed === null ? null : write.compressedDeltaChunks,
-                });
+                deltas.push([
+                  object.oid,
+                  object.delta.baseOid,
+                  object.delta.bytes.length,
+                  write.deltaChunks,
+                  write.deltaCompressed?.length ?? null,
+                  write.deltaCompressed === null ? null : write.compressedDeltaChunks,
+                ]);
 
                 this.#writeChunks(DELTA_PREFIX, object.oid, object.delta.bytes);
                 if (write.deltaCompressed !== null) {
@@ -461,15 +501,16 @@ export class ObjectStore implements PackSink {
               }
 
               for (const link of write.links) {
-                statements.insertLink.run({
-                  sourceOid: object.oid,
-                  targetOid: link.oid,
-                  targetType: link.type,
-                });
+                links.push([object.oid, link.oid, link.type]);
               }
-
-              statements.completeObject.run({ oid: object.oid });
             }
+            if (deltas.length > 0) {
+              statements.insertDeltas.run({ deltas: JSON.stringify(deltas) });
+            }
+            if (links.length > 0) {
+              statements.insertLinks.run({ links: JSON.stringify(links) });
+            }
+            statements.completeObjects.run({ oids: JSON.stringify(completed) });
           });
         } finally {
           if (timings !== undefined) {

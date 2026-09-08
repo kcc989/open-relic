@@ -5,15 +5,70 @@ import {
   PKT_LINE_MAX_PAYLOAD_BYTES,
   PktLineError,
   PktLineReader,
+  REST_READ_BYTES,
   flushPkt,
   pktLine,
   pktLineStream,
 } from "../src/git/pkt-line.ts";
-import { streamOf } from "./support/pack.ts";
+import { concat, streamOf } from "./support/pack.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const text = (bytes: Uint8Array): string => decoder.decode(bytes);
+
+/**
+ * A byte stream as workerd hands one over: a default reader is answered
+ * `chunkSize` bytes at a time, and a BYOB reader's `readAtLeast` — which the
+ * standard lacks and Bun's byte streams do not offer — fills the view to the
+ * minimum asked for, or to the end. `requested` records each minimum.
+ */
+const readAtLeastStream = (
+  bytes: Uint8Array,
+  chunkSize: number,
+  requested: number[],
+  onCancel: (reason: string) => void = () => {},
+): ReadableStream<Uint8Array> => {
+  // One position for both readers: the BYOB reader carries on from wherever
+  // the default reader left the stream. No read-ahead, so that position is
+  // exactly what the default reader consumed.
+  let at = 0;
+  const stream = new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        if (at >= bytes.length) {
+          controller.close();
+          return;
+        }
+        const chunk = bytes.slice(at, at + chunkSize);
+        at += chunk.length;
+        controller.enqueue(chunk);
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  const read = async (view: Uint8Array, minBytes: number) => {
+    const count = Math.min(Math.max(minBytes, view.length), bytes.length - at, view.length);
+    const value = view.subarray(0, count);
+    value.set(bytes.subarray(at, at + count));
+    at += count;
+    return { done: count === 0, value };
+  };
+  const byob = {
+    read: (view: Uint8Array) => read(view, 1),
+    readAtLeast: (minBytes: number, view: Uint8Array) => {
+      requested.push(minBytes);
+      return read(view, minBytes);
+    },
+    releaseLock: () => {},
+    cancel: async (reason: string) => onCancel(reason),
+    closed: Promise.resolve(undefined),
+  };
+  const getReader = stream.getReader.bind(stream);
+  // SAFETY: the test stands in for a runtime whose BYOB reader has this shape.
+  stream.getReader = ((options?: { readonly mode?: "byob" }) =>
+    options?.mode === "byob" ? byob : getReader()) as typeof stream.getReader;
+  return stream;
+};
 
 describe("pktLine", () => {
   const cases: ReadonlyArray<readonly [string, string, string]> = [
@@ -152,6 +207,62 @@ describe("PktLineReader", () => {
     await lines.next();
 
     expect(await new Response(lines.rest()).text()).toBe("PACK and then some");
+  });
+
+  test("reads the rest of a byte stream in pieces of the size it asks for", async () => {
+    // A request body on workerd is a byte stream whose BYOB reader can be asked
+    // for a minimum, which is how the pack behind the commands arrives in large
+    // pieces rather than the 4 KiB a default reader is answered with. The
+    // commands took a default reader first, so the hand-over is also a change
+    // of reader mid-stream — the byte stream here answers both.
+    const body = concat(
+      encoder.encode("0006a\n0000"),
+      encoder.encode("P".repeat(REST_READ_BYTES * 2 + 7)),
+    );
+    const requested: number[] = [];
+    const lines = new PktLineReader(readAtLeastStream(body, 4, requested));
+
+    await lines.next();
+    await lines.next();
+
+    const pieces: number[] = [];
+    for await (const piece of lines.rest()) {
+      pieces.push(piece.length);
+    }
+
+    // Every read asked for a full piece, including the one that found the end.
+    expect(requested).toEqual(Array(4).fill(REST_READ_BYTES));
+    // The default reader's over-read leads, then every piece is full but the last.
+    expect(pieces).toEqual([2, REST_READ_BYTES, REST_READ_BYTES, 5]);
+  });
+
+  test("keeps a default reader for a stream that is not a byte stream", async () => {
+    // Bun's request bodies, and any adapter handing over a plain stream: a BYOB
+    // reader is refused with a TypeError, and the rest is read as it comes.
+    const lines = reader("0006a\n0000PACK and then some", { chunkSize: 4 });
+
+    await lines.next();
+    await lines.next();
+
+    const pieces: number[] = [];
+    for await (const piece of lines.rest()) {
+      pieces.push(piece.length);
+    }
+
+    expect(pieces).toEqual([2, 4, 4, 4, 4]);
+  });
+
+  test("cancels the rest through the BYOB reader it took", async () => {
+    const cancelled: string[] = [];
+    const stream = readAtLeastStream(encoder.encode("0000PACK"), 4, [], (reason) => {
+      cancelled.push(reason);
+    });
+    const lines = new PktLineReader(stream);
+    await lines.next();
+
+    await lines.rest().cancel("gone");
+
+    expect(cancelled).toEqual(["gone"]);
   });
 
   test("hands over an empty stream when nothing followed", async () => {

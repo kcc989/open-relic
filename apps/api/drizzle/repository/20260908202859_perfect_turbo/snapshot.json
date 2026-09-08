@@ -1,0 +1,597 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "id": "9553a2f6-1436-4d33-bfe1-054011836cb6",
+  "prevIds": [
+    "770ba5f7-6336-442e-8166-de9be84ffe7e"
+  ],
+  "ddl": [
+    {
+      "name": "object_deltas",
+      "entityType": "tables"
+    },
+    {
+      "name": "object_links",
+      "entityType": "tables"
+    },
+    {
+      "name": "objects",
+      "entityType": "tables"
+    },
+    {
+      "name": "refs",
+      "entityType": "tables"
+    },
+    {
+      "name": "repack_candidates",
+      "entityType": "tables"
+    },
+    {
+      "name": "repack_state",
+      "entityType": "tables"
+    },
+    {
+      "name": "repository_state",
+      "entityType": "tables"
+    },
+    {
+      "name": "shallow_commits",
+      "entityType": "tables"
+    },
+    {
+      "name": "sweep_reachable",
+      "entityType": "tables"
+    },
+    {
+      "name": "sweep_state",
+      "entityType": "tables"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "oid",
+      "entityType": "columns",
+      "table": "object_deltas"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "base_oid",
+      "entityType": "columns",
+      "table": "object_deltas"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "size",
+      "entityType": "columns",
+      "table": "object_deltas"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "chunk_count",
+      "entityType": "columns",
+      "table": "object_deltas"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "compressed_size",
+      "entityType": "columns",
+      "table": "object_deltas"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "compressed_chunk_count",
+      "entityType": "columns",
+      "table": "object_deltas"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "source_oid",
+      "entityType": "columns",
+      "table": "object_links"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "target_oid",
+      "entityType": "columns",
+      "table": "object_links"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "target_type",
+      "entityType": "columns",
+      "table": "object_links"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "oid",
+      "entityType": "columns",
+      "table": "objects"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "type",
+      "entityType": "columns",
+      "table": "objects"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "size",
+      "entityType": "columns",
+      "table": "objects"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "chunk_count",
+      "entityType": "columns",
+      "table": "objects"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "compressed_size",
+      "entityType": "columns",
+      "table": "objects"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "compressed_chunk_count",
+      "entityType": "columns",
+      "table": "objects"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "false",
+      "generated": null,
+      "name": "links_indexed",
+      "entityType": "columns",
+      "table": "objects"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "true",
+      "generated": null,
+      "name": "complete",
+      "entityType": "columns",
+      "table": "objects"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "name",
+      "entityType": "columns",
+      "table": "refs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "object_id",
+      "entityType": "columns",
+      "table": "refs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "bucket",
+      "entityType": "columns",
+      "table": "repack_candidates"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "oid",
+      "entityType": "columns",
+      "table": "repack_candidates"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "repack_state"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "ref_version",
+      "entityType": "columns",
+      "table": "repack_state"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cursor",
+      "entityType": "columns",
+      "table": "repack_state"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "completed_at",
+      "entityType": "columns",
+      "table": "repack_state"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "repository_state"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "repository_state"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "0",
+      "generated": null,
+      "name": "ref_version",
+      "entityType": "columns",
+      "table": "repository_state"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "oid",
+      "entityType": "columns",
+      "table": "shallow_commits"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "oid",
+      "entityType": "columns",
+      "table": "sweep_reachable"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "expected_type",
+      "entityType": "columns",
+      "table": "sweep_reachable"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "pending",
+      "entityType": "columns",
+      "table": "sweep_reachable"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "sweep_state"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "phase",
+      "entityType": "columns",
+      "table": "sweep_state"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "ref_version",
+      "entityType": "columns",
+      "table": "sweep_state"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "started_at",
+      "entityType": "columns",
+      "table": "sweep_state"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "completed_at",
+      "entityType": "columns",
+      "table": "sweep_state"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "0",
+      "generated": null,
+      "name": "reachable_objects",
+      "entityType": "columns",
+      "table": "sweep_state"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "0",
+      "generated": null,
+      "name": "reclaimed_objects",
+      "entityType": "columns",
+      "table": "sweep_state"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "0",
+      "generated": null,
+      "name": "reclaimed_chunks",
+      "entityType": "columns",
+      "table": "sweep_state"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "0",
+      "generated": null,
+      "name": "reclaimed_bytes",
+      "entityType": "columns",
+      "table": "sweep_state"
+    },
+    {
+      "columns": [
+        "oid"
+      ],
+      "tableTo": "objects",
+      "columnsTo": [
+        "oid"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_object_deltas_oid_objects_oid_fk",
+      "entityType": "fks",
+      "table": "object_deltas"
+    },
+    {
+      "columns": [
+        "source_oid"
+      ],
+      "tableTo": "objects",
+      "columnsTo": [
+        "oid"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_object_links_source_oid_objects_oid_fk",
+      "entityType": "fks",
+      "table": "object_links"
+    },
+    {
+      "columns": [
+        "oid"
+      ],
+      "tableTo": "objects",
+      "columnsTo": [
+        "oid"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_repack_candidates_oid_objects_oid_fk",
+      "entityType": "fks",
+      "table": "repack_candidates"
+    },
+    {
+      "columns": [
+        "source_oid",
+        "target_oid"
+      ],
+      "nameExplicit": false,
+      "name": "object_links_pk",
+      "entityType": "pks",
+      "table": "object_links"
+    },
+    {
+      "columns": [
+        "oid"
+      ],
+      "nameExplicit": false,
+      "name": "object_deltas_pk",
+      "table": "object_deltas",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "oid"
+      ],
+      "nameExplicit": false,
+      "name": "objects_pk",
+      "table": "objects",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "name"
+      ],
+      "nameExplicit": false,
+      "name": "refs_pk",
+      "table": "refs",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "bucket"
+      ],
+      "nameExplicit": false,
+      "name": "repack_candidates_pk",
+      "table": "repack_candidates",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "repack_state_pk",
+      "table": "repack_state",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "repository_state_pk",
+      "table": "repository_state",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "oid"
+      ],
+      "nameExplicit": false,
+      "name": "shallow_commits_pk",
+      "table": "shallow_commits",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "oid"
+      ],
+      "nameExplicit": false,
+      "name": "sweep_reachable_pk",
+      "table": "sweep_reachable",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "sweep_state_pk",
+      "table": "sweep_state",
+      "entityType": "pks"
+    }
+  ],
+  "renames": []
+}

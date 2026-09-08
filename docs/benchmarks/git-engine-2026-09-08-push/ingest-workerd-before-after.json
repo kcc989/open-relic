@@ -1,0 +1,60 @@
+{
+  "runtime": "workerd 2026-07-04",
+  "storage": "local disk SQLite Durable Objects",
+  "repository": "honojs/hono main pack, 23,235 objects",
+  "roots": ["/home/user/open-relic-before-push", "/home/user/open-relic"],
+  "ingestMs": {
+    "a": 11997,
+    "b": 5798.3
+  },
+  "checkMs": {
+    "a": 225.1,
+    "b": 195.9
+  },
+  "samples": {
+    "a": [12455.7, 11997, 11894.3],
+    "b": [5804.8, 5615.7, 5798.3]
+  },
+  "timingsAtLastRun": {
+    "a": {
+      "bodyIngressMs": 5383,
+      "bodyBytes": 9968527,
+      "bodyChunks": 2435,
+      "inflateMs": 662,
+      "hashMs": 259,
+      "deltaApplyMs": 87,
+      "storageReadMs": 113,
+      "storageWriteMs": 5264,
+      "storageCommitMs": 5048,
+      "linkIndexMs": 184,
+      "resolvedBytesStored": 123898278,
+      "compressedBytesStored": 9600571,
+      "deltaBytesStored": 7361840,
+      "linksStored": 173663,
+      "objects": 23235,
+      "deltas": 16075,
+      "recentBaseHits": 14424,
+      "nativeInflates": 1295
+    },
+    "b": {
+      "bodyIngressMs": 1656,
+      "bodyBytes": 9968527,
+      "bodyChunks": 10,
+      "inflateMs": 264,
+      "hashMs": 246,
+      "deltaApplyMs": 77,
+      "storageReadMs": 113,
+      "storageWriteMs": 3339,
+      "storageCommitMs": 3219,
+      "linkIndexMs": 86,
+      "resolvedBytesStored": 123898278,
+      "compressedBytesStored": 9600571,
+      "deltaBytesStored": 7361840,
+      "linksStored": 173663,
+      "objects": 23235,
+      "deltas": 16075,
+      "recentBaseHits": 14424,
+      "nativeInflates": 2827
+    }
+  }
+}

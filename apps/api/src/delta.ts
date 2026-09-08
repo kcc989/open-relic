@@ -51,6 +51,12 @@ const readVarint = (delta: Uint8Array, at: number): Varint => {
   }
 };
 
+/**
+ * Copies at least this long are handed to the runtime; most instructions are
+ * shorter, and a loop costs less than the view a bulk copy needs.
+ */
+const BULK_COPY_BYTES = 64;
+
 export const applyDelta = (base: Uint8Array, delta: Uint8Array): Uint8Array => {
   const baseSize = readVarint(delta, 0);
   const resultSize = readVarint(delta, baseSize.next);
@@ -72,30 +78,50 @@ export const applyDelta = (base: Uint8Array, delta: Uint8Array): Uint8Array => {
   }
 
   const result = new Uint8Array(resultSize.value);
+  const end = delta.length;
   let at = resultSize.next;
   let written = 0;
 
-  while (at < delta.length) {
+  while (at < end) {
     const opcode = delta[at]!;
     at += 1;
 
     if ((opcode & 0x80) !== 0) {
       // Copy: the low bits say which of the four offset bytes and three size
-      // bytes were worth sending; the rest are zero.
+      // bytes were worth sending; the rest are zero. A byte past the end of
+      // the delta reads as nothing and is caught by the position afterwards.
       let offset = 0;
-      for (let byte = 0; byte < 4; byte += 1) {
-        if ((opcode & (1 << byte)) !== 0) {
-          offset |= readByte(delta, at) << (byte * 8);
-          at += 1;
-        }
-      }
-
       let size = 0;
-      for (let byte = 0; byte < 3; byte += 1) {
-        if ((opcode & (0x10 << byte)) !== 0) {
-          size |= readByte(delta, at) << (byte * 8);
-          at += 1;
-        }
+      if ((opcode & 0x01) !== 0) {
+        offset = delta[at]!;
+        at += 1;
+      }
+      if ((opcode & 0x02) !== 0) {
+        offset |= delta[at]! << 8;
+        at += 1;
+      }
+      if ((opcode & 0x04) !== 0) {
+        offset |= delta[at]! << 16;
+        at += 1;
+      }
+      if ((opcode & 0x08) !== 0) {
+        offset |= delta[at]! << 24;
+        at += 1;
+      }
+      if ((opcode & 0x10) !== 0) {
+        size = delta[at]!;
+        at += 1;
+      }
+      if ((opcode & 0x20) !== 0) {
+        size |= delta[at]! << 8;
+        at += 1;
+      }
+      if ((opcode & 0x40) !== 0) {
+        size |= delta[at]! << 16;
+        at += 1;
+      }
+      if (at > end) {
+        throw new DeltaError("corrupt", "A delta instruction ran past the end of the delta.");
       }
 
       offset >>>= 0;
@@ -105,9 +131,19 @@ export const applyDelta = (base: Uint8Array, delta: Uint8Array): Uint8Array => {
       if (offset + size > base.length) {
         throw new DeltaError("corrupt", "A copy instruction reaches past the base.");
       }
+      if (written + size > result.length) {
+        throw new DeltaError("corrupt", "A delta produced more than it declared.");
+      }
 
-      write(result, written, base.subarray(offset, offset + size));
-      written += size;
+      if (size >= BULK_COPY_BYTES) {
+        result.set(base.subarray(offset, offset + size), written);
+        written += size;
+      } else {
+        for (const last = written + size; written < last; written += 1) {
+          result[written] = base[offset]!;
+          offset += 1;
+        }
+      }
       continue;
     }
 
@@ -116,13 +152,17 @@ export const applyDelta = (base: Uint8Array, delta: Uint8Array): Uint8Array => {
     }
 
     // Insert: the opcode is the count of literal bytes that follow.
-    if (at + opcode > delta.length) {
+    if (at + opcode > end) {
       throw new DeltaError("corrupt", "An insert instruction reaches past the delta.");
     }
+    if (written + opcode > result.length) {
+      throw new DeltaError("corrupt", "A delta produced more than it declared.");
+    }
 
-    write(result, written, delta.subarray(at, at + opcode));
-    written += opcode;
-    at += opcode;
+    for (const last = written + opcode; written < last; written += 1) {
+      result[written] = delta[at]!;
+      at += 1;
+    }
   }
 
   if (written !== result.length) {
@@ -133,19 +173,4 @@ export const applyDelta = (base: Uint8Array, delta: Uint8Array): Uint8Array => {
   }
 
   return result;
-};
-
-const readByte = (delta: Uint8Array, at: number): number => {
-  const byte = delta[at];
-  if (byte === undefined) {
-    throw new DeltaError("corrupt", "A delta instruction ran past the end of the delta.");
-  }
-  return byte;
-};
-
-const write = (result: Uint8Array, at: number, bytes: Uint8Array): void => {
-  if (at + bytes.length > result.length) {
-    throw new DeltaError("corrupt", "A delta produced more than it declared.");
-  }
-  result.set(bytes, at);
 };

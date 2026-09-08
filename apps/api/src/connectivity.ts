@@ -18,7 +18,7 @@ import { isObjectId, isObjectType, type ObjectType } from "./object.ts";
 import { ObjectParseError } from "./object-parse.ts";
 import type { PackBase } from "./pack.ts";
 import type { IndexedObject } from "./object-store.ts";
-import { GITLINK_MODE, TREE_MODE, treeEntries } from "./tree-entry.ts";
+import { treeLinks } from "./tree-entry.ts";
 
 export { ObjectParseError } from "./object-parse.ts";
 export { GITLINK_MODE, TREE_MODE } from "./tree-entry.ts";
@@ -122,27 +122,6 @@ const tagLinks = (bytes: Uint8Array): readonly ObjectLink[] => {
   }
 
   return [{ oid: target, type }];
-};
-
-/**
- * `<mode> SP <name> NUL <20 raw bytes>`, repeated. Only subtrees come back:
- * blobs are the half we deliberately do not check, and a gitlink names a commit
- * in a repository that is not this one.
- */
-const treeLinks = (bytes: Uint8Array, includeBlobs: boolean): readonly ObjectLink[] => {
-  const links: ObjectLink[] = [];
-
-  for (const entry of treeEntries(bytes)) {
-    if (entry.mode === TREE_MODE) {
-      links.push({ oid: entry.oid, type: "tree" });
-    } else if (entry.mode !== GITLINK_MODE) {
-      if (includeBlobs) {
-        links.push({ oid: entry.oid, type: "blob" });
-      }
-    }
-  }
-
-  return links;
 };
 
 /**

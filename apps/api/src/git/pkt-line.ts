@@ -91,6 +91,46 @@ export type ProtocolV2PktLine =
 
 const EMPTY = new Uint8Array(0);
 
+/**
+ * What one read of the body after the pkt-lines asks for.
+ *
+ * Each read is an event-loop turn, and on workerd a turn costs the object a
+ * storage commit of everything written since the last one — a cost with a
+ * fixed part, so fewer turns is faster until the per-byte part is all that is
+ * left. A 10 MB push measured 2,500 turns at a default reader's 4 KiB, forty
+ * at 256 KiB, ten at this size; the step to here cleared the host's noise and
+ * the step to 4 MiB did not. Memory bounds it from above: the pack reader
+ * holds one object plus the piece it arrived in, the stream it pulls from
+ * queues one piece of read-ahead, and the reader's concatenation can hold a
+ * third — a few megabytes against the object's 128 MB, whatever the push.
+ */
+export const REST_READ_BYTES = 1_024 * 1_024;
+
+/** The two readers' common answer: a BYOB reader's end carries an empty view where a default reader's carries nothing. */
+interface RestRead {
+  readonly done: boolean;
+  readonly value?: Uint8Array | undefined;
+}
+
+/** The rest of the body: one read at a time, and the reader to cancel it through. */
+interface RestReader {
+  readonly read: () => Promise<RestRead>;
+  readonly reader: ReadableStreamGenericReader;
+}
+
+/**
+ * workerd's BYOB reader can be asked for a minimum, which the lib's standard
+ * shape cannot express. A byte stream elsewhere may or may not resolve a read
+ * left pending at its close (Bun's does not), so only a reader that offers the
+ * minimum is trusted with the rest of a body.
+ */
+interface ReadAtLeastReader extends ReadableStreamBYOBReader {
+  readAtLeast(minBytes: number, view: Uint8Array): Promise<RestRead>;
+}
+
+const offersReadAtLeast = (reader: ReadableStreamBYOBReader): reader is ReadAtLeastReader =>
+  "readAtLeast" in reader;
+
 /** Git writes lowercase; a reader that insisted on it would be gratuitous. */
 const LENGTH_PATTERN = /^[0-9a-fA-F]{4}$/;
 
@@ -105,12 +145,14 @@ const LENGTH_PATTERN = /^[0-9a-fA-F]{4}$/;
  * buffered.
  */
 export class PktLineReader {
-  readonly #reader: ReadableStreamDefaultReader<Uint8Array>;
+  readonly #body: ReadableStream<Uint8Array>;
+  #reader: ReadableStreamDefaultReader<Uint8Array>;
   #buffer: Uint8Array = EMPTY;
   #exhausted = false;
   #handedOver = false;
 
   constructor(body: ReadableStream<Uint8Array>) {
+    this.#body = body;
     this.#reader = body.getReader();
   }
 
@@ -190,7 +232,7 @@ export class PktLineReader {
     // every byte the command phase ever grew alive behind it.
     let leftover: Uint8Array = this.#buffer.slice();
     this.#buffer = EMPTY;
-    const reader = this.#reader;
+    const { read, reader } = this.#restReader();
 
     return new ReadableStream<Uint8Array>({
       start(controller) {
@@ -201,17 +243,67 @@ export class PktLineReader {
       },
       async pull(controller) {
         // A reader that is already done answers `done` again, so it is its own
-        // exhaustion flag.
-        const { done, value } = await reader.read();
-        if (done || value === undefined) {
-          controller.close();
-          return;
+        // exhaustion flag. A BYOB read can hand back the stream's last bytes
+        // and its end together, so the bytes are kept before the end is.
+        const { done, value } = await read();
+        if (value !== undefined && value.byteLength > 0) {
+          controller.enqueue(value);
         }
-
-        controller.enqueue(value);
+        if (done) {
+          controller.close();
+        }
       },
       cancel: (reason) => reader.cancel(reason),
     });
+  }
+
+  /**
+   * The body after the pkt-lines is a pack, and a pack is read in the pieces
+   * the stream hands over. On workerd a stream that crossed the RPC boundary
+   * answers a default reader 4 KiB at a time, and every read is an event-loop
+   * turn the object pays for — its storage commits on each one — so a 10 MB
+   * push arrived as 2,500 turns. A BYOB reader asking for a minimum lets the
+   * runtime fill a whole piece before answering. Only a byte stream can be read
+   * that way; anything else keeps the default reader it already has.
+   */
+  #restReader(): RestReader {
+    const atLeast = this.#exhausted ? null : this.#readAtLeastReader();
+    if (atLeast !== null) {
+      return {
+        read: () => atLeast.readAtLeast(REST_READ_BYTES, new Uint8Array(REST_READ_BYTES)),
+        reader: atLeast,
+      };
+    }
+
+    const reader = this.#reader;
+    return { read: () => reader.read(), reader };
+  }
+
+  /**
+   * The pkt-lines needed a default reader, and a stream lends itself to one
+   * reader at a time, so the BYOB reader is taken after that one lets go. A
+   * stream that is not a byte stream refuses with a `TypeError`, and a byte
+   * stream without a minimum is not taken either; both keep a default reader.
+   */
+  #readAtLeastReader(): ReadAtLeastReader | null {
+    this.#reader.releaseLock();
+    let reader: ReadableStreamBYOBReader;
+    try {
+      reader = this.#body.getReader({ mode: "byob" });
+    } catch (error) {
+      if (!(error instanceof TypeError)) {
+        throw error;
+      }
+      this.#reader = this.#body.getReader();
+      return null;
+    }
+
+    if (offersReadAtLeast(reader)) {
+      return reader;
+    }
+    reader.releaseLock();
+    this.#reader = this.#body.getReader();
+    return null;
   }
 
   /** Gives up on the rest of the body, for a request whose tail we will not read. */

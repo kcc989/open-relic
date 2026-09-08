@@ -1,4 +1,4 @@
-import { index, integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 import { OBJECT_TYPES } from "../object.ts";
 
@@ -92,6 +92,10 @@ export type ObjectDeltaRow = typeof objectDeltas.$inferSelect;
 /**
  * Parsed Git graph edges. They make reachability walks proportional to ids and
  * small SQL rows instead of repeatedly loading and parsing commit/tree bytes.
+ *
+ * Every walk follows edges outward from a source, so the primary key is the
+ * only index. A push inserts one of these rows per tree entry, and each index
+ * is another B-tree that every one of those inserts pays for.
  */
 export const objectLinks = sqliteTable(
   "object_links",
@@ -102,10 +106,7 @@ export const objectLinks = sqliteTable(
     targetOid: text("target_oid").notNull(),
     targetType: text("target_type", { enum: OBJECT_TYPES }).notNull(),
   },
-  (table) => [
-    primaryKey({ columns: [table.sourceOid, table.targetOid] }),
-    index("object_links_target_oid_idx").on(table.targetOid),
-  ],
+  (table) => [primaryKey({ columns: [table.sourceOid, table.targetOid] })],
 );
 
 export type ObjectLinkRow = typeof objectLinks.$inferSelect;
