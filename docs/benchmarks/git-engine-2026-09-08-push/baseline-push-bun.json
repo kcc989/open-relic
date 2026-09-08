@@ -1,0 +1,43 @@
+{
+  "root": "/home/user/open-relic",
+  "pushes": 3,
+  "medianMs": 3677.1,
+  "minMs": 3646.7,
+  "maxMs": 3731.9,
+  "samples": [3731.9, 3677.1, 3646.7],
+  "serverPhasesAtMedian": {
+    "totalMs": 3474.68,
+    "gateWaitMs": 0.01,
+    "alarmMs": 0,
+    "commandsMs": 0.49,
+    "refsMs": 0.29,
+    "unpackMs": 3309.08,
+    "bodyIngressMs": 109.58,
+    "inflateMs": 758.61,
+    "hashMs": 124.97,
+    "deltaApplyMs": 127.23,
+    "storageReadMs": 35.44,
+    "storageWriteMs": 2012.57,
+    "storageCommitMs": 1710.18,
+    "linkIndexMs": 275.68,
+    "resolvedBytesStored": 123898278,
+    "compressedBytesStored": 9600571,
+    "deltaBytesStored": 7361840,
+    "linksStored": 173663,
+    "verifyMs": 162.56,
+    "refUpdateMs": 0.99,
+    "responseMs": 0.83,
+    "bodyBytes": 9680266,
+    "bodyChunks": 883,
+    "objects": 23235,
+    "deltas": 16075,
+    "recentBaseHits": 14424
+  },
+  "routeTimingsAtMedian": {
+    "totalMs": 3475.84,
+    "resolveMs": 0.54,
+    "repositoryMs": 3474.84,
+    "recordPushMs": 0.46,
+    "accepted": true
+  }
+}
