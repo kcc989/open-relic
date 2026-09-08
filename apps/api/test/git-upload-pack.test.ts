@@ -238,6 +238,82 @@ describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
     expect(bytes.length).toBe(firstLength);
   });
 
+  test("checksums a pack whose trailer straddles a side-band frame", async () => {
+    // A side-band frame carries PKT_LINE_MAX_BYTES - 5 pack bytes. The checksum
+    // covers every byte before itself and never itself, and the one place that
+    // is easy to get wrong is a frame filling up in the middle of the trailer.
+    // Random contents deflate to an unpredictable length, so measure the pack's
+    // overhead once, aim the blob at the edge, and grow it until the trailer
+    // provably crosses — then insist the pack still verifies.
+    const payloadBytes = PKT_LINE_MAX_BYTES - 5;
+    const trailerBytes = 20;
+
+    const packFor = async (size: number): Promise<{ pack: Uint8Array; oid: string }> => {
+      const contents = incompressibleBlob(size);
+      const root = tree([treeEntry("noise.bin", contents)]);
+      const tip = commit({ tree: root, message: "Across the edge" });
+      const objects = new Map(
+        [tip, root, contents].map((object) => [
+          object.oid,
+          { type: object.type, bytes: object.bytes },
+        ]),
+      );
+      const request = concat(
+        pktLine(`want ${tip.oid} side-band-64k\n`),
+        flushPkt(),
+        pktLine("done\n"),
+      );
+      const response = new Uint8Array(
+        await new Response(
+          uploadPackResultStream(
+            streamOf(request),
+            {
+              has: async (oid) => objects.has(oid),
+              read: async (oid) => objects.get(oid) ?? null,
+              readDeltaBase: async () => null,
+              readDelta: async () => null,
+            },
+            new Set([tip.oid]),
+          ),
+        ).arrayBuffer(),
+      );
+      const parts: Uint8Array[] = [];
+      for (let at = 0; at < response.length;) {
+        const length = Number.parseInt(new TextDecoder().decode(response.subarray(at, at + 4)), 16);
+        if (length === 0) {
+          at += 4;
+          continue;
+        }
+        const payload = response.subarray(at + 4, at + length);
+        if (payload[0] === 1) parts.push(payload.subarray(1));
+        at += length;
+      }
+      return { pack: concat(...parts), oid: contents.oid };
+    };
+
+    const probeSize = payloadBytes - 1_024;
+    const overhead = (await packFor(probeSize)).pack.length - probeSize;
+    const aimed = payloadBytes - overhead - trailerBytes + 1;
+
+    for (let size = aimed; ; size += 1) {
+      expect(size - aimed).toBeLessThan(64);
+      const { pack, oid } = await packFor(size);
+      const trailerStarts = pack.length - trailerBytes;
+      const straddled =
+        Math.floor(trailerStarts / payloadBytes) !== Math.floor((pack.length - 1) / payloadBytes);
+
+      const received: string[] = [];
+      await readPack(streamOf(pack), {
+        read: async () => null,
+        write: async (object: PackObject) => {
+          received.push(object.oid);
+        },
+      });
+      expect(received).toContain(oid);
+      if (straddled) break;
+    }
+  });
+
   test("starts the response before reading pack entries and then reads them one at a time", async () => {
     // Each blob spans several frames, so the frame the client holds and the
     // one the stream fills behind it both fall inside one entry.
