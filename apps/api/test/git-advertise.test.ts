@@ -1,6 +1,8 @@
 import { ERROR_CODES, type CreateTokenResult } from "../src/contracts.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
+import { createApp } from "../src/app.ts";
+import { allowControlPlane } from "../src/control-plane-authorization.ts";
 import { createGitTestApp, type TestApp } from "./support/app.ts";
 import { errorCode, result } from "./support/envelope.ts";
 
@@ -174,6 +176,36 @@ describe("the other services on the advertisement path", () => {
     expect(body).not.toContain("# service=git-upload-pack");
     expect(body).not.toContain("fetch=shallow");
     expect(body).not.toContain(MAIN);
+  });
+
+  test("answers protocol v2 from the Worker without reaching the repository object", async () => {
+    // The same registries, but a binding that refuses to hand out an object:
+    // the v2 advertisement is commands rather than refs, so a clone should not
+    // pay a round trip to the object until it asks for `ls-refs`.
+    const app = createApp({
+      namespaceRegistry: () => harness.namespaces,
+      repositoryIndex: () => harness.repositories,
+      repositoryObjects: () => ({
+        createId: () => harness.objects.createId(),
+        get: () => {
+          throw new Error("A protocol-v2 advertisement reached the repository object.");
+        },
+      }),
+      tokenRegistry: () => harness.tokens,
+      authorizeControlPlane: allowControlPlane,
+    });
+
+    const response = await app.request(
+      new Request(`${INFO_REFS}?service=git-upload-pack`, {
+        headers: {
+          Authorization: `Bearer ${harness.repositoryToken}`,
+          "Git-Protocol": "version=2",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toStartWith("000eversion 2\n");
   });
 
   test("keeps protocol v0 when no version is requested", async () => {

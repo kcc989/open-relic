@@ -10,6 +10,7 @@ import {
   UPLOAD_PACK_ADVERTISEMENT_CONTENT_TYPE,
   UPLOAD_PACK_RESULT_CONTENT_TYPE,
   UPLOAD_PACK_SERVICE,
+  uploadPackAdvertisementStream,
   type UploadProtocolVersion,
 } from "./git/advertisement.ts";
 import { GzipError, gunzip } from "./git/gzip.ts";
@@ -91,9 +92,16 @@ export const registerGitRoutes = (
       const resolvedAt = performance.now();
       const protocolVersion = uploadProtocolVersion(context);
 
-      const advertisement = await repositoryObjects(context.env)
-        .get(found.durableObjectId)
-        .advertiseUploadPack(protocolVersion);
+      // A protocol-v2 advertisement names commands, not refs, so nothing in it
+      // is the repository's to know. Answering from the Worker spares a clone
+      // one round trip to the object before its `ls-refs`; v0 and v1 carry the
+      // refs and still have to ask.
+      const advertisement =
+        protocolVersion === 2
+          ? uploadPackAdvertisementStream([], null, protocolVersion)
+          : await repositoryObjects(context.env)
+              .get(found.durableObjectId)
+              .advertiseUploadPack(protocolVersion);
       console.log(
         `Git upload-pack advertisement timings ${JSON.stringify({
           totalMs: Number((performance.now() - started).toFixed(2)),
