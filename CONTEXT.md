@@ -122,6 +122,23 @@ A bounded background pass that selects cheaper Pack representations for
 reachable Objects.
 _Avoid_: Sweep, garbage collection
 
+**Position**:
+An Object's permanent place in the repository's serving order, handed out when
+it is published. A Delta's base always has a lower position than the Delta.
+_Avoid_: index, sequence number, offset
+
+**Slab**:
+One storage value holding the Pack representations of a run of consecutive
+positions, each behind a header that names it. Upload-pack composes a Pack by
+copying ranges out of Slabs. Derived and rebuildable, like the representations
+it holds.
+_Avoid_: packfile, cached pack, page, block
+
+**Reachability bitmap**:
+The set of positions reachable from one commit, written when a ref transaction
+makes that commit a tip. Negotiation over bitmapped tips is set arithmetic.
+_Avoid_: closure cache, bitmap index, reachability index
+
 **Advertisement**:
 The server's opening reply to a Git client, listing the refs it holds and the
 capabilities it supports.
