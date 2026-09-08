@@ -56,10 +56,28 @@ export const toHex = (bytes: Uint8Array): string => {
   return hex;
 };
 
+/** One nibble per ASCII code, in either case; the hex a caller passes is already validated. */
+const HEX_NIBBLES = new Uint8Array(128);
+for (let nibble = 0; nibble < 16; nibble += 1) {
+  const digit = nibble.toString(16);
+  HEX_NIBBLES[digit.charCodeAt(0)] = nibble;
+  HEX_NIBBLES[digit.toUpperCase().charCodeAt(0)] = nibble;
+}
+
+/**
+ * Decodes `hex` into `target` from `offset`, for a writer placing ids into a
+ * buffer it already owns. A pack names a delta base per entry, so the array
+ * {@link fromHex} would allocate counts there.
+ */
+export const decodeHexInto = (hex: string, target: Uint8Array, offset: number): void => {
+  for (let at = 0; at < hex.length; at += 2) {
+    target[offset + at / 2] =
+      (HEX_NIBBLES[hex.charCodeAt(at) & 0x7f]! << 4) | HEX_NIBBLES[hex.charCodeAt(at + 1) & 0x7f]!;
+  }
+};
+
 export const fromHex = (hex: string): Uint8Array => {
   const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < bytes.length; i += 1) {
-    bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
+  decodeHexInto(hex, bytes, 0);
   return bytes;
 };

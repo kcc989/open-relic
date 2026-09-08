@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { deflateSync } from "node:zlib";
 
-import { delimiterPkt, flushPkt, pktLine } from "../src/git/pkt-line.ts";
+import { PKT_LINE_MAX_BYTES, delimiterPkt, flushPkt, pktLine } from "../src/git/pkt-line.ts";
 import { uploadPackResultStream } from "../src/git/upload-pack.ts";
 import {
   RepositoryStorageExhaustedError,
@@ -9,7 +9,7 @@ import {
 } from "../src/object-store.ts";
 import { readPack, type PackBase, type PackObject } from "../src/pack.ts";
 import { createGitTestApp, type TestApp } from "./support/app.ts";
-import { blob, commit, tag, tree, treeEntry } from "./support/git-objects.ts";
+import { blob, commit, incompressibleBlob, tag, tree, treeEntry } from "./support/git-objects.ts";
 import { buildDelta, buildPack, concat, insertInstruction, streamOf } from "./support/pack.ts";
 import { pushBody } from "./support/receive-pack.ts";
 
@@ -238,15 +238,97 @@ describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
     expect(bytes.length).toBe(firstLength);
   });
 
+  test("checksums a pack whose trailer straddles a side-band frame", async () => {
+    // A side-band frame carries PKT_LINE_MAX_BYTES - 5 pack bytes. The checksum
+    // covers every byte before itself and never itself, and the one place that
+    // is easy to get wrong is a frame filling up in the middle of the trailer.
+    // Random contents deflate to an unpredictable length, so measure the pack's
+    // overhead once, aim the blob at the edge, and grow it until the trailer
+    // provably crosses — then insist the pack still verifies.
+    const payloadBytes = PKT_LINE_MAX_BYTES - 5;
+    const trailerBytes = 20;
+
+    const packFor = async (size: number): Promise<{ pack: Uint8Array; oid: string }> => {
+      const contents = incompressibleBlob(size);
+      const root = tree([treeEntry("noise.bin", contents)]);
+      const tip = commit({ tree: root, message: "Across the edge" });
+      const objects = new Map(
+        [tip, root, contents].map((object) => [
+          object.oid,
+          { type: object.type, bytes: object.bytes },
+        ]),
+      );
+      const request = concat(
+        pktLine(`want ${tip.oid} side-band-64k\n`),
+        flushPkt(),
+        pktLine("done\n"),
+      );
+      const response = new Uint8Array(
+        await new Response(
+          uploadPackResultStream(
+            streamOf(request),
+            {
+              has: async (oid) => objects.has(oid),
+              read: async (oid) => objects.get(oid) ?? null,
+              readDeltaBase: async () => null,
+              readDelta: async () => null,
+            },
+            new Set([tip.oid]),
+          ),
+        ).arrayBuffer(),
+      );
+      const parts: Uint8Array[] = [];
+      for (let at = 0; at < response.length;) {
+        const length = Number.parseInt(new TextDecoder().decode(response.subarray(at, at + 4)), 16);
+        if (length === 0) {
+          at += 4;
+          continue;
+        }
+        const payload = response.subarray(at + 4, at + length);
+        if (payload[0] === 1) parts.push(payload.subarray(1));
+        at += length;
+      }
+      return { pack: concat(...parts), oid: contents.oid };
+    };
+
+    const probeSize = payloadBytes - 1_024;
+    const overhead = (await packFor(probeSize)).pack.length - probeSize;
+    const aimed = payloadBytes - overhead - trailerBytes + 1;
+
+    for (let size = aimed; ; size += 1) {
+      expect(size - aimed).toBeLessThan(64);
+      const { pack, oid } = await packFor(size);
+      const trailerStarts = pack.length - trailerBytes;
+      const straddled =
+        Math.floor(trailerStarts / payloadBytes) !== Math.floor((pack.length - 1) / payloadBytes);
+
+      const received: string[] = [];
+      await readPack(streamOf(pack), {
+        read: async () => null,
+        write: async (object: PackObject) => {
+          received.push(object.oid);
+        },
+      });
+      expect(received).toContain(oid);
+      if (straddled) break;
+    }
+  });
+
   test("starts the response before reading pack entries and then reads them one at a time", async () => {
+    // Each blob spans several frames, so the frame the client holds and the
+    // one the stream fills behind it both fall inside one entry.
+    const first = incompressibleBlob(4 * PKT_LINE_MAX_BYTES);
+    const second = incompressibleBlob(4 * PKT_LINE_MAX_BYTES);
+    const root = tree([treeEntry("a.bin", first), treeEntry("b.bin", second)]);
+    const tip = commit({ tree: root, message: "One at a time" });
     const objects = new Map(
-      [FIRST, ROOT, README].map((object) => [
+      [tip, root, first, second].map((object) => [
         object.oid,
         { type: object.type, bytes: object.bytes },
       ]),
     );
     const reads = new Map<string, number>();
-    const request = concat(pktLine(`want ${FIRST.oid}\n`), flushPkt(), pktLine("done\n"));
+    const request = concat(pktLine(`want ${tip.oid}\n`), flushPkt(), pktLine("done\n"));
     const response = uploadPackResultStream(
       streamOf(request),
       {
@@ -258,7 +340,7 @@ describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
         readDeltaBase: async () => null,
         readDelta: async () => null,
       },
-      new Set([FIRST.oid]),
+      new Set([tip.oid]),
     );
     const reader = response.getReader();
 
@@ -266,28 +348,36 @@ describe("POST /git/:namespace/:repo.git/git-upload-pack", () => {
     expect(new TextDecoder().decode((await reader.read()).value)).toBe("0008NAK\n");
     expect(reads).toEqual(
       new Map([
-        [FIRST.oid, 1],
-        [ROOT.oid, 1],
+        [tip.oid, 1],
+        [root.oid, 1],
       ]),
     );
 
     const header = (await reader.read()).value!;
     expect(new TextDecoder().decode(header.subarray(0, 4))).toBe("PACK");
+    const [leading, trailing] = reads.has(first.oid) ? [first, second] : [second, first];
     expect(reads).toEqual(
       new Map([
-        [FIRST.oid, 1],
-        [ROOT.oid, 1],
+        [tip.oid, 2],
+        [root.oid, 2],
+        [leading.oid, 1],
       ]),
     );
 
     await reader.read();
+    expect(reads.has(trailing.oid)).toBe(false);
+
+    while (!(await reader.read()).done) {
+      /* Drain, so the second blob is read for its entry and nothing else is. */
+    }
     expect(reads).toEqual(
       new Map([
-        [FIRST.oid, 2],
-        [ROOT.oid, 1],
+        [tip.oid, 2],
+        [root.oid, 2],
+        [first.oid, 1],
+        [second.oid, 1],
       ]),
     );
-    await reader.cancel();
   });
 
   test("batches delta planning and emits cached full entries without rereading object bytes", async () => {

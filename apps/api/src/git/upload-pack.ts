@@ -12,9 +12,10 @@ import {
 } from "../object-store.ts";
 import type { PackBase, PackDelta } from "../pack.ts";
 import { isObjectId, type ObjectType } from "../object.ts";
-import { Sha1, fromHex } from "../sha1.ts";
+import { Sha1, decodeHexInto, fromHex } from "../sha1.ts";
 import {
-  PKT_LINE_MAX_PAYLOAD_BYTES,
+  PKT_LINE_LENGTH_BYTES,
+  PKT_LINE_MAX_BYTES,
   PktLineError,
   PktLineReader,
   flushPkt,
@@ -368,26 +369,153 @@ const PACK_KINDS = {
 } satisfies Record<ObjectType, number>;
 
 const REF_DELTA = 7;
+const OID_BYTES = 20;
 const PACK_REPRESENTATION_READ_BYTES = 8 * 1024 * 1024;
 const PACK_REPRESENTATION_READ_KEYS = 96;
 const PACK_REPRESENTATION_READ_AHEAD = 4;
 export const PACK_PREFETCH_BYTES = 16 * 1024 * 1024;
 
-const entryHeader = (kind: number, size: number): Uint8Array => {
-  const bytes: number[] = [];
-  let remaining = size;
-  let byte = (kind << 4) | (remaining & 0x0f);
-  remaining = Math.floor(remaining / 16);
+/** A pack leaves in frames of one side-band packet, whether or not a band was negotiated. */
+const PACK_FRAME_BYTES = PKT_LINE_MAX_BYTES;
 
-  while (remaining > 0) {
-    bytes.push(byte | 0x80);
-    byte = remaining & 0x7f;
-    remaining = Math.floor(remaining / 128);
+/**
+ * Pack bytes, written into wire-sized frames and hashed a frame at a time.
+ *
+ * A pack of tens of thousands of small entries would otherwise leave as two or
+ * three tiny chunks per object, each crossing every generator and stream
+ * between here and the response with a native hash call of its own. Entry
+ * headers and base ids are encoded straight into the frame, so a small entry
+ * costs a few byte writes and no allocation.
+ *
+ * With side-band-64k negotiated a frame is one data packet — length, band
+ * byte, payload — assembled in place. Without it, a frame is bare pack bytes
+ * of the same size.
+ */
+class PackFrameWriter {
+  readonly #hash = new Sha1();
+  readonly #timings: UploadPackTimings;
+  readonly #prefixBytes: number;
+  readonly #payloadBytes: number;
+  readonly #ready: Uint8Array[] = [];
+  #frame: Uint8Array;
+  #filled = 0;
+  #hashed = 0;
+  #digested = false;
+
+  constructor(banded: boolean, timings: UploadPackTimings) {
+    this.#timings = timings;
+    this.#prefixBytes = banded ? PKT_LINE_LENGTH_BYTES + 1 : 0;
+    this.#payloadBytes = PACK_FRAME_BYTES - this.#prefixBytes;
+    this.#frame = this.#allocate();
   }
 
-  bytes.push(byte);
-  return Uint8Array.from(bytes);
-};
+  /**
+   * Copies what fits into the current frame and reports how far into `bytes`
+   * it got, so a caller can hand a completed frame on before copying more: an
+   * object larger than a frame is never held twice over.
+   */
+  write(bytes: Uint8Array, from = 0): number {
+    const count = Math.min(this.#payloadBytes - this.#filled, bytes.length - from);
+    this.#frame.set(
+      from === 0 && count === bytes.length ? bytes : bytes.subarray(from, from + count),
+      this.#prefixBytes + this.#filled,
+    );
+    this.#advance(count);
+    return from + count;
+  }
+
+  /** The type in the first byte's high nibble, then the size as a little-endian varint. */
+  writeEntryHeader(kind: number, size: number): void {
+    let remaining = Math.floor(size / 16);
+    this.#writeByte((remaining > 0 ? 0x80 : 0) | (kind << 4) | (size & 0x0f));
+    while (remaining > 0) {
+      const next = Math.floor(remaining / 128);
+      this.#writeByte((next > 0 ? 0x80 : 0) | (remaining & 0x7f));
+      remaining = next;
+    }
+  }
+
+  writeObjectId(oid: string): void {
+    if (this.#payloadBytes - this.#filled >= OID_BYTES) {
+      decodeHexInto(oid, this.#frame, this.#prefixBytes + this.#filled);
+      this.#advance(OID_BYTES);
+      return;
+    }
+
+    const bytes = fromHex(oid);
+    for (let at = 0; at < bytes.length;) {
+      at = this.write(bytes, at);
+    }
+  }
+
+  /** The oldest completed frame, until none remain. */
+  takeFrame(): Uint8Array | undefined {
+    return this.#ready.shift();
+  }
+
+  /** Appends the pack's trailing checksum and completes whatever frame holds it. */
+  finish(): void {
+    this.#hashThrough(this.#filled);
+    this.#digested = true;
+    const digest = this.#hash.digest();
+    for (let at = 0; at < digest.length;) {
+      at = this.write(digest, at);
+    }
+    if (this.#filled > 0) {
+      this.#ready.push(this.#framed());
+    }
+  }
+
+  #writeByte(byte: number): void {
+    this.#frame[this.#prefixBytes + this.#filled] = byte;
+    this.#advance(1);
+  }
+
+  #advance(count: number): void {
+    this.#filled += count;
+    this.#timings.responseBytes += count;
+    if (this.#filled === this.#payloadBytes) {
+      this.#hashThrough(this.#filled);
+      this.#ready.push(this.#framed());
+      this.#frame = this.#allocate();
+      this.#filled = 0;
+      this.#hashed = 0;
+    }
+  }
+
+  /** The current frame as it goes on the wire, its length written once it is known. */
+  #framed(): Uint8Array {
+    const length = this.#prefixBytes + this.#filled;
+    if (this.#prefixBytes > 0) {
+      const hex = length.toString(16).padStart(PKT_LINE_LENGTH_BYTES, "0");
+      for (let at = 0; at < PKT_LINE_LENGTH_BYTES; at += 1) {
+        this.#frame[at] = hex.charCodeAt(at);
+      }
+    }
+    return length === this.#frame.length ? this.#frame : this.#frame.subarray(0, length);
+  }
+
+  /** The checksum covers every payload byte before itself, and never itself. */
+  #hashThrough(end: number): void {
+    if (this.#digested || end === this.#hashed) {
+      return;
+    }
+    const started = performance.now();
+    this.#hash.update(
+      this.#frame.subarray(this.#prefixBytes + this.#hashed, this.#prefixBytes + end),
+    );
+    this.#timings.hashMs += performance.now() - started;
+    this.#hashed = end;
+  }
+
+  #allocate(): Uint8Array {
+    const frame = new Uint8Array(PACK_FRAME_BYTES);
+    if (this.#prefixBytes > 0) {
+      frame[PKT_LINE_LENGTH_BYTES] = DATA_BAND;
+    }
+    return frame;
+  }
+}
 
 /** Compress one object without ever assembling its encoded form in memory. */
 async function* deflate(bytes: Uint8Array): AsyncGenerator<Uint8Array> {
@@ -559,17 +687,10 @@ async function* packBytes(
   thin: boolean,
   source: UploadPackObjectSource,
   clientShallow: ReadonlySet<string>,
+  banded: boolean,
   timings: UploadPackTimings,
 ): AsyncGenerator<Uint8Array> {
-  const hash = new Sha1();
-  const emit = function* (bytes: Uint8Array): Generator<Uint8Array> {
-    const started = performance.now();
-    hash.update(bytes);
-    timings.hashMs += performance.now() - started;
-    timings.responseBytes += bytes.length;
-    yield bytes;
-  };
-
+  const frames = new PackFrameWriter(banded, timings);
   const planningStarted = performance.now();
   const order = await orderPack(oids, source, timings);
   const included = new Set(order.oids);
@@ -619,7 +740,7 @@ async function* packBytes(
   };
   fillReadAhead();
 
-  yield* emit(packHeader(order.oids.length));
+  frames.write(packHeader(order.oids.length));
 
   for (let index = 0; index < order.oids.length; index += 1) {
     const currentWindow = readWindows[readWindowAt];
@@ -669,16 +790,19 @@ async function* packBytes(
               bytes: storedDelta.bytes,
             }
           : null;
-    let header: Uint8Array;
+    let kind: number;
+    let size: number;
     let bytes: Uint8Array | null;
     let compressed: Uint8Array | null;
 
     if (plannedEntry?.kind === "delta") {
-      header = entryHeader(REF_DELTA, plannedEntry.size);
+      kind = REF_DELTA;
+      size = plannedEntry.size;
       bytes = null;
       compressed = plannedEntry.compressed;
     } else if (plannedEntry?.kind === "full") {
-      header = entryHeader(PACK_KINDS[plannedEntry.type], plannedEntry.size);
+      kind = PACK_KINDS[plannedEntry.type];
+      size = plannedEntry.size;
       bytes = null;
       compressed = plannedEntry.compressed;
     } else if (delta === null) {
@@ -686,7 +810,8 @@ async function* packBytes(
         source.readFullPackEntry === undefined ? undefined : () => source.readFullPackEntry!(oid),
       );
       if (cached !== null) {
-        header = entryHeader(PACK_KINDS[cached.type], cached.size);
+        kind = PACK_KINDS[cached.type];
+        size = cached.size;
         bytes = null;
         compressed = cached.compressed;
       } else {
@@ -694,28 +819,40 @@ async function* packBytes(
         if (object === null) {
           throw new UploadPackError(`Object ${oid} vanished while its pack was being written.`);
         }
-        header = entryHeader(PACK_KINDS[object.type], object.bytes.length);
+        kind = PACK_KINDS[object.type];
+        size = object.bytes.length;
         bytes = object.bytes;
         compressed = null;
       }
     } else {
-      header = entryHeader(REF_DELTA, delta.size);
+      kind = REF_DELTA;
+      size = delta.size;
       bytes = "bytes" in delta ? delta.bytes : null;
       compressed = delta.compressed;
     }
 
-    yield* emit(header);
+    frames.writeEntryHeader(kind, size);
     const deltaBaseOid = plannedEntry?.kind === "delta" ? plannedEntry.baseOid : delta?.baseOid;
     if (deltaBaseOid !== undefined) {
-      yield* emit(fromHex(deltaBaseOid));
+      frames.writeObjectId(deltaBaseOid);
     }
 
     if (compressed !== null) {
-      yield* emit(compressed);
+      for (let at = 0; at < compressed.length;) {
+        at = frames.write(compressed, at);
+        for (let frame = frames.takeFrame(); frame !== undefined; frame = frames.takeFrame()) {
+          yield frame;
+        }
+      }
     } else {
       const deflateStarted = performance.now();
       for await (const chunk of deflate(bytes!)) {
-        yield* emit(chunk);
+        for (let at = 0; at < chunk.length;) {
+          at = frames.write(chunk, at);
+          for (let frame = frames.takeFrame(); frame !== undefined; frame = frames.takeFrame()) {
+            yield frame;
+          }
+        }
       }
       timings.deflateMs += performance.now() - deflateStarted;
     }
@@ -723,11 +860,10 @@ async function* packBytes(
     emitted.add(oid);
   }
 
-  const digestStarted = performance.now();
-  const digest = hash.digest();
-  timings.hashMs += performance.now() - digestStarted;
-  timings.responseBytes += digest.length;
-  yield digest;
+  frames.finish();
+  for (let frame = frames.takeFrame(); frame !== undefined; frame = frames.takeFrame()) {
+    yield frame;
+  }
 }
 
 const streamFrom = (iterator: AsyncIterator<Uint8Array>): ReadableStream<Uint8Array> =>
@@ -744,43 +880,6 @@ const streamFrom = (iterator: AsyncIterator<Uint8Array>): ReadableStream<Uint8Ar
       await iterator.return?.();
     },
   });
-
-async function* sideband(
-  prefix: Uint8Array,
-  pack: AsyncIterable<Uint8Array>,
-): AsyncGenerator<Uint8Array> {
-  yield prefix;
-
-  const payloadBytes = PKT_LINE_MAX_PAYLOAD_BYTES - 1;
-  const pending = new Uint8Array(payloadBytes);
-  let pendingBytes = 0;
-  for await (const chunk of pack) {
-    let at = 0;
-    while (at < chunk.length) {
-      const copied = Math.min(payloadBytes - pendingBytes, chunk.length - at);
-      pending.set(chunk.subarray(at, at + copied), pendingBytes);
-      pendingBytes += copied;
-      at += copied;
-
-      if (pendingBytes === payloadBytes) {
-        const banded = new Uint8Array(PKT_LINE_MAX_PAYLOAD_BYTES);
-        banded[0] = DATA_BAND;
-        banded.set(pending, 1);
-        yield pktLine(banded);
-        pendingBytes = 0;
-      }
-    }
-  }
-
-  if (pendingBytes > 0) {
-    const banded = new Uint8Array(pendingBytes + 1);
-    banded[0] = DATA_BAND;
-    banded.set(pending.subarray(0, pendingBytes), 1);
-    yield pktLine(banded);
-  }
-
-  yield flushPkt();
-}
 
 interface DepthPlan {
   readonly shallow: ReadonlySet<string>;
@@ -943,23 +1042,20 @@ async function* uploadPackResult(
         : (await reachable([...commonHaves], source, false, new Set(), clientBoundaries)).held;
   const missing = wanted.objects.filter((oid) => !client.held.has(oid) && !heldCandidates.has(oid));
   timings.negotiationMs += performance.now() - negotiationStarted;
-  const prefix = pktLine(acknowledgement === undefined ? "NAK\n" : `ACK ${acknowledgement}\n`);
-  const pack = packBytes(
+  const banded = request.capabilities.includes(SIDE_BAND_64K);
+  yield pktLine(acknowledgement === undefined ? "NAK\n" : `ACK ${acknowledgement}\n`);
+  yield* packBytes(
     missing,
     new Set([...client.held, ...heldCandidates]),
     request.capabilities.includes(THIN_PACK),
     source,
     clientBoundaries,
+    banded,
     timings,
   );
-
-  if (request.capabilities.includes(SIDE_BAND_64K)) {
-    yield* sideband(prefix, pack);
-    return;
+  if (banded) {
+    yield flushPkt();
   }
-
-  yield prefix;
-  yield* pack;
 }
 
 /** The body is parsed only when the response is pulled, so neither side buffers it. */

@@ -21,7 +21,6 @@ export class BenchmarkRepository extends DurableObject {
       delete: (key: string) => {
         kv.delete(key);
       },
-      getMany: <T>(keys: readonly string[]) => ctx.storage.get<T>([...keys], { noCache: true }),
     });
     ctx.blockConcurrencyWhile(async () => {
       migrate(db, migrations);
