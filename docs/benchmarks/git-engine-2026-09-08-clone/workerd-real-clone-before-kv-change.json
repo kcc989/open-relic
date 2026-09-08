@@ -1,0 +1,44 @@
+{
+  "runtime": "workerd 2026-07-04",
+  "storage": "local disk SQLite Durable Objects",
+  "repository": "honojs/hono main @ e7b38ee, 23,235 objects",
+  "ingestMs": {
+    "a": 14651.2,
+    "b": 14345.9
+  },
+  "cloneMs": {
+    "a": 1059.7,
+    "b": 680.3
+  },
+  "samples": {
+    "a": [1044.4, 1133.9, 1169.1, 1059.7, 976.8, 1084.6, 1054.8],
+    "b": [687.6, 680.3, 752, 713.3, 648.7, 674.3, 660.9]
+  },
+  "phasesAtLastRun": {
+    "a": {
+      "totalMs": 1046,
+      "requestMs": 0,
+      "negotiationMs": 364,
+      "packPlanningMs": 145,
+      "storageReadMs": 440,
+      "deflateMs": 0,
+      "hashMs": 38,
+      "firstByteMs": 364,
+      "responseBytes": 9968527,
+      "objects": 23235
+    },
+    "b": {
+      "totalMs": 652,
+      "requestMs": 0,
+      "negotiationMs": 246,
+      "packPlanningMs": 152,
+      "storageReadMs": 568,
+      "deflateMs": 0,
+      "hashMs": 8,
+      "firstByteMs": 247,
+      "responseBytes": 9968527,
+      "objects": 23235
+    }
+  },
+  "roots": ["/home/user/open-relic-before", "/home/user/open-relic"]
+}

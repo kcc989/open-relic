@@ -1,0 +1,22 @@
+{
+  "root": "/home/user/open-relic",
+  "mode": "fresh-push-per-clone",
+  "clones": 7,
+  "medianMs": 1174.2,
+  "minMs": 1065.5,
+  "maxMs": 1324,
+  "samples": [1174.2, 1118.3, 1108.3, 1324, 1223.6, 1065.5, 1250.6],
+  "serverTimingsAtMedian": {
+    "totalMs": 481.57,
+    "requestMs": 0.57,
+    "negotiationMs": 202.64,
+    "packPlanningMs": 141.77,
+    "storageReadMs": 211.36,
+    "deflateMs": 0,
+    "hashMs": 7.14,
+    "firstByteMs": 204.32,
+    "responseBytes": 9968527,
+    "objects": 23235
+  },
+  "routeTimingsAtMedian": null
+}
