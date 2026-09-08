@@ -247,7 +247,45 @@ test("batches delta and reachability metadata below Cloudflare SQLite's bind lim
   queries = 0;
   expect((await objects.readPackMetadata(oids)).size).toBe(oids.length);
   expect(queries).toBe(1);
+  queries = 0;
   expect((await objects.readIndexedObjects(oids)).size).toBe(oids.length);
+  expect(queries).toBe(1);
+});
+
+test("reads a frontier's graph rows and their edges in one query", async () => {
+  const opened = createTestRepositoryStorage({ maxBoundValues: 100 });
+  openHandles.push(opened.close);
+  const objects = new ObjectStore(opened.db, opened.kv);
+  const leaves = Array.from({ length: 120 }, (_, at) => gitBlob(`leaf ${at}\n`));
+  const root = tree(leaves.map((leaf, at) => treeEntry(`file-${at}`, leaf)));
+  for (const object of [...leaves, root]) {
+    await objects.write({ ...object, delta: null });
+  }
+
+  const indexed = await objects.readIndexedObjects([root.oid, ...leaves.map(({ oid }) => oid)]);
+
+  expect(indexed.size).toBe(leaves.length + 1);
+  // A blob is indexed and reaches nothing; the tree reaches every one of them.
+  expect(indexed.get(leaves[0]!.oid)).toEqual({ type: "blob", links: [] });
+  expect(indexed.get(root.oid)?.type).toBe("tree");
+  // Edge order follows the stored rows, not the tree, so compare the set.
+  expect([...(indexed.get(root.oid)?.links ?? [])].map(({ oid }) => oid).sort()).toEqual(
+    leaves.map(({ oid }) => oid).sort(),
+  );
+});
+
+test("omits an object whose graph edges were never indexed", async () => {
+  const opened = storage();
+  const objects = new ObjectStore(opened.db, opened.kv);
+  const contents = gitBlob("unindexed contents\n");
+  const root = tree([treeEntry("README.md", contents)]);
+  await objects.write({ ...root, delta: null });
+  await opened.db
+    .update(objectRows)
+    .set({ linksIndexed: false })
+    .where(eq(objectRows.oid, root.oid));
+
+  expect((await objects.readIndexedObjects([root.oid])).size).toBe(0);
 });
 
 test("finds candidate Objects in a client's indexed closure without returning the closure", async () => {
