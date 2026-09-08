@@ -45,16 +45,56 @@ export class SweepError extends Error {
 }
 
 /**
+ * The statements the mark phase runs once per object and once per link. A
+ * sweep visits every object in the repository, so building them once is the
+ * difference between the walk costing a query and costing a query builder.
+ */
+const sweepStatements = (db: SyncSqliteDatabase) => ({
+  markLink: db
+    .insert(sweepReachable)
+    .values({
+      oid: sql.placeholder("oid"),
+      expectedType: sql.placeholder("expectedType"),
+      pending: true,
+    })
+    .onConflictDoUpdate({
+      target: sweepReachable.oid,
+      set: {
+        expectedType: sql`coalesce(${sweepReachable.expectedType}, excluded.expected_type)`,
+      },
+    })
+    .prepare(),
+  markWalked: db
+    .update(sweepReachable)
+    .set({ pending: false })
+    .where(eq(sweepReachable.oid, sql.placeholder("oid")))
+    .prepare(),
+  countReachable: db
+    .update(sweepState)
+    .set({ reachableObjects: sql`${sweepState.reachableObjects} + 1` })
+    .where(eq(sweepState.id, SWEEP_STATE_ID))
+    .prepare(),
+});
+
+type SweepStatements = ReturnType<typeof sweepStatements>;
+
+/**
  * A persisted mark-and-sweep over one repository. Each call advances at most
  * one batch, so an alarm can resume after eviction, retry, or a CPU boundary.
  */
 export class RepositorySweeper {
   readonly #db: SyncSqliteDatabase;
   readonly #objects: ObjectStore;
+  #statements: SweepStatements | null = null;
 
   constructor(db: SyncSqliteDatabase, objects: ObjectStore) {
     this.#db = db;
     this.#objects = objects;
+  }
+
+  get #sql(): SweepStatements {
+    this.#statements ??= sweepStatements(this.#db);
+    return this.#statements;
   }
 
   async step(batchSize: number = SWEEP_BATCH_SIZE): Promise<SweepProgress> {
@@ -220,31 +260,13 @@ export class RepositorySweeper {
   }
 
   async #finishMark(oid: string, links: ReturnType<typeof linksToReach>): Promise<void> {
-    await this.#db.transaction((tx) => {
-      if (links.length > 0) {
-        for (let at = 0; at < links.length; at += SWEEP_REACHABLE_INSERT_BATCH_SIZE) {
-          tx.insert(sweepReachable)
-            .values(
-              links.slice(at, at + SWEEP_REACHABLE_INSERT_BATCH_SIZE).map((link) => ({
-                oid: link.oid,
-                expectedType: link.type,
-                pending: true,
-              })),
-            )
-            .onConflictDoUpdate({
-              target: sweepReachable.oid,
-              set: {
-                expectedType: sql`coalesce(${sweepReachable.expectedType}, excluded.expected_type)`,
-              },
-            })
-            .run();
-        }
+    await this.#db.transaction(() => {
+      const statements = this.#sql;
+      for (const link of links) {
+        statements.markLink.run({ oid: link.oid, expectedType: link.type });
       }
-      tx.update(sweepReachable).set({ pending: false }).where(eq(sweepReachable.oid, oid)).run();
-      tx.update(sweepState)
-        .set({ reachableObjects: sql`${sweepState.reachableObjects} + 1` })
-        .where(eq(sweepState.id, SWEEP_STATE_ID))
-        .run();
+      statements.markWalked.run({ oid });
+      statements.countReachable.run();
     });
   }
 

@@ -9,7 +9,8 @@
 
 import { createHash, type Hash } from "node:crypto";
 
-const HEX = "0123456789abcdef";
+/** One entry per byte value, so hex formatting is a lookup rather than arithmetic. */
+const HEX_PAIRS = Array.from({ length: 256 }, (_, byte) => byte.toString(16).padStart(2, "0"));
 
 export class Sha1 {
   readonly #hash: Hash = createHash("sha1");
@@ -31,8 +32,17 @@ export class Sha1 {
     return new Uint8Array(this.#hash.digest());
   }
 
+  /**
+   * The name is what nearly every caller wants, and asking the hash for it
+   * directly skips a byte array we would only spell back out again. Object ids
+   * are formed once per Object in a Pack, so the two allocations count.
+   */
   hex(): string {
-    return toHex(this.digest());
+    if (this.#finished) {
+      throw new Error("SHA-1 was already digested.");
+    }
+    this.#finished = true;
+    return this.#hash.digest("hex");
   }
 }
 
@@ -41,7 +51,7 @@ export const sha1Hex = (bytes: Uint8Array): string => new Sha1().update(bytes).h
 export const toHex = (bytes: Uint8Array): string => {
   let hex = "";
   for (const byte of bytes) {
-    hex += HEX[byte >> 4]! + HEX[byte & 0x0f]!;
+    hex += HEX_PAIRS[byte]!;
   }
   return hex;
 };

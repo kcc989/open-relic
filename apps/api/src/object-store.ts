@@ -211,6 +211,91 @@ const selectCachedPackEntry = ({
 };
 
 /**
+ * The statements every object passes through, built once instead of once per
+ * object. Placeholders bind `1`/`0` rather than booleans, because the two
+ * drivers do not agree on what a boolean parameter is.
+ */
+const objectStatements = (db: SyncSqliteDatabase) => ({
+  insertObject: db
+    .insert(objects)
+    .values({
+      oid: sql.placeholder("oid"),
+      type: sql.placeholder("type"),
+      size: sql.placeholder("size"),
+      chunkCount: sql.placeholder("chunkCount"),
+      compressedSize: sql.placeholder("compressedSize"),
+      compressedChunkCount: sql.placeholder("compressedChunkCount"),
+      linksIndexed: sql.placeholder("linksIndexed"),
+      complete: false,
+    })
+    .onConflictDoNothing()
+    .returning({ oid: objects.oid })
+    .prepare(),
+  completeObject: db
+    .update(objects)
+    .set({ complete: true })
+    .where(and(eq(objects.oid, sql.placeholder("oid")), eq(objects.complete, false)))
+    .prepare(),
+  insertDelta: db
+    .insert(objectDeltas)
+    .values({
+      oid: sql.placeholder("oid"),
+      baseOid: sql.placeholder("baseOid"),
+      size: sql.placeholder("size"),
+      chunkCount: sql.placeholder("chunkCount"),
+      compressedSize: sql.placeholder("compressedSize"),
+      compressedChunkCount: sql.placeholder("compressedChunkCount"),
+    })
+    .prepare(),
+  insertLink: db
+    .insert(objectLinks)
+    .values({
+      sourceOid: sql.placeholder("sourceOid"),
+      targetOid: sql.placeholder("targetOid"),
+      targetType: sql.placeholder("targetType"),
+    })
+    .prepare(),
+  describeObject: db
+    .select({
+      oid: objects.oid,
+      type: objects.type,
+      size: objects.size,
+      chunkCount: objects.chunkCount,
+    })
+    .from(objects)
+    .where(and(eq(objects.oid, sql.placeholder("oid")), eq(objects.complete, true)))
+    .limit(1)
+    .prepare(),
+  storedObject: db
+    .select()
+    .from(objects)
+    .where(eq(objects.oid, sql.placeholder("oid")))
+    .limit(1)
+    .prepare(),
+  storedDelta: db
+    .select()
+    .from(objectDeltas)
+    .where(eq(objectDeltas.oid, sql.placeholder("oid")))
+    .limit(1)
+    .prepare(),
+  deleteObject: db
+    .delete(objects)
+    .where(eq(objects.oid, sql.placeholder("oid")))
+    .prepare(),
+  countReclaimed: db
+    .update(sweepState)
+    .set({
+      reclaimedObjects: sql`${sweepState.reclaimedObjects} + 1`,
+      reclaimedChunks: sql`${sweepState.reclaimedChunks} + ${sql.placeholder("chunks")}`,
+      reclaimedBytes: sql`${sweepState.reclaimedBytes} + ${sql.placeholder("bytes")}`,
+    })
+    .where(eq(sweepState.id, SWEEP_STATE_ID))
+    .prepare(),
+});
+
+type ObjectStatements = ReturnType<typeof objectStatements>;
+
+/**
  * Git objects as chunked rows in the repository's own Durable Object: metadata
  * in SQL, inflated bytes under `o:<oid>:<n>`, reusable compression under
  * `z:<oid>:<n>`, and an optional Delta under `d:`/`zd:`. See
@@ -223,10 +308,22 @@ const selectCachedPackEntry = ({
 export class ObjectStore implements PackSink {
   readonly #db: SyncSqliteDatabase;
   readonly #kv: SyncKv;
+  #statements: ObjectStatements | null = null;
 
   constructor(db: SyncSqliteDatabase, kv: SyncKv) {
     this.#db = db;
     this.#kv = kv;
+  }
+
+  /**
+   * Building a query costs an order of magnitude more than running one, and
+   * ingest runs the same handful of statements once per object. The store
+   * outlives a request — it is constructed with the Durable Object — so the
+   * built form is worth keeping.
+   */
+  get #sql(): ObjectStatements {
+    this.#statements ??= objectStatements(this.#db);
+    return this.#statements;
   }
 
   /**
@@ -311,25 +408,20 @@ export class ObjectStore implements PackSink {
       try {
         const commitStarted = performance.now();
         try {
-          await this.#db.transaction((tx) => {
+          await this.#db.transaction(() => {
+            const statements = this.#sql;
             for (const write of prepared) {
               const { object } = write;
-              const inserted = tx
-                .insert(objects)
-                .values({
-                  oid: object.oid,
-                  type: object.type,
-                  size: object.bytes.length,
-                  chunkCount: write.objectChunks,
-                  compressedSize: write.fullCompressed?.length ?? null,
-                  compressedChunkCount:
-                    write.fullCompressed === null ? null : write.compressedObjectChunks,
-                  linksIndexed: write.linksIndexed,
-                  complete: false,
-                })
-                .onConflictDoNothing()
-                .returning({ oid: objects.oid })
-                .all();
+              const inserted = statements.insertObject.all({
+                oid: object.oid,
+                type: object.type,
+                size: object.bytes.length,
+                chunkCount: write.objectChunks,
+                compressedSize: write.fullCompressed?.length ?? null,
+                compressedChunkCount:
+                  write.fullCompressed === null ? null : write.compressedObjectChunks,
+                linksIndexed: write.linksIndexed ? 1 : 0,
+              });
 
               if (inserted.length === 0) {
                 continue;
@@ -350,17 +442,15 @@ export class ObjectStore implements PackSink {
               }
 
               if (object.delta !== null) {
-                tx.insert(objectDeltas)
-                  .values({
-                    oid: object.oid,
-                    baseOid: object.delta.baseOid,
-                    size: object.delta.bytes.length,
-                    chunkCount: write.deltaChunks,
-                    compressedSize: write.deltaCompressed?.length ?? null,
-                    compressedChunkCount:
-                      write.deltaCompressed === null ? null : write.compressedDeltaChunks,
-                  })
-                  .run();
+                statements.insertDelta.run({
+                  oid: object.oid,
+                  baseOid: object.delta.baseOid,
+                  size: object.delta.bytes.length,
+                  chunkCount: write.deltaChunks,
+                  compressedSize: write.deltaCompressed?.length ?? null,
+                  compressedChunkCount:
+                    write.deltaCompressed === null ? null : write.compressedDeltaChunks,
+                });
 
                 this.#writeChunks(DELTA_PREFIX, object.oid, object.delta.bytes);
                 if (write.deltaCompressed !== null) {
@@ -368,22 +458,15 @@ export class ObjectStore implements PackSink {
                 }
               }
 
-              for (let at = 0; at < write.links.length; at += OBJECT_LINK_INSERT_BATCH_SIZE) {
-                tx.insert(objectLinks)
-                  .values(
-                    write.links.slice(at, at + OBJECT_LINK_INSERT_BATCH_SIZE).map((link) => ({
-                      sourceOid: object.oid,
-                      targetOid: link.oid,
-                      targetType: link.type,
-                    })),
-                  )
-                  .run();
+              for (const link of write.links) {
+                statements.insertLink.run({
+                  sourceOid: object.oid,
+                  targetOid: link.oid,
+                  targetType: link.type,
+                });
               }
 
-              tx.update(objects)
-                .set({ complete: true })
-                .where(and(eq(objects.oid, object.oid), eq(objects.complete, false)))
-                .run();
+              statements.completeObject.run({ oid: object.oid });
             }
           });
         } finally {
@@ -518,16 +601,7 @@ export class ObjectStore implements PackSink {
   }
 
   async describe(oid: string): Promise<ObjectDescription | null> {
-    const rows = await this.#db
-      .select({
-        oid: objects.oid,
-        type: objects.type,
-        size: objects.size,
-        chunkCount: objects.chunkCount,
-      })
-      .from(objects)
-      .where(and(eq(objects.oid, oid), eq(objects.complete, true)))
-      .limit(1);
+    const rows = await this.#sql.describeObject.all({ oid });
 
     return rows[0] ?? null;
   }
@@ -825,11 +899,7 @@ export class ObjectStore implements PackSink {
       return null;
     }
 
-    const rows = await this.#db
-      .select()
-      .from(objectDeltas)
-      .where(eq(objectDeltas.oid, oid))
-      .limit(1);
+    const rows = await this.#sql.storedDelta.all({ oid });
 
     const row = rows[0];
     if (row === undefined) {
@@ -884,11 +954,7 @@ export class ObjectStore implements PackSink {
     if ((await this.ensureDeltaPackEntry(oid)) === null) {
       return null;
     }
-    const [row] = await this.#db
-      .select()
-      .from(objectDeltas)
-      .where(eq(objectDeltas.oid, oid))
-      .limit(1);
+    const [row] = await this.#sql.storedDelta.all({ oid });
     if (row === undefined || row.compressedSize === null || row.compressedChunkCount === null) {
       throw new ObjectStoreError(`Delta ${oid} lost its compressed Pack entry.`);
     }
@@ -909,17 +975,13 @@ export class ObjectStore implements PackSink {
     if (!(await this.has(oid))) {
       return null;
     }
-    let [row] = await this.#db
-      .select()
-      .from(objectDeltas)
-      .where(eq(objectDeltas.oid, oid))
-      .limit(1);
+    let [row] = await this.#sql.storedDelta.all({ oid });
     if (row === undefined) {
       return null;
     }
     if (row.compressedSize === null || row.compressedChunkCount === null) {
       await this.#cacheDeltaCompression(row);
-      [row] = await this.#db.select().from(objectDeltas).where(eq(objectDeltas.oid, oid)).limit(1);
+      [row] = await this.#sql.storedDelta.all({ oid });
       if (row === undefined || row.compressedSize === null || row.compressedChunkCount === null) {
         throw new ObjectStoreError(`Delta ${oid} could not publish its compressed Pack entry.`);
       }
@@ -927,43 +989,44 @@ export class ObjectStore implements PackSink {
     return row.compressedSize;
   }
 
-  /** Resolve already-parsed graph rows for a frontier in bounded SQL batches. */
+  /**
+   * Resolve already-parsed graph rows for a frontier in one query. The frontier
+   * travels as JSON rather than as an `IN` list, so its length is not bounded
+   * by how many values a statement may bind, and the statement is reusable.
+   */
   async readIndexedObjects(oids: readonly string[]): Promise<ReadonlyMap<string, IndexedObject>> {
-    const indexed = new Map<string, IndexedObject>();
-    for (let at = 0; at < oids.length; at += OBJECT_METADATA_BATCH_SIZE) {
-      const batch = oids.slice(at, at + OBJECT_METADATA_BATCH_SIZE);
-      if (batch.length === 0) {
-        continue;
+    const indexed = new Map<string, { type: ObjectRow["type"]; links: ObjectLink[] }>();
+    if (oids.length === 0) {
+      return indexed;
+    }
+    const rows = await this.#db.all<{
+      readonly oid: string;
+      readonly type: ObjectRow["type"];
+      readonly targetOid: string | null;
+      readonly targetType: ObjectRow["type"] | null;
+    }>(sql`
+      with requested(oid) as (
+        select value from json_each(${JSON.stringify(oids)})
+      )
+      select
+        ${objects.oid} as oid,
+        ${objects.type} as type,
+        ${objectLinks.targetOid} as targetOid,
+        ${objectLinks.targetType} as targetType
+      from requested
+      join ${objects}
+        on ${objects.oid} = requested.oid
+       and ${objects.complete} = true
+       and ${objects.linksIndexed} = true
+      left join ${objectLinks} on ${objectLinks.sourceOid} = ${objects.oid}
+    `);
+
+    for (const row of rows) {
+      const object = indexed.get(row.oid) ?? { type: row.type, links: [] };
+      if (row.targetOid !== null && row.targetType !== null) {
+        object.links.push({ oid: row.targetOid, type: row.targetType });
       }
-      const rows = await this.#db
-        .select({ oid: objects.oid, type: objects.type })
-        .from(objects)
-        .where(
-          and(
-            inArray(objects.oid, batch),
-            eq(objects.complete, true),
-            eq(objects.linksIndexed, true),
-          ),
-        );
-      for (const row of rows) {
-        indexed.set(row.oid, { type: row.type, links: [] });
-      }
-      const linked = await this.#db
-        .select()
-        .from(objectLinks)
-        .where(inArray(objectLinks.sourceOid, batch));
-      const grouped = new Map<string, ObjectLink[]>();
-      for (const row of linked) {
-        const links = grouped.get(row.sourceOid) ?? [];
-        links.push({ oid: row.targetOid, type: row.targetType });
-        grouped.set(row.sourceOid, links);
-      }
-      for (const [oid, links] of grouped) {
-        const object = indexed.get(oid);
-        if (object !== undefined) {
-          indexed.set(oid, { ...object, links });
-        }
-      }
+      indexed.set(row.oid, object);
     }
     return indexed;
   }
@@ -1011,11 +1074,7 @@ export class ObjectStore implements PackSink {
 
   /** Install a selected Delta only while the object still has no retained representation. */
   async installDelta(oid: string, delta: PackDelta, compressed?: Uint8Array): Promise<void> {
-    const [row] = await this.#db
-      .select()
-      .from(objectDeltas)
-      .where(eq(objectDeltas.oid, oid))
-      .limit(1);
+    const [row] = await this.#sql.storedDelta.all({ oid });
     if (row !== undefined) {
       return;
     }
@@ -1049,16 +1108,12 @@ export class ObjectStore implements PackSink {
    * `null` makes retries idempotent when a previous sweep already reclaimed it.
    */
   async reclaim(oid: string): Promise<ReclaimedObject | null> {
-    const [object] = await this.#db.select().from(objects).where(eq(objects.oid, oid)).limit(1);
+    const [object] = await this.#sql.storedObject.all({ oid });
     if (object === undefined) {
       return null;
     }
 
-    const [delta] = await this.#db
-      .select()
-      .from(objectDeltas)
-      .where(eq(objectDeltas.oid, oid))
-      .limit(1);
+    const [delta] = await this.#sql.storedDelta.all({ oid });
     const compressedObjectChunks = object.compressedChunkCount ?? 0;
     const compressedDeltaChunks = delta?.compressedChunkCount ?? 0;
     const reclaimedChunks =
@@ -1069,7 +1124,7 @@ export class ObjectStore implements PackSink {
       (delta?.size ?? 0) +
       (delta?.compressedSize ?? 0);
 
-    await this.#db.transaction((tx) => {
+    await this.#db.transaction(() => {
       this.#deleteChunks(OBJECT_PREFIX, oid, object.chunkCount);
       this.#deleteChunks(COMPRESSED_OBJECT_PREFIX, oid, compressedObjectChunks);
       if (delta !== undefined) {
@@ -1077,15 +1132,8 @@ export class ObjectStore implements PackSink {
         this.#deleteChunks(COMPRESSED_DELTA_PREFIX, oid, compressedDeltaChunks);
       }
 
-      tx.delete(objects).where(eq(objects.oid, oid)).run();
-      tx.update(sweepState)
-        .set({
-          reclaimedObjects: sql`${sweepState.reclaimedObjects} + 1`,
-          reclaimedChunks: sql`${sweepState.reclaimedChunks} + ${reclaimedChunks}`,
-          reclaimedBytes: sql`${sweepState.reclaimedBytes} + ${reclaimedBytes}`,
-        })
-        .where(eq(sweepState.id, SWEEP_STATE_ID))
-        .run();
+      this.#sql.deleteObject.run({ oid });
+      this.#sql.countReclaimed.run({ chunks: reclaimedChunks, bytes: reclaimedBytes });
     });
 
     return {
@@ -1167,16 +1215,12 @@ export class ObjectStore implements PackSink {
   }
 
   async #stored(oid: string): Promise<ObjectRow | null> {
-    const [row] = await this.#db.select().from(objects).where(eq(objects.oid, oid)).limit(1);
+    const [row] = await this.#sql.storedObject.all({ oid });
     return row ?? null;
   }
 
   async #discardIncomplete(object: ObjectRow): Promise<void> {
-    const [delta] = await this.#db
-      .select()
-      .from(objectDeltas)
-      .where(eq(objectDeltas.oid, object.oid))
-      .limit(1);
+    const [delta] = await this.#sql.storedDelta.all({ oid: object.oid });
 
     await this.#discardWrite(
       object.oid,
