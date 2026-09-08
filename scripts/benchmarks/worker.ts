@@ -5,6 +5,7 @@ import { migrate } from "drizzle-orm/durable-sqlite/migrator";
 
 import migrations from "../../apps/api/drizzle/repository/migrations.js";
 import { ObjectStore } from "../../apps/api/src/object-store.ts";
+import { PktLineReader } from "../../apps/api/src/git/pkt-line.ts";
 import { readPack } from "../../apps/api/src/pack.ts";
 import { findMissingObject } from "../../apps/api/src/connectivity.ts";
 import { uploadPackResultStream } from "../../apps/api/src/git/upload-pack.ts";
@@ -29,12 +30,17 @@ export class BenchmarkRepository extends DurableObject {
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const tip = url.searchParams.get("tip") ?? "";
+    // The pack is read the way a push reads it: through the pkt-line reader's
+    // rest(), which chooses the body's read size, rather than the raw body.
     if (url.pathname === "/ingest") {
-      return Response.json(await readPack(request.body!, this.#objects));
+      return Response.json(await readPack(new PktLineReader(request.body!).rest(), this.#objects));
     }
     if (url.pathname === "/parse") {
       return Response.json(
-        await readPack(request.body!, { read: async () => null, write: async () => {} }),
+        await readPack(new PktLineReader(request.body!).rest(), {
+          read: async () => null,
+          write: async () => {},
+        }),
       );
     }
     if (url.pathname === "/fetch") {
